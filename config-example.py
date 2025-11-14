@@ -1,5 +1,7 @@
 import os
 
+ALERT_EMAIL = "ALERT@EMAIL"
+
 # --- Caminhos Base ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "memory.db")
@@ -31,6 +33,9 @@ SEARXNG_URL = "http://127.0.0.1:8081" # A tua porta do SearxNG
 
 # --- Prompts de IA ---
 WHISPER_INITIAL_PROMPT = "Português de Portugal. Bumblebee. Como estás? Que horas são? Meteorologia. Quanto é? Toca música. Põe música. Memoriza isto. 1050 a dividir por 30."
+
+# Skills
+GEMINI_API_KEY = "GEMINI_API_KEY"
 
 SYSTEM_PROMPT = """**CRITICAL RULE #1: You MUST respond *only* in Portuguese (português de Portugal). Your entire answer must be in Portuguese.**
 
