@@ -36,6 +36,7 @@ WHISPER_INITIAL_PROMPT = "Português de Portugal. Bumblebee. Como estás? Que ho
 
 # Skills
 GEMINI_API_KEY = "GEMINI_API_KEY"
+SHELLY_GAS_URL = "http://ip-address/status"
 
 SYSTEM_PROMPT = """**CRITICAL RULE #1: You MUST respond *only* in Portuguese (português de Portugal). Your entire answer must be in Portuguese.**
 
