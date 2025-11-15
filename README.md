@@ -84,7 +84,7 @@ source venv/bin/activate
 
 #### Instala tudo no venv 3.11.9
 pip install --upgrade pip
-pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine dio-chacon-wifi-api tinytuya psutil
+pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine dio-chacon-wifi-api tinytuya psutil python-miio
 
 ## Configuração
 
