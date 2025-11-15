@@ -41,10 +41,8 @@ Ele usa `pvporcupine` para a deteção da *hotword* ("Bumblebee"), `whisper` par
 ### 1. Pré-requisitos (Sistema)
 
 Assume-se um servidor Ubuntu/Debian. Estes pacotes são necessários para o áudio e para o `pvporcupine`.
-```bash
 sudo apt update
 sudo apt install sox mpg123 portaudio19-dev
-```
 
 ### 2. Serviços Externos (Ollama e SearxNG)
 
@@ -57,25 +55,18 @@ Este guia assume que já tens:
 Precisas de dizer ao Ollama para usar os 8K de contexto do Llama3.
 
 Cria um ficheiro chamado `Modelfile_Llama3_8k`:
-```bash
 vim Modelfile_Llama3_8k
-```
 Cola o seguinte:
-```Modelfile
 FROM llama3:8b-instruct-q5_k_m
 PARAMETER num_ctx 8192
-```
 
 Agora, cria o modelo no Ollama:
-```bash
 ollama create llama3:8b-instruct-8k -f Modelfile_Llama3_8k
-```
 
 ### 4. Ambiente Python (Venv)
 
 É **altamente recomendado** recriar o `venv` para garantir que não tens bibliotecas antigas (como o Pocketsphinx).
 
-```bash
 # Navega para a pasta do projeto
 cd /root/scripts/phantasma
 
@@ -93,9 +84,6 @@ pip install --upgrade pip
 
 # Instala todas as dependências necessárias
 pip install sounddevice openai-whisper ollama torch httpx flask pvporcupine
-```
-
----
 
 ## Configuração
 
@@ -113,12 +101,9 @@ Este é o ficheiro de controlo principal. Edita-o (`vim config.py`) para ajustar
 
 Cria o ficheiro de serviço para o assistente correr em *background*.
 
-```bash
 vim /etc/systemd/system/phantasma.service
-```
 Cola o seguinte conteúdo (já inclui as correções de `PATH` e prioridade `Nice`):
 
-```ini
 [Unit]
 Description=Bumblebee Voice Assistant
 After=network-online.target sound.target
@@ -145,7 +130,6 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-```
 
 ---
 
@@ -154,19 +138,13 @@ WantedBy=multi-user.target
 Após criares todos os ficheiros (`.py`, `config.py`, `.service`):
 
 **1. Recarrega o systemd:**
-```bash
 systemctl daemon-reload
-```
 
 **2. Ativa e Inicia o Serviço:**
-```bash
 systemctl enable --now phantasma.service
-```
 
 **3. Vê os Logs (para debug):**
-```bash
 journalctl -u phantasma -f
-```
 
 ---
 
@@ -183,24 +161,16 @@ journalctl -u phantasma -f
 Usa o *script* `phantasma-cli.sh` para enviar comandos pela API:
 
 **Ajuda (Dinâmica):**
-```bash
 ./phantasma-cli.sh -h
-```
 
 **Comando "diz":**
-```bash
 ./phantasma-cli.sh diz olá, isto é um teste
-```
 
 **Comando para o Ollama (com RAG):**
-```bash
 ./phantasma-cli.sh quem é o primeiro-ministro de portugal
-```
 
 **Comando para Skills (Ex: Tocar Música):**
-```bash
 ./phantasma-cli.sh põe uma música
-```
 
 ### 3. Adicionar Novas Skills
 
@@ -229,7 +199,6 @@ Esta *skill* permite o controlo local de dispositivos Tuya/SmartLife (tomadas, e
 
 É necessário instalar a biblioteca Python para controlo local. Use o terminal (ou abra o ficheiro com o seu editor de eleição, como **Vim**, para inspecionar):
 
-```bash
 pip install tinytuya
 
 ### B. Obter Chaves (Device ID e Local Key)
@@ -251,7 +220,6 @@ Defina os seus dispositivos no dicionário `TUYA_DEVICES` em `config.py`. O Phan
 
 **Exemplo Completo do `config.py`:**
 
-```python
 # config.py
 
 TUYA_DEVICES = {
@@ -284,7 +252,6 @@ Esta *skill* integra dispositivos Mi Home (aspiradores, Yeelight, etc.) através
 
 Instale a biblioteca de código aberto `python-miio` para a integração:
 
-```bash
 pip install python-miio
 ### B. Obter Token
 
@@ -298,7 +265,6 @@ Defina os seus dispositivos no dicionário `MIIO_DEVICES` em `config.py`.
 
 **Exemplo Completo do `config.py`:**
 
-```python
 # config.py
 
 MIIO_DEVICES = {
@@ -324,7 +290,6 @@ Recomenda-se a utilização de um ambiente virtual Python (venv) para isolar as 
 
 1. **Ativar o Ambiente Virtual:**
 
-```bash
 source venv/bin/activate
 
 ### B. Comandos de Controlo de Dispositivos (Interação Direta)
