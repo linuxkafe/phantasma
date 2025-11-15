@@ -68,7 +68,7 @@ ollama create llama3:8b-instruct-8k -f Modelfile_Llama3_8k
 É **altamente recomendado** recriar o `venv` para garantir que não tens bibliotecas antigas (como o Pocketsphinx).
 
 # Navega para a pasta do projeto
-cd /root/scripts/phantasma
+cd /opt/phantasma
 
 # Apaga o venv antigo (se existir)
 rm -rf venv
@@ -105,25 +105,25 @@ vim /etc/systemd/system/phantasma.service
 Cola o seguinte conteúdo (já inclui as correções de `PATH` e prioridade `Nice`):
 
 [Unit]
-Description=Bumblebee Voice Assistant
+Description=pHantasma Voice Assistant
 After=network-online.target sound.target
 
 [Service]
 Type=simple
 User=user
 Group=group
-WorkingDirectory=/root/scripts/phantasma
+WorkingDirectory=/opt/phantasma
 
 # Define o HOME e o PATH (para pyenv, piper, sox, mpg123)
-Environment="HOME=/root"
-Environment="PATH=/root/.pyenv/shims:/usr/local/bin:/usr/bin:/sbin:/bin"
+Environment="HOME=/opt/phantasma"
+Environment="PATH=/opt/phantasma/.pyenv/shims:/usr/local/bin:/usr/bin:/sbin:/bin"
 
 # Define a prioridade do CPU e Disco como a mais baixa
 Nice=19
 IOSchedulingClass=idle
 
 # Executa o python de dentro da venv
-ExecStart=/root/scripts/phantasma/venv/bin/python -u /root/scripts/phantasma/assistant.py
+ExecStart=/opt/phantasma/venv/bin/python -u /opt/phantasma/assistant.py
 
 Restart=on-failure
 RestartSec=5
@@ -176,7 +176,7 @@ Usa o *script* `phantasma-cli.sh` para enviar comandos pela API:
 
 Para adicionar uma nova funcionalidade (ex: "abrir o portão"):
 
-1.  Cria um novo ficheiro em `/root/scripts/phantasma/skills/` (ex: `skill_portao.py`).
+1.  Cria um novo ficheiro em `/opt/phantasma/skills/` (ex: `skill_portao.py`).
 2.  Define os `TRIGGERS` (ex: `["abre o portão", "abrir portão"]`) e o `TRIGGER_TYPE` ("startswith" ou "contains").
 3.  Cria a função `handle(user_prompt_lower, user_prompt_full)` que executa a lógica.
 4.  Reinicia o serviço (`systemctl restart phantasma`). O assistente irá carregar a nova *skill* automaticamente.
