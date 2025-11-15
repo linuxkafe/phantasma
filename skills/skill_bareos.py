@@ -10,7 +10,7 @@ TRIGGERS = ["backups", "bareos"]
 # --- Constantes da Skill ---
 # RECIPIENT_EMAIL = "mail@linuxkafe.com" # <-- 2. REMOVIDO
 # O comando a executar, como pediste
-BAREOS_COMMAND = 'echo "status director" | bconsole'
+BAREOS_COMMAND = 'echo "status director" | sudo bconsole'
 
 def send_email_alert(error_output):
     """
@@ -27,7 +27,7 @@ def send_email_alert(error_output):
         subject = "Alerta de Falha - Backups Bareos (Phantasma)"
         body = (
             "O assistente Phantasma detectou uma falha nos backups.\n\n"
-            "O seyon pediu uma verificação e o output não foi o esperado.\n\n"
+            "Foi pedida uma verificação e o output não foi o esperado.\n\n"
             "--- Output do bconsole ---\n"
             f"{error_output}\n"
             "---------------------------\n"
@@ -63,7 +63,7 @@ def handle(user_prompt_lower, user_prompt_full):
     # 1.5. VERIFICAÇÃO DE SEGURANÇA (ADICIONADA)
     if not config.ALERT_EMAIL:
          print("ERRO (skill_bareos): ALERT_EMAIL não está definido em config.py.")
-         return "Chefe, o seyon precisa de definir o ALERT_EMAIL no ficheiro config.py antes que eu possa usar esta skill."
+         return "É precisa de definir o ALERT_EMAIL no ficheiro config.py antes que eu possa usar esta skill."
          
     print("A verificar o estado dos backups (Bareos)...")
     
@@ -91,7 +91,7 @@ def handle(user_prompt_lower, user_prompt_full):
         # Usamos regex para procurar "No" como uma palavra inteira, case-insensitive
         if re.search(r'\bno\b', output, re.IGNORECASE):
             print(f"Bareos: Output OK. Output: {output}")
-            return "Parece que está tudo ok, seyon."
+            return "Parece que está tudo ok com os backups."
         
         # Caso 3: Falha (contém output, mas não contém "No")
         print(f"Bareos: FALHA. Output: {output}")
