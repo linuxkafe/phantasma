@@ -1,12 +1,12 @@
 # Phantasma Voice Assistant
 
-Phantasma (ou bumblebee até conseguir uma hotword funcional) é um assistente de voz local-first (offline) e modular, construído em Python. Ele foi desenhado para ser privado, correndo inteiramente no teu próprio servidor, sem depender de serviços de nuvem de terceiros (exceto para pesquisas na web, que são feitas através da tua própria instância do SearxNG).
+Phantasma é um assistente de voz local-first (offline) e modular, construído em Python. Ele foi desenhado para ser privado, correndo inteiramente no teu próprio servidor, sem depender de serviços de nuvem de terceiros (exceto para pesquisas na web, que são feitas através da tua própria instância do SearxNG).
 
-Ele usa `pvporcupine` para a deteção da *hotword* ("Bumblebee"), `whisper` para transcrição, `ollama` (Llama3) como cérebro, e `piper`/`sox` para uma voz robótica personalizada (inspirada no Bumblebee dos Transformers).
+Ele usa `pvporcupine` para a deteção da *hotword* ("olá fantasma"), `whisper` para transcrição, `ollama` (Llama3) como cérebro, e `piper`/`sox` para uma voz robótica personalizada.
 
 ## Funcionalidades
 
-* **Hotword 100% Offline:** Usa o `pvporcupine` para uma deteção de *hotword* ("Bumblebee") fiável e sem falsos positivos.
+* **Hotword 100% Offline:** Usa o `pvporcupine` para uma deteção de *hotword* ("olá fantasma") fiável e sem falsos positivos.
 * **Transcrição Local:** Utiliza o `whisper` (modelo `medium`) para transcrição de voz para texto.
 * **Cérebro Local (LLM):** Integrado com o `ollama` para usar o modelo `llama3:8b-instruct-8k`.
 * **Voz Robótica (TTS):** Usa o `piper` com efeitos do `sox` para criar a voz do assistente.
@@ -310,7 +310,7 @@ Este *core* (e a sua arquitetura *skill*) é o motor que traduz o comando de uti
 * **Controlo Não Funciona:** Verifique se as dependências (`tinytuya`, `python-miio`) estão instaladas no ambiente virtual ativo e se o `phantasma_core.py` está a ser executado.
 
 ### Notas finais:
-Este bot originalmente era (e ainda é) previsto ter o nome phantasma, mas ainda não foi possível com os testes executados uma hotword funcional, nem sequer usar o sistema para hotwords originalmente previsto que não tinha o requisito de necessitar de uma licença como com o openwakeword, mas era ter falso-positivos com a palavra OH, ou ter o modelo completamente surdo com qualquer outra palavra, acabei por acatar e seguir com o pvporcupine, que irá necessitar da ativação de uma chave (gratuito para um dispositivo).
+Estava previsto usar o sistema para hotwords que não tinha o requisito de necessitar de uma licença como com o openwakeword, mas era ter falso-positivos com a palavra OH, ou ter o modelo completamente surdo com qualquer outra palavra, acabei por acatar e seguir com o pvporcupine, que irá necessitar da ativação de uma chave (gratuito para um dispositivo).
 O código deste modelo e até idealização do projeto, e até mesmo este readme é fortemente gerado pelo Google Gemini.
 Como equipamento, estou a usar um HP Mini G4, com 16GB de RAM e um Jabra SPEAK 410 como dispositivo de audio.
 
