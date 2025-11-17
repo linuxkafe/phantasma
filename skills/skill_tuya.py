@@ -82,7 +82,6 @@ def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
 
 
 # --- Lógica Principal (Router) ---
-
 def handle(user_prompt_lower, user_prompt_full):
     if "tinytuya" not in globals():
         return "A skill Tuya está instalada, mas falta a biblioteca 'tinytuya'."
@@ -102,20 +101,36 @@ def handle(user_prompt_lower, user_prompt_full):
     
     if not final_action: return None
 
+    # --- LÓGICA DE MATCHING CORRIGIDA (O Mais Específico Ganha) ---
     matched_devices = []
+    
+    # Pass 1: Direct matches (nickname é substring do prompt)
+    direct_matches = []
     for nickname, details in config.TUYA_DEVICES.items():
         if nickname in user_prompt_lower:
-            matched_devices.append((nickname, details))
-            
-    if not matched_devices:
+            direct_matches.append((nickname, details))
+
+    if direct_matches:
+        # Se encontrou matches directos, ordena por tamanho (descendente)
+        direct_matches.sort(key=lambda x: len(x[0]), reverse=True)
+        
+        # Escolhe APENAS o mais longo (ex: "luz da sala" em vez de "sala")
+        best_match = direct_matches[0]
+        matched_devices = [best_match]
+        print(f"Skill_Tuya: Match directo e específico encontrado: {best_match[0]}")
+
+    else:
+        # Pass 2: Noun-based matches (só corre se NENHUM directo for encontrado)
         nouns_in_prompt = [noun for noun in BASE_NOUNS if noun in user_prompt_lower]
         if nouns_in_prompt:
+            print(f"Skill_Tuya: Match directo falhou. A procurar por nouns: {nouns_in_prompt}")
             for nickname, details in config.TUYA_DEVICES.items():
                 if any(noun in nickname for noun in nouns_in_prompt):
                     matched_devices.append((nickname, details))
+    # --- FIM DA LÓGICA DE MATCHING ---
 
-    if len(matched_devices) == 0: return None 
-
+    if len(matched_devices) == 0: 
+        return None 
     
     if final_action == "DEBUG":
         if len(matched_devices) != 1:
@@ -127,6 +142,18 @@ def handle(user_prompt_lower, user_prompt_full):
         success_nicknames, failed_reports = [], []
         
         for nickname, details in matched_devices:
+            
+            # (Manter a verificação de sensor)
+            if "sensor" in nickname.lower():
+                print(f"Skill_Tuya: A ignorar '{nickname}' para ação ON/OFF (é um sensor).")
+                continue 
+
+            # (Manter a verificação de IP inválido)
+            dev_ip = details.get('ip')
+            if not dev_ip or 'x' in dev_ip.lower():
+                print(f"Skill_Tuya: A ignorar '{nickname}' para ação ON/OFF (IP inválido: {dev_ip}).")
+                continue
+            
             dps_index = 20 if "luz" in nickname or "lâmpada" in nickname else 1
             try:
                 _handle_switch(nickname, details, final_action, dps_index)
@@ -135,6 +162,10 @@ def handle(user_prompt_lower, user_prompt_full):
                 failed_reports.append(f"{nickname} ({e})") 
         
         action_word = "a ligar" if final_action == "ON" else "a desligar"
+        
+        if not success_nicknames and not failed_reports:
+            return None 
+
         if not failed_reports:
             return f"{', '.join(success_nicknames).capitalize()} {action_word}."
         elif not success_nicknames:
