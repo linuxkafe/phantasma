@@ -39,14 +39,24 @@ def load_skills():
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            # Regista a skill
-            SKILLS_LIST.append({
+            # Prepara o registo da skill
+            skill_registry_entry = {
                 "name": skill_name,
                 "trigger_type": module.TRIGGER_TYPE,
                 "triggers": module.TRIGGERS,
                 "handle": module.handle
-                })
+            }
+            
+            # --- MODIFICAÇÃO: Verifica se a skill tem a função de status ---
+            if hasattr(module, 'get_status_for_device'):
+                print(f"  -> '{skill_name}' tem a função 'get_status_for_device'.")
+                skill_registry_entry['get_status'] = module.get_status_for_device
+            # ---------------------------------------------------------------
+            
+            # Regista a skill
+            SKILLS_LIST.append(skill_registry_entry)
             print(f"  -> Skill '{skill_name}' carregada.")
+            
         except Exception as e:
             print(f"AVISO: Falha ao carregar a skill {f}: {e}")
 # -----------------------------------
@@ -255,7 +265,6 @@ def process_user_query():
 # --- Bloco do Servidor API (Flask) ---
 app = Flask(__name__)
 @app.route("/comando", methods=['POST'])
-@app.route("/comando", methods=['POST'])
 def handle_command():
     """ Endpoint da API para receber comandos por texto. """
     try:
@@ -313,7 +322,7 @@ def get_help():
 def get_frontend_ui():
     """ Serve a página HTML principal do frontend """
 
-    # Todo o HTML e JS estão aqui. Não precisamos de ficheiros separados.
+    # Todo o HTML e JS estão aqui.
     html_content = """
     <!DOCTYPE html>
     <html lang="pt">
@@ -322,32 +331,63 @@ def get_frontend_ui():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Phantasma UI</title>
         <style>
-            body { font-family: sans-serif; background: #111; color: #eee; display: flex; height: 100vh; margin: 0; }
-            #sidebar { width: 250px; background: #222; padding: 10px; border-right: 1px solid #444; overflow-y: auto; }
-            #main { flex: 1; display: flex; flex-direction: column; }
-            #chat-log { flex: 1; padding: 15px; overflow-y: auto; border-bottom: 1px solid #444; }
-            #chat-input-box { display: flex; padding: 10px; background: #222; }
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+                background: #111; color: #eee; display: flex; flex-direction: column; height: 100vh; margin: 0; 
+            }
+            #topbar {
+                background: #222; padding: 10px 15px; border-bottom: 1px solid #444; overflow-x: auto;
+                white-space: nowrap;
+            }
+            #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+            #chat-log { flex: 1; padding: 15px; overflow-y: auto; }
+            #chat-input-box { display: flex; padding: 10px; background: #222; border-top: 1px solid #444; }
             #chat-input { flex: 1; background: #333; color: #fff; border: 1px solid #555; padding: 10px; border-radius: 5px; }
             #chat-send { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 5px; cursor: pointer; }
-            .device-group { margin-bottom: 20px; }
-            .device-group h3 { margin-bottom: 5px; color: #0099ff; }
-            .device-btn { display: inline-block; background: #444; padding: 5px 8px; margin: 2px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
-            .btn-on { border: 1px solid #4CAF50; }
-            .btn-off { border: 1px solid #f44336; }
-            .msg { margin-bottom: 10px; }
-            .msg-user { color: #aaa; text-align: right; }
-            .msg-ia { color: #ddd; background: #2a2a2a; padding: 8px; border-radius: 5px; }
+            
+            /* --- Estilos do Toggle --- */
+            .device-toggle { 
+                display: inline-block; margin-right: 20px; opacity: 0.5; transition: opacity 0.3s;
+            }
+            .device-toggle.loaded { opacity: 1; }
+            .device-toggle span { display: block; text-align: center; font-size: 0.85em; margin-bottom: 5px; color: #ccc; }
+            .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
+            .switch input { opacity: 0; width: 0; height: 0; }
+            .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; }
+            .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; }
+            input:checked + .slider { background-color: #007bff; }
+            input:checked + .slider:before { transform: translateX(26px); }
+            input:disabled + .slider { background-color: #333; cursor: not-allowed; }
+            input:disabled:checked + .slider { background-color: #004a99; }
+            .slider.round { border-radius: 34px; }
+            .slider.round:before { border-radius: 50%; }
+
+            #cli-help {
+                background: #1a1a1a; color: #aaa; padding: 15px;
+                max-height: 250px; overflow-y: auto; border-top: 1px solid #444;
+            }
+            #cli-help h3 { margin-top: 0; color: #0099ff; }
+            #cli-help pre { white-space: pre-wrap; word-wrap: break-word; font-family: "Courier New", Courier, monospace; }
+
+            .msg { margin-bottom: 10px; max-width: 80%; }
+            .msg-user { color: #aaa; text-align: right; margin-left: auto; }
+            .msg-ia { color: #ddd; background: #2a2a2a; padding: 8px 12px; border-radius: 10px; box-sizing: border-box; }
         </style>
     </head>
     <body>
-        <div id="sidebar">
-            <h2>Dispositivos</h2>
-            <div id="device-list"></div>
-        </div>
+        <div id="topbar">
+            </div>
+        
         <div id="main">
             <div id="chat-log">
-                <div class="msg msg-ia">Olá! Dispositivos a carregar...</div>
+                <div class="msg msg-ia">Olá! A carregar dispositivos e ajuda...</div>
             </div>
+            
+            <div id="cli-help">
+                <h3>Ajuda de Comandos (CLI / API)</h3>
+                <pre id="help-content">A carregar...</pre>
+            </div>
+            
             <div id="chat-input-box">
                 <input type="text" id="chat-input" placeholder="Escreve um comando (ex: como está o tempo?)...">
                 <button id="chat-send">Enviar</button>
@@ -358,7 +398,8 @@ def get_frontend_ui():
             const chatLog = document.getElementById('chat-log');
             const chatInput = document.getElementById('chat-input');
             const chatSend = document.getElementById('chat-send');
-            const deviceListDiv = document.getElementById('device-list');
+            const topBar = document.getElementById('topbar');
+            const helpContent = document.getElementById('help-content');
 
             // --- 1. Adiciona mensagens ao Chat ---
             function addToChatLog(text, sender = 'ia') {
@@ -384,8 +425,6 @@ def get_frontend_ui():
                         body: JSON.stringify({ prompt: prompt })
                     });
                     const data = await response.json();
-
-                    // A resposta do /comando já tem o TTS, aqui só mostramos no log
                     if (data.response) {
                         addToChatLog(data.response, 'ia');
                     }
@@ -394,7 +433,7 @@ def get_frontend_ui():
                 }
             }
 
-            // --- 3. Envia ações dos botões (para o novo endpoint /device_action) ---
+            // --- 3. Envia ações dos Toggles (para o /device_action) ---
             async function handleDeviceAction(device, action) {
                 const prompt = `${action} ${device}`;
                 addToChatLog(`A executar: ${prompt}`, 'user');
@@ -415,32 +454,99 @@ def get_frontend_ui():
                 }
             }
 
-            // --- 4. Carrega os botões dos dispositivos (do novo endpoint /get_devices) ---
+            // --- 4. Carrega os Toggles dos dispositivos ---
             async function loadDevices() {
                 try {
+                    // Primeiro, pedimos a lista de dispositivos 'toggle'
                     const response = await fetch('/get_devices');
                     const data = await response.json();
+                    
+                    topBar.innerHTML = ''; // Limpa
 
-                    deviceListDiv.innerHTML = ''; // Limpa
-
-                    for (const skillName in data.devices) {
-                        const devices = data.devices[skillName];
-                        if (devices.length > 0) {
-                            const groupDiv = document.createElement('div');
-                            groupDiv.classList.add('device-group');
-                            groupDiv.innerHTML = `<h3>${skillName.replace('skill_', '')}</h3>`;
-
-                            devices.forEach(device => {
-                                const onBtn = `<span class="device-btn btn-on" onclick="handleDeviceAction('${device}', 'ligar')">Ligar</span>`;
-                                const offBtn = `<span class="device-btn btn-off" onclick="handleDeviceAction('${device}', 'desligar')">Desligar</span>`;
-                                groupDiv.innerHTML += `<p><strong>${device}</strong><br>${onBtn} ${offBtn}</p>`;
-                            });
-                            deviceListDiv.appendChild(groupDiv);
-                        }
+                    if (data.devices && data.devices.toggles) {
+                        // Para cada dispositivo, criamos um toggle (desativado)
+                        data.devices.toggles.forEach(device => {
+                            const toggleDiv = document.createElement('div');
+                            toggleDiv.classList.add('device-toggle');
+                            toggleDiv.id = `toggle-div-${device.replace(/\\s+/g, '-')}`;
+                            
+                            const label = document.createElement('span');
+                            label.innerText = device;
+                            
+                            const switchLabel = document.createElement('label');
+                            switchLabel.classList.add('switch');
+                            
+                            const input = document.createElement('input');
+                            input.type = 'checkbox';
+                            input.disabled = true; // Começa desativado
+                            input.onchange = () => {
+                                const action = input.checked ? 'ligar' : 'desligar';
+                                handleDeviceAction(device, action);
+                            };
+                            
+                            const slider = document.createElement('div');
+                            slider.classList.add('slider', 'round');
+                            
+                            switchLabel.appendChild(input);
+                            switchLabel.appendChild(slider);
+                            toggleDiv.appendChild(label);
+                            toggleDiv.appendChild(switchLabel);
+                            topBar.appendChild(toggleDiv);
+                            
+                            // AGORA, pedimos o estado deste dispositivo
+                            fetchDeviceStatus(device, input, toggleDiv);
+                        });
                     }
-                    addToChatLog('Dispositivos carregados.', 'ia');
                 } catch (err) {
                     addToChatLog('Erro a carregar dispositivos: ' + err, 'ia');
+                }
+            }
+            
+            // --- 5. (NOVO) Pede o estado de um dispositivo e atualiza a UI ---
+            async function fetchDeviceStatus(device, inputElement, divElement) {
+                try {
+                    const response = await fetch(`/device_status?nickname=${encodeURIComponent(device)}`);
+                    const data = await response.json();
+
+                    if (data.state === 'on') {
+                        inputElement.checked = true;
+                    } else {
+                        inputElement.checked = false; // 'off' ou 'unreachable'
+                    }
+                    
+                    if (data.state === 'unreachable') {
+                        // Se não for alcançável, mantemos-o 'desligado' mas com estilo diferente
+                        divElement.style.opacity = "0.4"; // Esbatido
+                        label.innerText += " (offline)";
+                    }
+                    
+                    inputElement.disabled = false; // Ativa o toggle
+                    divElement.classList.add('loaded'); // Mostra com opacidade total
+
+                } catch (err) {
+                    console.error(`Erro ao obter estado de ${device}:`, err);
+                    divElement.style.opacity = "0.3"; // Deixa esbatido se falhar
+                }
+            }
+            
+            // --- 6. Carrega a Ajuda do CLI ---
+            async function loadHelp() {
+                try {
+                    const response = await fetch('/help');
+                    const data = await response.json();
+                    
+                    if (data.commands) {
+                        let helpText = "";
+                        for (const cmd in data.commands) {
+                            helpText += `- ${cmd}:\\n`;
+                            helpText += `      ${data.commands[cmd]}\\n\\n`;
+                        }
+                        helpContent.innerText = helpText;
+                    } else {
+                        helpContent.innerText = "Falha ao carregar ajuda.";
+                    }
+                } catch (err) {
+                     helpContent.innerText = "Erro a ligar ao endpoint /help: " + err;
                 }
             }
 
@@ -452,6 +558,7 @@ def get_frontend_ui():
 
             // --- Início ---
             loadDevices();
+            loadHelp();
 
         </script>
     </body>
@@ -463,23 +570,58 @@ def get_frontend_ui():
 def get_devices_list():
     """
     Endpoint da API para o frontend saber que botões desenhar.
-    Lê a SKILLS_LIST global.
+    Filtra os 'triggers' das skills para encontrar apenas nomes de dispositivos.
     """
     global SKILLS_LIST
-    device_map = {}
+    
+    # Lista de 'lixo' a remover dos triggers
+    BLACKLIST_TRIGGERS = [
+        # skill_tuya
+        "liga", "ligar", "acende", "acender", "desliga", "desligar", "apaga", "apagar",
+        "como está", "estado", "temperatura", "humidade", "nível", "diagnostico", "dps",
+        "sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", 
+        "quarto", "sala", "wc",
+        
+        # skill_xiaomi
+        "candeeiro", "luz da mesinha", "abajur", # Estes são os 'objects', não os 'nicknames'
+        "aspirador", "robot", "viomi",
+        "aspira", "limpa", "começa", "inicia",
+        "para", "pára", "pausa",
+        "base", "casa", "volta", "carrega", "recolhe"
+    ]
+    
+    device_toggles = []
+    device_status_only = [] # Para sensores, etc.
 
-    # Skills que sabemos que controlam dispositivos
     DEVICE_SKILL_NAMES = ["skill_cloogy", "skill_tuya", "skill_xiaomi"]
 
     for skill in SKILLS_LIST:
         skill_name = skill.get("name")
         if skill_name in DEVICE_SKILL_NAMES:
-            # Os 'triggers' destas skills são os nomes dos dispositivos
-            device_map[skill_name] = skill.get("triggers", [])
+            
+            all_triggers = skill.get("triggers", [])
+            
+            # Filtra a lista de triggers para obter apenas os nicknames
+            device_nicknames = [
+                trigger for trigger in all_triggers 
+                if trigger not in BLACKLIST_TRIGGERS
+            ]
+            
+            for nickname in device_nicknames:
+                if "sensor" in nickname.lower():
+                    device_status_only.append(nickname)
+                else:
+                    # Só adiciona a toggle se a skill tiver a função get_status
+                    if 'get_status' in skill:
+                        device_toggles.append(nickname)
+                    else:
+                        print(f"AVISO (UI): Dispositivo '{nickname}' ignorado (skill '{skill_name}' não tem 'get_status_for_device')")
 
-    return jsonify({"status": "ok", "devices": device_map})
+    return jsonify({"status": "ok", "devices": {
+        "toggles": device_toggles,
+        "status": device_status_only
+    }})
 
-@app.route("/device_action", methods=['POST'])
 @app.route("/device_action", methods=['POST'])
 def handle_device_action():
     """
@@ -508,6 +650,34 @@ def handle_device_action():
     except Exception as e:
         print(f"ERRO no endpoint /device_action: {e}")
         return jsonify({"status": "erro", "message": str(e)}), 500
+
+@app.route("/device_status")
+def handle_device_status():
+    """
+    Endpoint da API para o frontend obter o estado de um único dispositivo.
+    Ex: /device_status?nickname=luz%20da%20sala
+    """
+    global SKILLS_LIST
+    nickname = request.args.get('nickname')
+    if not nickname:
+        return jsonify({"state": "unreachable", "error": "Nickname em falta"}), 400
+
+    print(f"API: A obter estado para '{nickname}'...")
+
+    for skill in SKILLS_LIST:
+        # Verificamos se o nickname pertence a esta skill E se a skill tem a função
+        if nickname in skill.get("triggers", []) and 'get_status' in skill:
+            try:
+                status = skill['get_status'](nickname)
+                print(f"API: Estado de '{nickname}' é {status}")
+                return jsonify(status)
+            except Exception as e:
+                print(f"ERRO: A função get_status da skill '{skill['name']}' falhou: {e}")
+                return jsonify({"state": "unreachable", "error": str(e)}), 500
+
+    # Se o loop terminar, não encontrámos uma skill para este nickname
+    print(f"API: Nenhum 'get_status' encontrado para '{nickname}'")
+    return jsonify({"state": "unreachable", "error": "Dispositivo não encontrado ou não suporta status"}), 404
 
 def start_api_server(host='0.0.0.0', port=5000):
     """ Inicia o servidor Flask (sem os logs normais). """

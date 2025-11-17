@@ -113,3 +113,40 @@ def _handle_vacuum(prompt):
         return "Ocorreu um erro inesperado na skill do aspirador."
 
     return None
+
+# --- NOVA FUNÇÃO DE STATUS ---
+
+def get_status_for_device(nickname):
+    """
+    Função pública chamada pelo assistant.py para obter o estado de um dispositivo.
+    Retorna: {"state": "on" | "off" | "unreachable"}
+    """
+    # Esta skill só trata do candeeiro como um toggle
+    if nickname not in LAMP_OBJECTS:
+        return {"state": "unreachable"} # Não é um candeeiro que esta skill conheça
+
+    if "Yeelight" not in globals():
+        return {"state": "unreachable"} # Biblioteca não carregada
+
+    if not hasattr(config, 'XIAOMI_LAMP_IP') or not config.XIAOMI_LAMP_TOKEN:
+        return {"state": "unreachable"} # Não configurado
+        
+    ip = config.XIAOMI_LAMP_IP
+    token = config.XIAOMI_LAMP_TOKEN
+
+    try:
+        dev = Yeelight(ip, token)
+        # Pedimos apenas a propriedade "power"
+        props = dev.get_properties(['power'])
+        
+        if props and props[0] == 'on':
+            return {"state": "on"}
+        else:
+            return {"state": "off"} # Inclui 'off' e qualquer resposta inesperada
+
+    except DeviceException as e:
+        print(f"ERRO skill_xiaomi (get_status): Falha ao ligar a {ip}: {e}")
+        return {"state": "unreachable"}
+    except Exception as e:
+        print(f"ERRO inesperado skill_xiaomi (get_status): {e}")
+        return {"state": "unreachable"}

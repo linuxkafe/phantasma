@@ -266,3 +266,37 @@ def _handle_sensor(nickname, details, prompt):
         return f"Não consegui ler essa informação (Temperatura/Humidade) do {nickname}. DPSs encontrados: {dps}"
         
     return response + "."
+
+# --- NOVA FUNÇÃO DE STATUS ---
+
+def get_status_for_device(nickname):
+    """
+    Função pública chamada pelo assistant.py para obter o estado de um dispositivo.
+    Retorna: {"state": "on" | "off" | "unreachable"}
+    """
+    if not hasattr(config, 'TUYA_DEVICES') or nickname not in config.TUYA_DEVICES:
+        return {"state": "unreachable"} # Não está no config
+
+    details = config.TUYA_DEVICES[nickname]
+    
+    (d, status, err_code) = _try_connect_with_versioning(
+        details['id'], details['ip'], details['key']
+    )
+    
+    if not d:
+        return {"state": "unreachable"} # Falha na ligação
+
+    # Determinar qual o DPS a verificar (mesma lógica do handle)
+    dps_index_str = "20" if "luz" in nickname or "lâmpada" in nickname else "1"
+    
+    current_state = status.get('dps', {}).get(dps_index_str)
+    
+    if current_state == True:
+        return {"state": "on"}
+    elif current_state == False:
+        return {"state": "off"}
+    else:
+        # Se o DPS não for 1, 20, ou não for True/False (ex: é um número),
+        # não o podemos tratar como um toggle.
+        print(f"Skill_Tuya (get_status): Estado 'None' ou não-booleano para {nickname} (DPS {dps_index_str}).")
+        return {"state": "unreachable"} # "unreachable" para a UI significa "não sei o estado"
