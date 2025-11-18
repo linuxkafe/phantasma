@@ -331,78 +331,141 @@ def get_help():
         print(f"ERRO no endpoint /help: {e}")
         return jsonify({"status": "erro", "message": str(e)}), 500
 
+# Interface Web
 @app.route("/")
 def get_frontend_ui():
-    """ Serve a página HTML principal do frontend """
+    """ Serve a página HTML principal do frontend (Mobile Fix + Easter Egg) """
 
-    # Todo o HTML e JS estão aqui.
     html_content = """
     <!DOCTYPE html>
     <html lang="pt">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>Phantasma UI</title>
         <style>
-            body { 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-                background: #111; color: #eee; display: flex; flex-direction: column; height: 100vh; margin: 0; 
-            }
-            #topbar {
-                background: #222; padding: 10px 15px; border-bottom: 1px solid #444; overflow-x: auto;
-                white-space: nowrap;
-            }
-            #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-            #chat-log { flex: 1; padding: 15px; overflow-y: auto; }
-            #chat-input-box { display: flex; padding: 10px; background: #222; border-top: 1px solid #444; }
-            #chat-input { flex: 1; background: #333; color: #fff; border: 1px solid #555; padding: 10px; border-radius: 5px; }
-            #chat-send { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 5px; cursor: pointer; }
+            :root { --bg-color: #121212; --chat-bg: #1e1e1e; --user-msg: #2d2d2d; --ia-msg: #005a9e; --text: #e0e0e0; }
             
-            /* --- Estilos do Toggle --- */
+            body { 
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+                background: var(--bg-color); color: var(--text); 
+                display: flex; flex-direction: column; 
+                /* CORREÇÃO MOBILE: dvh adapta-se às barras do browser/sistema */
+                height: 100vh; height: 100dvh; 
+                margin: 0; overflow: hidden;
+            }
+            
+            /* --- HEADER --- */
+            #header-strip {
+                display: flex; align-items: center; background: #181818; border-bottom: 1px solid #333; height: 85px; flex-shrink: 0;
+            }
+            #brand {
+                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                padding: 0 15px; min-width: 70px; height: 100%;
+                border-right: 1px solid #333; background: #151515;
+                cursor: pointer; user-select: none; z-index: 10;
+            }
+            #brand:active { background: #222; } /* Feedback de clique */
+            #brand-logo { font-size: 1.8rem; animation: floatGhost 3s ease-in-out infinite; }
+            #brand-name { font-size: 0.7rem; font-weight: bold; color: #666; margin-top: 2px; letter-spacing: 1px; }
+
+            /* --- DEVICE SCROLL --- */
+            #topbar {
+                flex: 1; display: flex; align-items: center; overflow-x: auto; 
+                white-space: nowrap; -webkit-overflow-scrolling: touch;
+                height: 100%; padding-left: 10px; gap: 15px; scrollbar-width: none;
+            }
+            #topbar::-webkit-scrollbar { display: none; }
+
             .device-toggle { 
-                display: inline-block; margin-right: 20px; opacity: 0.5; transition: opacity 0.3s;
+                display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+                opacity: 0.5; transition: all 0.3s; min-width: 60px; 
+                background: #222; padding: 4px; border-radius: 8px; margin-top: 5px;
             }
-            .device-toggle.loaded { opacity: 1; }
-            .device-toggle span { display: block; text-align: center; font-size: 0.85em; margin-bottom: 5px; color: #ccc; }
-            .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
+            .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
+            .device-toggle.active .device-icon { filter: grayscale(0%); }
+            .device-icon { font-size: 1.2rem; margin-bottom: 2px; filter: grayscale(100%); transition: filter 0.3s; }
+            .device-label { font-size: 0.65rem; color: #aaa; max-width: 65px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+            
+            .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
             .switch input { opacity: 0; width: 0; height: 0; }
-            .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; }
-            .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; }
-            input:checked + .slider { background-color: #007bff; }
-            input:checked + .slider:before { transform: translateX(26px); }
-            input:disabled + .slider { background-color: #333; cursor: not-allowed; }
-            input:disabled:checked + .slider { background-color: #004a99; }
-            .slider.round { border-radius: 34px; }
-            .slider.round:before { border-radius: 50%; }
+            .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; border-radius: 34px; }
+            .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+            input:checked + .slider { background-color: var(--ia-msg); }
+            input:checked + .slider:before { transform: translateX(16px); }
 
-            #cli-help {
-                background: #1a1a1a; color: #aaa; padding: 15px;
-                max-height: 250px; overflow-y: auto; border-top: 1px solid #444;
+            /* --- CHAT AREA --- */
+            #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+            #chat-log { 
+                flex: 1; padding: 15px; overflow-y: auto; scroll-behavior: smooth;
+                display: flex; flex-direction: column; gap: 15px;
             }
-            #cli-help h3 { margin-top: 0; color: #0099ff; }
-            #cli-help pre { white-space: pre-wrap; word-wrap: break-word; font-family: "Courier New", Courier, monospace; }
+            
+            .msg-row { display: flex; width: 100%; align-items: flex-end; }
+            .msg-row.user { justify-content: flex-end; }
+            .msg-row.ia { justify-content: flex-start; }
+            
+            .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; animation: floatGhost 4s ease-in-out infinite; }
+            .msg { max-width: 80%; padding: 10px 14px; border-radius: 18px; line-height: 1.4; font-size: 1rem; word-wrap: break-word; }
+            .msg-user { background: var(--user-msg); color: #fff; border-bottom-right-radius: 2px; }
+            .msg-ia { background: var(--chat-bg); color: #ddd; border-bottom-left-radius: 2px; border: 1px solid #333; }
+            
+            @keyframes floatGhost { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
 
-            .msg { margin-bottom: 10px; max-width: 80%; }
-            .msg-user { color: #aaa; text-align: right; margin-left: auto; }
-            .msg-ia { color: #ddd; background: #2a2a2a; padding: 8px 12px; border-radius: 10px; box-sizing: border-box; }
+            /* --- EASTER EGG (JUMPSCARE) --- */
+            #easter-egg-layer {
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                pointer-events: none; z-index: 9999; display: flex; align-items: center; justify-content: center;
+                visibility: hidden;
+            }
+            #big-ghost {
+                font-size: 15rem; opacity: 0; transform: scale(0.5);
+                transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            }
+            /* Classe que ativa a animação */
+            .boo #easter-egg-layer { visibility: visible; }
+            .boo #big-ghost { opacity: 1; transform: scale(1.2); }
+
+            /* --- INPUT AREA --- */
+            #chat-input-box { 
+                padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0;
+                /* Safe area para iPhones sem botão home */
+                padding-bottom: max(10px, env(safe-area-inset-bottom));
+            }
+            #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 25px; font-size: 16px; outline: none; }
+            #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; }
+
+            /* --- AJUDA --- */
+            #cli-help { background: #111; border-top: 1px solid #333; max-height: 0; overflow: hidden; transition: max-height 0.3s; flex-shrink: 0; }
+            #cli-help.open { max-height: 200px; overflow-y: auto; padding: 10px; }
+            #help-toggle { text-align: center; font-size: 0.8rem; color: #666; padding: 5px; cursor: pointer; flex-shrink: 0; }
+
+            /* --- TYPING --- */
+            .typing-indicator { display: inline-flex; align-items: center; padding: 12px 16px; background: var(--chat-bg); border-radius: 18px; border-bottom-left-radius: 2px; }
+            .dot { width: 6px; height: 6px; margin: 0 2px; background: #888; border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
+            .dot:nth-child(1) { animation-delay: -0.32s; } .dot:nth-child(2) { animation-delay: -0.16s; }
+            @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
         </style>
     </head>
     <body>
-        <div id="topbar">
+        <div id="easter-egg-layer"><div id="big-ghost">👻</div></div>
+
+        <div id="header-strip">
+            <div id="brand" onclick="triggerEasterEgg()">
+                <div id="brand-logo">👻</div>
+                <div id="brand-name">pHantasma</div>
             </div>
+            <div id="topbar"></div>
+        </div>
         
         <div id="main">
-            <div id="chat-log">
-                <div class="msg msg-ia">Olá! A carregar dispositivos e ajuda...</div>
-            </div>
-            
-            <div id="cli-help">
-                <h3>Ajuda de Comandos (CLI / API)</h3>
-                <pre id="help-content">A carregar...</pre>
-            </div>
+            <div id="chat-log"></div>
+            <div id="help-toggle" onclick="toggleHelp()">Ver Comandos</div>
+            <div id="cli-help"><pre id="help-content" style="color:#888; font-size:0.8em; margin:0;">A carregar...</pre></div>
             
             <div id="chat-input-box">
-                <input type="text" id="chat-input" placeholder="Escreve um comando (ex: como está o tempo?)...">
+                <input type="text" id="chat-input" placeholder="Mensagem..." autocomplete="off">
                 <button id="chat-send">Enviar</button>
             </div>
         </div>
@@ -414,165 +477,122 @@ def get_frontend_ui():
             const topBar = document.getElementById('topbar');
             const helpContent = document.getElementById('help-content');
 
-            // --- 1. Adiciona mensagens ao Chat ---
+            // --- EASTER EGG ---
+            function triggerEasterEgg() {
+                document.body.classList.add('boo');
+                setTimeout(() => {
+                    document.body.classList.remove('boo');
+                }, 1200); // O fantasma desaparece após 1.2s
+            }
+
+            // --- ICONS ---
+            function getDeviceIcon(name) {
+                const n = name.toLowerCase();
+                if (n.includes('luz') || n.includes('lâmpada') || n.includes('candeeiro')) return '💡';
+                if (n.includes('exaustor') || n.includes('ventoinha')) return '💨';
+                if (n.includes('desumidificador') || n.includes('humidade')) return '💧';
+                if (n.includes('tv') || n.includes('televisão')) return '📺';
+                if (n.includes('robot') || n.includes('aspirador')) return '🤖';
+                if (n.includes('tomada')) return '🔌';
+                return '⚡';
+            }
+
+            // --- UI & EFFECTS ---
+            function showTypingIndicator() {
+                if (document.getElementById('typing-indicator')) return;
+                const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'typing-container'; row.style.cssText = "display:flex;align-items:flex-end;margin-bottom:10px;";
+                const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻';
+                const bubble = document.createElement('div'); bubble.className = 'typing-indicator'; bubble.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+                row.append(avatar, bubble); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
+            }
+            function removeTypingIndicator() { const row = document.getElementById('typing-indicator-row'); if (row) row.remove(); }
+
+            function typeText(element, text, speed = 10) {
+                let i = 0;
+                function type() {
+                    if (i < text.length) { element.textContent += text.charAt(i); i++; chatLog.scrollTop = chatLog.scrollHeight; setTimeout(type, speed); }
+                } type();
+            }
+
             function addToChatLog(text, sender = 'ia') {
-                const msgDiv = document.createElement('div');
-                msgDiv.classList.add('msg', sender === 'user' ? 'msg-user' : 'msg-ia');
-                msgDiv.innerText = text;
-                chatLog.appendChild(msgDiv);
-                chatLog.scrollTop = chatLog.scrollHeight; // Auto-scroll
+                removeTypingIndicator();
+                const row = document.createElement('div'); row.className = `msg-row ${sender}`;
+                if (sender === 'ia') {
+                    const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻';
+                    row.appendChild(avatar);
+                }
+                const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
+                row.appendChild(msgDiv); chatLog.appendChild(row);
+                if (sender === 'ia') typeText(msgDiv, text); else msgDiv.textContent = text;
+                chatLog.scrollTop = chatLog.scrollHeight;
             }
 
-            // --- 2. Envia comandos do chat (para o endpoint /comando) ---
             async function sendChatCommand() {
-                const prompt = chatInput.value;
-                if (!prompt) return;
-
-                addToChatLog(prompt, 'user');
-                chatInput.value = '';
-
+                const prompt = chatInput.value.trim(); if (!prompt) return;
+                addToChatLog(prompt, 'user'); chatInput.value = ''; chatInput.blur();
+                showTypingIndicator();
                 try {
-                    const response = await fetch('/comando', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt: prompt })
-                    });
-                    const data = await response.json();
-                    if (data.response) {
-                        addToChatLog(data.response, 'ia');
-                    }
-                } catch (err) {
-                    addToChatLog('Erro a ligar à API /comando: ' + err, 'ia');
-                }
+                    const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
+                    const data = await res.json();
+                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
+                } catch (e) { removeTypingIndicator(); addToChatLog('Erro: ' + e, 'ia'); }
             }
 
-            // --- 3. Envia ações dos Toggles (para o /device_action) ---
             async function handleDeviceAction(device, action) {
-                const prompt = `${action} ${device}`;
-                addToChatLog(`A executar: ${prompt}`, 'user');
-
+                showTypingIndicator();
                 try {
-                    const response = await fetch('/device_action', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ device: device, action: action })
-                    });
-                    const data = await response.json();
-
-                    if (data.response) {
-                        addToChatLog(data.response, 'ia');
-                    }
-                } catch (err) {
-                    addToChatLog('Erro a ligar à API /device_action: ' + err, 'ia');
-                }
+                    const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
+                    const data = await res.json();
+                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
+                } catch (e) { removeTypingIndicator(); }
             }
 
-            // --- 4. Carrega os Toggles dos dispositivos ---
+            function createToggle(device) {
+                const toggleDiv = document.createElement('div'); toggleDiv.className = 'device-toggle'; toggleDiv.title = device;
+                const icon = document.createElement('span'); icon.className = 'device-icon'; icon.innerText = getDeviceIcon(device);
+                const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
+                const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
+                input.onchange = () => {
+                    handleDeviceAction(device, input.checked ? 'ligar' : 'desligar');
+                    if(input.checked) toggleDiv.classList.add('active'); else toggleDiv.classList.remove('active');
+                };
+                const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
+                const label = document.createElement('span'); label.className = 'device-label'; label.innerText = device.split(' ').pop().substring(0,9);
+                toggleDiv.append(icon, switchLabel, label); topBar.appendChild(toggleDiv);
+                fetchDeviceStatus(device, input, toggleDiv);
+            }
+
+            async function fetchDeviceStatus(device, input, div) {
+                try {
+                    const res = await fetch(`/device_status?nickname=${encodeURIComponent(device)}`);
+                    const data = await res.json();
+                    if (data.state === 'on') { input.checked = true; div.classList.add('active'); }
+                    else { input.checked = false; div.classList.remove('active'); }
+                    input.disabled = false; div.classList.add('loaded');
+                    if(data.state === 'unreachable') div.style.opacity = 0.3;
+                } catch (e) { div.style.opacity = 0.3; }
+            }
+
             async function loadDevices() {
                 try {
-                    // Primeiro, pedimos a lista de dispositivos 'toggle'
-                    const response = await fetch('/get_devices');
-                    const data = await response.json();
-                    
-                    topBar.innerHTML = ''; // Limpa
-
-                    if (data.devices && data.devices.toggles) {
-                        // Para cada dispositivo, criamos um toggle (desativado)
-                        data.devices.toggles.forEach(device => {
-                            const toggleDiv = document.createElement('div');
-                            toggleDiv.classList.add('device-toggle');
-                            toggleDiv.id = `toggle-div-${device.replace(/\\s+/g, '-')}`;
-                            
-                            const label = document.createElement('span');
-                            label.innerText = device;
-                            
-                            const switchLabel = document.createElement('label');
-                            switchLabel.classList.add('switch');
-                            
-                            const input = document.createElement('input');
-                            input.type = 'checkbox';
-                            input.disabled = true; // Começa desativado
-                            input.onchange = () => {
-                                const action = input.checked ? 'ligar' : 'desligar';
-                                handleDeviceAction(device, action);
-                            };
-                            
-                            const slider = document.createElement('div');
-                            slider.classList.add('slider', 'round');
-                            
-                            switchLabel.appendChild(input);
-                            switchLabel.appendChild(slider);
-                            toggleDiv.appendChild(label);
-                            toggleDiv.appendChild(switchLabel);
-                            topBar.appendChild(toggleDiv);
-                            
-                            // AGORA, pedimos o estado deste dispositivo
-                            fetchDeviceStatus(device, input, toggleDiv);
-                        });
-                    }
-                } catch (err) {
-                    addToChatLog('Erro a carregar dispositivos: ' + err, 'ia');
-                }
+                    const res = await fetch('/get_devices'); const data = await res.json();
+                    topBar.innerHTML = ''; if (data.devices?.toggles) data.devices.toggles.forEach(createToggle);
+                } catch (e) {}
             }
             
-            // --- 5. (NOVO) Pede o estado de um dispositivo e atualiza a UI ---
-            async function fetchDeviceStatus(device, inputElement, divElement) {
-                try {
-                    const response = await fetch(`/device_status?nickname=${encodeURIComponent(device)}`);
-                    const data = await response.json();
-
-                    if (data.state === 'on') {
-                        inputElement.checked = true;
-                    } else {
-                        inputElement.checked = false; // 'off' ou 'unreachable'
-                    }
-                    
-                    if (data.state === 'unreachable') {
-                        // Se não for alcançável, mantemos-o 'desligado' mas com estilo diferente
-                        divElement.style.opacity = "0.4"; // Esbatido
-                        label.innerText += " (offline)";
-                    }
-                    
-                    inputElement.disabled = false; // Ativa o toggle
-                    divElement.classList.add('loaded'); // Mostra com opacidade total
-
-                } catch (err) {
-                    console.error(`Erro ao obter estado de ${device}:`, err);
-                    divElement.style.opacity = "0.3"; // Deixa esbatido se falhar
-                }
-            }
-            
-            // --- 6. Carrega a Ajuda do CLI ---
             async function loadHelp() {
                 try {
-                    const response = await fetch('/help');
-                    const data = await response.json();
-                    
-                    if (data.commands) {
-                        let helpText = "";
-                        for (const cmd in data.commands) {
-                            helpText += `- ${cmd}:\\n`;
-                            helpText += `      ${data.commands[cmd]}\\n\\n`;
-                        }
-                        helpContent.innerText = helpText;
-                    } else {
-                        helpContent.innerText = "Falha ao carregar ajuda.";
-                    }
-                } catch (err) {
-                     helpContent.innerText = "Erro a ligar ao endpoint /help: " + err;
-                }
+                    const res = await fetch('/help'); const data = await res.json();
+                    if (data.commands) { let t = ""; for (const c in data.commands) t += `${c}: ${data.commands[c]}\\n`; helpContent.innerText = t; }
+                } catch (e) {}
             }
+            function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
 
-            // --- Event Listeners ---
-            chatSend.addEventListener('click', sendChatCommand);
-            chatInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') sendChatCommand();
-            });
+            chatSend.onclick = sendChatCommand;
+            chatInput.onkeypress = (e) => { if (e.key === 'Enter') sendChatCommand(); };
 
-            // --- Início ---
-            loadDevices();
-            loadHelp();
-
+            addToChatLog("Nas sombras, aguardo...", "ia");
+            loadDevices(); loadHelp();
         </script>
     </body>
     </html>
