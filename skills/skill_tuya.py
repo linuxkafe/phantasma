@@ -184,29 +184,35 @@ def _handle_sensor(nickname, details, prompt):
     return f"No {nickname}{origin_msg}, " + " e ".join(response_parts) + "."
 
 # --- API Status ---
+
 def get_status_for_device(nickname):
+    """
+    Função pública chamada pelo assistant.py para obter o estado de um dispositivo.
+    Suporta: Sensores (Temp/Hum), Tomadas de Energia (Watts) e Interruptores Simples.
+    """
     if not hasattr(config, 'TUYA_DEVICES') or nickname not in config.TUYA_DEVICES:
         return {"state": "unreachable"}
 
     details = config.TUYA_DEVICES[nickname]
-    
+
     # 1. Tenta Conexão Direta
     (d, status, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
-    
+
     dps = {}
-    
-    # 2. Se falhar e for sensor, tenta cache
-    if not d and "sensor" in nickname.lower():
+
+    # 2. Se falhar (comum em sensores ou leituras rápidas), tenta cache
+    if not d:
         cached = _get_cached_status(nickname)
         if cached:
             dps = cached['dps']
-            # Marca como 'on' (visível) na UI se tivermos cache
-            status = {'dps': dps} 
-            d = True 
+            d = True # Temos dados
 
     if not d: return {"state": "unreachable"}
+
+    # Se ligou direto, usa os dados frescos, senão usa a cache
     if not dps and 'dps' in status: dps = status['dps']
 
+    # --- CASO 1: SENSORES DE TEMP/HUMIDADE ---
     if "sensor" in nickname.lower():
         temp_raw = dps.get('1') or dps.get('102')
         humid_raw = dps.get('2') or dps.get('103')
@@ -218,9 +224,30 @@ def get_status_for_device(nickname):
             result["humidity"] = int(humid_raw)
         return result
 
+    # --- CASO 2: TOMADAS COM MONITORIZAÇÃO (Desumidificadores) ---
+    # Como indicaste, são tomadas. Vamos ler o DPS 19 (Potência).
+    if "desumidificador" in nickname.lower():
+        # DPS 1: Estado do Relé (Ligado/Desligado)
+        is_on = dps.get('1')
+
+        # DPS 19: Potência em W (Escala 10x -> 1944 = 194.4W)
+        power_raw = dps.get('19')
+        power_w = 0.0
+
+        if power_raw is not None:
+             power_w = float(power_raw) / 10.0
+
+        result = {
+            "state": "on" if is_on else "off",
+            "power_w": power_w
+        }
+        return result
+
+    # --- CASO 3: INTERRUPTORES GENÉRICOS ---
     dps_index_str = "20" if "luz" in nickname.lower() or "lâmpada" in nickname.lower() else "1"
     current_state = dps.get(dps_index_str)
-    
+
     if current_state is True: return {"state": "on"}
     elif current_state is False: return {"state": "off"}
+
     return {"state": "unreachable"}

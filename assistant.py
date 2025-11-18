@@ -332,9 +332,10 @@ def get_help():
         return jsonify({"status": "erro", "message": str(e)}), 500
 
 # Interface Web
+
 @app.route("/")
 def get_frontend_ui():
-    """ Serve a página HTML principal do frontend (Mobile Fix + Easter Egg) """
+    """ Serve a página HTML principal do frontend (Mobile Fix + Sensores + Watts) """
 
     html_content = """
     <!DOCTYPE html>
@@ -350,7 +351,6 @@ def get_frontend_ui():
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
                 background: var(--bg-color); color: var(--text); 
                 display: flex; flex-direction: column; 
-                /* CORREÇÃO MOBILE: dvh adapta-se às barras do browser/sistema */
                 height: 100vh; height: 100dvh; 
                 margin: 0; overflow: hidden;
             }
@@ -365,7 +365,7 @@ def get_frontend_ui():
                 border-right: 1px solid #333; background: #151515;
                 cursor: pointer; user-select: none; z-index: 10;
             }
-            #brand:active { background: #222; } /* Feedback de clique */
+            #brand:active { background: #222; }
             #brand-logo { font-size: 1.8rem; animation: floatGhost 3s ease-in-out infinite; }
             #brand-name { font-size: 0.7rem; font-weight: bold; color: #666; margin-top: 2px; letter-spacing: 1px; }
 
@@ -373,10 +373,11 @@ def get_frontend_ui():
             #topbar {
                 flex: 1; display: flex; align-items: center; overflow-x: auto; 
                 white-space: nowrap; -webkit-overflow-scrolling: touch;
-                height: 100%; padding-left: 10px; gap: 15px; scrollbar-width: none;
+                height: 100%; padding-left: 10px; gap: 10px; scrollbar-width: none;
             }
             #topbar::-webkit-scrollbar { display: none; }
 
+            /* --- SWITCHES (Luzes/Tomadas) --- */
             .device-toggle { 
                 display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
                 opacity: 0.5; transition: all 0.3s; min-width: 60px; 
@@ -394,58 +395,46 @@ def get_frontend_ui():
             input:checked + .slider { background-color: var(--ia-msg); }
             input:checked + .slider:before { transform: translateX(16px); }
 
+            /* --- SENSORES (Temperatura/Humidade) --- */
+            .device-sensor {
+                display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+                background: #252525; padding: 5px 8px; border-radius: 8px; margin-top: 5px;
+                border: 1px solid #333; min-width: 60px; height: 52px; box-sizing: border-box;
+            }
+            .sensor-data { font-size: 0.75rem; color: #4db6ac; font-weight: bold; display: flex; gap: 4px; }
+            .sensor-label { font-size: 0.55rem; color: #888; margin-top: 3px; max-width: 65px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
             /* --- CHAT AREA --- */
             #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
             #chat-log { 
                 flex: 1; padding: 15px; overflow-y: auto; scroll-behavior: smooth;
                 display: flex; flex-direction: column; gap: 15px;
             }
-            
             .msg-row { display: flex; width: 100%; align-items: flex-end; }
             .msg-row.user { justify-content: flex-end; }
             .msg-row.ia { justify-content: flex-start; }
-            
             .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; animation: floatGhost 4s ease-in-out infinite; }
             .msg { max-width: 80%; padding: 10px 14px; border-radius: 18px; line-height: 1.4; font-size: 1rem; word-wrap: break-word; }
             .msg-user { background: var(--user-msg); color: #fff; border-bottom-right-radius: 2px; }
             .msg-ia { background: var(--chat-bg); color: #ddd; border-bottom-left-radius: 2px; border: 1px solid #333; }
             
-            @keyframes floatGhost { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-
-            /* --- EASTER EGG (JUMPSCARE) --- */
-            #easter-egg-layer {
-                position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                pointer-events: none; z-index: 9999; display: flex; align-items: center; justify-content: center;
-                visibility: hidden;
-            }
-            #big-ghost {
-                font-size: 15rem; opacity: 0; transform: scale(0.5);
-                transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            }
-            /* Classe que ativa a animação */
+            #easter-egg-layer { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 9999; display: flex; align-items: center; justify-content: center; visibility: hidden; }
+            #big-ghost { font-size: 15rem; opacity: 0; transform: scale(0.5); transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
             .boo #easter-egg-layer { visibility: visible; }
             .boo #big-ghost { opacity: 1; transform: scale(1.2); }
 
-            /* --- INPUT AREA --- */
-            #chat-input-box { 
-                padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0;
-                /* Safe area para iPhones sem botão home */
-                padding-bottom: max(10px, env(safe-area-inset-bottom));
-            }
+            #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
             #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 25px; font-size: 16px; outline: none; }
             #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; }
 
-            /* --- AJUDA --- */
             #cli-help { background: #111; border-top: 1px solid #333; max-height: 0; overflow: hidden; transition: max-height 0.3s; flex-shrink: 0; }
             #cli-help.open { max-height: 200px; overflow-y: auto; padding: 10px; }
             #help-toggle { text-align: center; font-size: 0.8rem; color: #666; padding: 5px; cursor: pointer; flex-shrink: 0; }
 
-            /* --- TYPING --- */
             .typing-indicator { display: inline-flex; align-items: center; padding: 12px 16px; background: var(--chat-bg); border-radius: 18px; border-bottom-left-radius: 2px; }
             .dot { width: 6px; height: 6px; margin: 0 2px; background: #888; border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
             .dot:nth-child(1) { animation-delay: -0.32s; } .dot:nth-child(2) { animation-delay: -0.16s; }
             @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-
         </style>
     </head>
     <body>
@@ -477,15 +466,11 @@ def get_frontend_ui():
             const topBar = document.getElementById('topbar');
             const helpContent = document.getElementById('help-content');
 
-            // --- EASTER EGG ---
             function triggerEasterEgg() {
                 document.body.classList.add('boo');
-                setTimeout(() => {
-                    document.body.classList.remove('boo');
-                }, 1200); // O fantasma desaparece após 1.2s
+                setTimeout(() => { document.body.classList.remove('boo'); }, 1200);
             }
 
-            // --- ICONS ---
             function getDeviceIcon(name) {
                 const n = name.toLowerCase();
                 if (n.includes('luz') || n.includes('lâmpada') || n.includes('candeeiro')) return '💡';
@@ -497,7 +482,6 @@ def get_frontend_ui():
                 return '⚡';
             }
 
-            // --- UI & EFFECTS ---
             function showTypingIndicator() {
                 if (document.getElementById('typing-indicator')) return;
                 const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'typing-container'; row.style.cssText = "display:flex;align-items:flex-end;margin-bottom:10px;";
@@ -509,18 +493,13 @@ def get_frontend_ui():
 
             function typeText(element, text, speed = 10) {
                 let i = 0;
-                function type() {
-                    if (i < text.length) { element.textContent += text.charAt(i); i++; chatLog.scrollTop = chatLog.scrollHeight; setTimeout(type, speed); }
-                } type();
+                function type() { if (i < text.length) { element.textContent += text.charAt(i); i++; chatLog.scrollTop = chatLog.scrollHeight; setTimeout(type, speed); } } type();
             }
 
             function addToChatLog(text, sender = 'ia') {
                 removeTypingIndicator();
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
-                if (sender === 'ia') {
-                    const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻';
-                    row.appendChild(avatar);
-                }
+                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻'; row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 row.appendChild(msgDiv); chatLog.appendChild(row);
                 if (sender === 'ia') typeText(msgDiv, text); else msgDiv.textContent = text;
@@ -566,17 +545,65 @@ def get_frontend_ui():
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(device)}`);
                     const data = await res.json();
+                    
                     if (data.state === 'on') { input.checked = true; div.classList.add('active'); }
                     else { input.checked = false; div.classList.remove('active'); }
+                    
+                    const label = div.querySelector('.device-label');
+                    
+                    // --- EXIBIÇÃO DE WATTS ---
+                    if (data.power_w !== undefined) {
+                        // Mostra Watts (ex: 194W) a cor-de-laranja
+                        label.innerText = `${Math.round(data.power_w)}W`;
+                        label.style.color = "#ffb74d"; // Laranja
+                        label.style.fontWeight = "bold";
+                        label.title = `Consumo: ${data.power_w}W`;
+                    } else {
+                        // Reset se não houver watts (para não ficar valor antigo)
+                        // Verifica se é o texto original ou não
+                        if (label.innerText.endsWith('W')) {
+                            label.innerText = device.split(' ').pop().substring(0,9);
+                            label.style.color = "#aaa";
+                            label.style.fontWeight = "normal";
+                        }
+                    }
+
                     input.disabled = false; div.classList.add('loaded');
                     if(data.state === 'unreachable') div.style.opacity = 0.3;
                 } catch (e) { div.style.opacity = 0.3; }
             }
 
+            function createSensor(device) {
+                const div = document.createElement('div'); div.className = 'device-sensor'; div.title = device;
+                const dataSpan = document.createElement('span'); dataSpan.className = 'sensor-data'; dataSpan.innerText = '...';
+                const label = document.createElement('span'); label.className = 'sensor-label'; 
+                let shortName = device.replace(/sensor/gi, '').replace(/ do | da /gi, ' ').trim().substring(0,10);
+                label.innerText = shortName;
+                div.append(dataSpan, label); topBar.appendChild(div);
+                fetchSensorStatus(device, dataSpan, div);
+            }
+
+            async function fetchSensorStatus(device, element, div) {
+                try {
+                    const res = await fetch(`/device_status?nickname=${encodeURIComponent(device)}`);
+                    const data = await res.json();
+                    if (data.state === 'unreachable') { div.style.opacity = 0.5; element.innerText = '?'; return; }
+
+                    let text = '';
+                    if (data.temperature !== undefined) text += Math.round(data.temperature) + '° ';
+                    if (data.humidity !== undefined) text += data.humidity + '%';
+                    if (!text) text = 'ON';
+
+                    element.innerText = text;
+                } catch (e) { element.innerText = 'Err'; }
+            }
+
             async function loadDevices() {
                 try {
                     const res = await fetch('/get_devices'); const data = await res.json();
-                    topBar.innerHTML = ''; if (data.devices?.toggles) data.devices.toggles.forEach(createToggle);
+                    topBar.innerHTML = ''; 
+                    if (data.devices?.status) data.devices.status.forEach(createSensor);
+                    if (data.devices?.toggles) data.devices.toggles.forEach(createToggle);
                 } catch (e) {}
             }
             
