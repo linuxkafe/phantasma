@@ -613,7 +613,7 @@ def get_devices_list():
         "liga", "ligar", "acende", "acender", "desliga", "desligar", "apaga", "apagar",
         "como está", "estado", "temperatura", "humidade", "nível", "diagnostico", "dps",
         "sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", 
-        "quarto", "sala", "wc",
+        "quarto", "sala", "wc", "leitura"
         
         # skill_xiaomi
         "candeeiro", "luz da mesinha", "abajur", # Estes são os 'objects', não os 'nicknames'

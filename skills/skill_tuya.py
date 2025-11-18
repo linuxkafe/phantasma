@@ -13,7 +13,7 @@ except ImportError:
 TRIGGER_TYPE = "contains"
 ACTIONS_ON = ["liga", "ligar", "acende", "acender"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar"]
-STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível"]
+STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = [
     "sensor", "luz", "lâmpada", "desumidificador", 
@@ -26,9 +26,7 @@ def _get_tuya_triggers():
     """Lê os nomes dos dispositivos do config para os triggers."""
     all_actions = ACTIONS_ON + ACTIONS_OFF + STATUS_TRIGGERS + DEBUG_TRIGGERS
     
-    # --- ESTA É A LINHA CORRIGIDA ---
     if hasattr(config, 'TUYA_DEVICES') and isinstance(config.TUYA_DEVICES, dict):
-    # ---------------------------------
         device_nicknames = list(config.TUYA_DEVICES.keys())
         return BASE_NOUNS + device_nicknames + all_actions
     return BASE_NOUNS + all_actions
@@ -40,8 +38,6 @@ def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
     """
     Função auxiliar para tentar ligar-se a um dispositivo
     usando múltiplas versões de protocolo.
-    
-    Retorna (objeto_tinytuya, status_obtido) ou (None, ultimo_erro, codigo_erro)
     """
     if 'x' in dev_ip.lower():
         return (None, f"IP inválido ('{dev_ip}')", None)
@@ -57,26 +53,22 @@ def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
             d.set_socketTimeout(2)
             d.set_version(version)
             
-            print(f"Skill_Tuya: A tentar versão {version}...", end="", flush=True)
+            # Sensor devices often don't respond to status() instantly if sleeping,
+            # but for powered sensors it should be fine.
             status = d.status()
             
             if 'dps' in status:
-                print(" SUCESSO!")
                 return (d, status, None)
             else:
-                print(f" Falhou (Resposta inválida: {status})")
                 last_error_payload = status
                 last_error_code = status.get('Err')
-                
                 if last_error_code == '905':
-                    print("Skill_Tuya: Erro 905 (Device Unreachable/Key) detetado. A parar de tentar.")
-                    break # Para o loop de versões
+                    break # Erro de chave/dispositivo
 
         except Exception as e:
-            print(f" Falhou (Erro de rede: {e})")
             last_error_payload = f"Erro de Rede: {e}"
-            last_error_code = '901' # Assumimos 901 para qualquer erro de rede
-            break # Para o loop de versões
+            last_error_code = '901' 
+            break 
             
     return (None, last_error_payload, last_error_code)
 
@@ -101,36 +93,30 @@ def handle(user_prompt_lower, user_prompt_full):
     
     if not final_action: return None
 
-    # --- LÓGICA DE MATCHING CORRIGIDA (O Mais Específico Ganha) ---
+    # --- LÓGICA DE MATCHING (CASE-INSENSITIVE) ---
     matched_devices = []
     
-    # Pass 1: Direct matches (nickname é substring do prompt)
+    # Pass 1: Direct matches
     direct_matches = []
     for nickname, details in config.TUYA_DEVICES.items():
-        
-        # --- A CORREÇÃO ESTÁ AQUI ---
         if nickname.lower() in user_prompt_lower:
-        # -----------------------------
             direct_matches.append((nickname, details))
 
     if direct_matches:
-        # Se encontrou matches directos, ordena por tamanho (descendente)
+        # Ordena por tamanho para apanhar o nome mais específico ("luz da sala" vs "sala")
         direct_matches.sort(key=lambda x: len(x[0]), reverse=True)
-        
-        # Escolhe APENAS o mais longo (ex: "luz da sala" em vez de "sala")
         best_match = direct_matches[0]
         matched_devices = [best_match]
-        print(f"Skill_Tuya: Match directo e específico encontrado: {best_match[0]}")
+        print(f"Skill_Tuya: Match directo encontrado: {best_match[0]}")
 
     else:
-        # Pass 2: Noun-based matches (só corre se NENHUM directo for encontrado)
+        # Pass 2: Noun-based matches
         nouns_in_prompt = [noun for noun in BASE_NOUNS if noun in user_prompt_lower]
         if nouns_in_prompt:
-            print(f"Skill_Tuya: Match directo falhou. A procurar por nouns: {nouns_in_prompt}")
+            print(f"Skill_Tuya: A procurar por nouns: {nouns_in_prompt}")
             for nickname, details in config.TUYA_DEVICES.items():
-                if any(noun in nickname.lower() for noun in nouns_in_prompt): # (Adicionado .lower() aqui também, por segurança)
+                if any(noun in nickname.lower() for noun in nouns_in_prompt):
                     matched_devices.append((nickname, details))
-    # --- FIM DA LÓGICA DE MATCHING ---
 
     if len(matched_devices) == 0: 
         return None 
@@ -146,18 +132,19 @@ def handle(user_prompt_lower, user_prompt_full):
         
         for nickname, details in matched_devices:
             
-            # (Manter a verificação de sensor)
+            # Ignora sensores para comandos de Ligar/Desligar
             if "sensor" in nickname.lower():
                 print(f"Skill_Tuya: A ignorar '{nickname}' para ação ON/OFF (é um sensor).")
                 continue 
 
-            # (Manter a verificação de IP inválido)
             dev_ip = details.get('ip')
             if not dev_ip or 'x' in dev_ip.lower():
-                print(f"Skill_Tuya: A ignorar '{nickname}' para ação ON/OFF (IP inválido: {dev_ip}).")
+                print(f"Skill_Tuya: A ignorar '{nickname}' (IP inválido).")
                 continue
             
-            dps_index = 20 if "luz" in nickname or "lâmpada" in nickname else 1
+            # CORREÇÃO: .lower() para detetar corretamente "Luz" vs "luz"
+            dps_index = 20 if "luz" in nickname.lower() or "lâmpada" in nickname.lower() else 1
+            
             try:
                 _handle_switch(nickname, details, final_action, dps_index)
                 success_nicknames.append(nickname)
@@ -172,9 +159,9 @@ def handle(user_prompt_lower, user_prompt_full):
         if not failed_reports:
             return f"{', '.join(success_nicknames).capitalize()} {action_word}."
         elif not success_nicknames:
-            return f"Falha ao executar o comando. Detalhes: {', '.join(failed_reports)}."
+            return f"Falha ao executar: {', '.join(failed_reports)}."
         else:
-            return f"Comando executado em {', '.join(success_nicknames)}, mas falhou em {', '.join(failed_reports)}."
+            return f"Executado em {', '.join(success_nicknames)}, mas falhou em {', '.join(failed_reports)}."
 
     if final_action == "STATUS":
         if len(matched_devices) > 1:
@@ -188,96 +175,86 @@ def handle(user_prompt_lower, user_prompt_full):
             return str(e) 
 
     return None
+
+
 # --- Processadores ---
 
 def _handle_debug_status(nickname, details):
     """Liga-se ao dispositivo e imprime o seu estado raw (DPSs)"""
     print(f"*** DIAGNÓSTICO {nickname.upper()} ***")
-    
-    (d, result, err_code) = _try_connect_with_versioning(
-        details['id'], details['ip'], details['key']
-    )
-    
+    (d, result, err_code) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
     print(f"OUTPUT RAW (DPSs): {result}")
     print("************************************\n")
 
     if not d:
-        if err_code in ['901', '905']:
-             return f"Diagnóstico: O {nickname} está incontactável. Verifique se está ligado."
         return f"Diagnóstico: Falha ao ligar ao {nickname}. ({result})"
-        
-    return f"Diagnóstico concluído. O estado RAW (DPSs) foi enviado para o log."
+    return f"Diagnóstico concluído. O estado RAW foi enviado para o log."
 
 
 def _handle_switch(nickname, details, action, dps_index):
-    """Tenta ligar/desligar um dispositivo com multi-versão"""
-    
-    (d, status, err_code) = _try_connect_with_versioning(
-        details['id'], details['ip'], details['key']
-    )
+    """Tenta ligar/desligar um dispositivo"""
+    (d, status, err_code) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
     
     if not d:
-        if err_code in ['901', '905']:
-            raise Exception(f"está incontactável. Verifique se está ligado.")
-        raise Exception(f"não respondeu ({status})")
+        raise Exception(f"incontactável")
 
     try:
         value = True if action == "ON" else False
-        print(f"Skill_Tuya: A enviar set_value({dps_index}, {value})")
+        print(f"Skill_Tuya: set_value({dps_index}, {value})")
         d.set_value(dps_index, value, nowait=True)
     except Exception as e:
-        raise Exception(f"falha ao dar o comando ({e})")
+        raise Exception(f"falha no comando ({e})")
 
 
 def _handle_sensor(nickname, details, prompt):
-    """Tenta ler um sensor com multi-versão"""
-    
-    (d, data, err_code) = _try_connect_with_versioning(
-        details['id'], details['ip'], details['key']
-    )
+    """
+    Lê um sensor. Agora mais robusto a diferentes prompts.
+    """
+    (d, data, err_code) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
 
     if not d:
-        if err_code in ['901', '905']:
-            return f"O {nickname} está incontactável. Verifique se está ligado."
-        return f"O {nickname} não respondeu. ({data})"
+        return f"O {nickname} está incontactável."
         
     if 'dps' not in data:
-         return f"O {nickname} respondeu, mas não percebi os dados. ({data})"
+         return f"O {nickname} respondeu sem dados válidos."
 
     dps = data['dps']
-    temp_raw = dps.get('1') or dps.get('102') # DPS 1 (antigo) ou 102 (novo)
-    humid_raw = dps.get('2') or dps.get('103') # DPS 2 (antigo) ou 103 (novo)
-
-    response = f"No {nickname}: "
-    responses_found = 0
     
-    if temp_raw is not None and ("temperatura" in prompt or "estado" in prompt):
-        # A 'temp' dos sensores novos é 10x
-        temp = float(temp_raw) / 10.0 if temp_raw > 100 else float(temp_raw) 
-        response += f"a temperatura é {temp} graus"
-        responses_found += 1
-        
-    if humid_raw is not None and ("humidade" in prompt or "estado" in prompt):
-        if responses_found > 0:
-            response += " e "
-        humid = int(humid_raw)
-        response += f"a humidade é {humid} por cento"
-        responses_found += 1
+    # Compatibilidade: Sensores Antigos (1, 2) e Novos (102, 103)
+    temp_raw = dps.get('1') or dps.get('102') 
+    humid_raw = dps.get('2') or dps.get('103')
 
-    if responses_found == 0:
-        return f"Não consegui ler essa informação (Temperatura/Humidade) do {nickname}. DPSs encontrados: {dps}"
-        
-    return response + "."
+    response_parts = []
+    
+    # Flag para saber se o utilizador pediu algo específico ou "geral"
+    wants_all = "como está" in prompt or "leitura" in prompt or "estado" in prompt or "nível" in prompt
+    wants_temp = "temperatura" in prompt or wants_all
+    wants_humid = "humidade" in prompt or wants_all
 
-# --- NOVA FUNÇÃO DE STATUS ---
+    if temp_raw is not None and wants_temp:
+        # Alguns sensores devolvem 245 para 24.5, outros devolvem 24
+        val = float(temp_raw)
+        temp = val / 10.0 if val > 100 else val
+        response_parts.append(f"a temperatura é {temp} graus")
+        
+    if humid_raw is not None and wants_humid:
+        response_parts.append(f"a humidade é {int(humid_raw)} por cento")
+
+    if not response_parts:
+        return f"Não consegui ler os dados do {nickname}. DPSs disponíveis: {list(dps.keys())}"
+        
+    return f"No {nickname}, " + " e ".join(response_parts) + "."
+
+
+# --- FUNÇÃO DE STATUS (API) ---
 
 def get_status_for_device(nickname):
     """
-    Função pública chamada pelo assistant.py para obter o estado de um dispositivo.
-    Retorna: {"state": "on" | "off" | "unreachable"}
+    Chamada pela API (assistant.py) para obter estado.
+    Agora suporta Sensores (devolve valores) e Switches (devolve on/off).
     """
     if not hasattr(config, 'TUYA_DEVICES') or nickname not in config.TUYA_DEVICES:
-        return {"state": "unreachable"} # Não está no config
+        return {"state": "unreachable"}
 
     details = config.TUYA_DEVICES[nickname]
     
@@ -286,19 +263,36 @@ def get_status_for_device(nickname):
     )
     
     if not d:
-        return {"state": "unreachable"} # Falha na ligação
+        return {"state": "unreachable"}
 
-    # Determinar qual o DPS a verificar (mesma lógica do handle)
-    dps_index_str = "20" if "luz" in nickname or "lâmpada" in nickname else "1"
+    # 1. LÓGICA PARA SENSORES
+    if "sensor" in nickname.lower():
+        dps = status.get('dps', {})
+        temp_raw = dps.get('1') or dps.get('102')
+        humid_raw = dps.get('2') or dps.get('103')
+        
+        result = {"state": "on"} # "on" aqui significa "online/respondendo"
+        
+        if temp_raw is not None:
+            val = float(temp_raw)
+            result["temperature"] = val / 10.0 if val > 100 else val
+            
+        if humid_raw is not None:
+            result["humidity"] = int(humid_raw)
+            
+        print(f"Skill_Tuya (API): Leitura Sensor {nickname}: {result}")
+        return result
+
+    # 2. LÓGICA PARA SWITCHES / LUZES
+    # CORREÇÃO: .lower() para garantir que "Luz" funciona
+    dps_index_str = "20" if "luz" in nickname.lower() or "lâmpada" in nickname.lower() else "1"
     
     current_state = status.get('dps', {}).get(dps_index_str)
     
-    if current_state == True:
+    if current_state is True:
         return {"state": "on"}
-    elif current_state == False:
+    elif current_state is False:
         return {"state": "off"}
     else:
-        # Se o DPS não for 1, 20, ou não for True/False (ex: é um número),
-        # não o podemos tratar como um toggle.
-        print(f"Skill_Tuya (get_status): Estado 'None' ou não-booleano para {nickname} (DPS {dps_index_str}).")
-        return {"state": "unreachable"} # "unreachable" para a UI significa "não sei o estado"
+        print(f"Skill_Tuya (API): Estado não-booleano para {nickname} (DPS {dps_index_str}): {current_state}")
+        return {"state": "unreachable"}

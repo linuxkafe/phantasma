@@ -38,6 +38,59 @@ WHISPER_INITIAL_PROMPT = "Português de Portugal. Bumblebee. Como estás? Que ho
 GEMINI_API_KEY = "GEMINI_API_KEY"
 SHELLY_GAS_URL = "http://ip-address/status"
 
+# --- CONFIGURAÇÃO XIAOMI (MIIO) ---
+# O assistente deteta se é "Lâmpada" ou "Aspirador" através do nome (nickname).
+# Palavras-chave para Lâmpada: "luz", "candeeiro", "abajur", "lâmpada"
+# Palavras-chave para Aspirador: "aspirador", "robot", "viomi"
+
+MIIO_DEVICES = {
+    "candeeiro": {
+        "ip": "10.0.0.x",
+        "token": ""
+    },
+    "aspirador": {
+        "ip": "10.0.0.x",
+        "token": "" 
+    }
+}
+# --- Dispositivos Tuya (SmartLife) ---
+# A "chave" (ex: "luz da sala") é o NOME que deves usar 
+# no comando de voz para ativar o dispositivo.
+TUYA_DEVICES = {
+    # --- SENSORES (SÓ LEITURA) ---
+    "Sensor da Sala": {
+        "ip": "10.0.0.x",
+        "id": "",
+        "key": ""
+    },
+
+    # --- LUZES (LIGAR/DESLIGAR) ---
+    "Luz da Sala": {
+        "ip": "10.0.0.x", 
+        "id": "",
+        "key": ""
+    },
+    # --- DESUMIDIFICADORES (LIGAR/DESLIGAR) ---
+    "Desumidificador do Quarto": {
+        "ip": "10.0.0.x", 
+        "id": "",
+        "key": ""
+    },
+
+    # --- EXAUSTORES (LIGAR/DESLIGAR) ---
+    "Exaustor do WC": {
+        "ip": "10.0.0.x",
+        "id": "",
+        "key": ""
+    },
+    "Exaustor da Sala": {
+        "ip": "10.0.0.x",
+        "id": "",
+        "key": ""
+    }
+}
+
+
 WHISPER_INITIAL_PROMPT = "Português de Portugal. Como estás? Que horas são? Meteorologia. Quanto é? Toca música. Põe música. Memoriza isto. 1050 a dividir por 30. Google. Alfarroba. Viseu. Como está o gás? Como está o alarme do gás? Ligar o candeeiro. Liga o candeeiro. Desliga o candeeiro. Desliga a luz da sala. Recolhe o aspirador."
 
 SYSTEM_PROMPT = """**CRITICAL: Respond ONLY in Portuguese (Portugal).**

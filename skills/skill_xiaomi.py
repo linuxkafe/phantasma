@@ -4,149 +4,178 @@ try:
     from miio import DeviceException
     from miio import ViomiVacuum
     from miio import Yeelight
-    
 except ImportError:
     print("AVISO: Biblioteca 'python-miio' não encontrada. A skill_xiaomi será desativada.")
-    print("Para ativar, corra: pip install python-miio")
     pass
 
-# --- Configuração da Skill ---
+# --- Listas de Palavras-Chave para Deteção de Tipo ---
+KEYWORDS_LAMP = ["candeeiro", "luz", "abajur", "lâmpada"]
+KEYWORDS_VACUUM = ["aspirador", "robot", "viomi"]
+
+# --- Comandos de Ação ---
+LAMP_ON = ["liga", "ligar", "acende", "acender"]
+LAMP_OFF = ["desliga", "desligar", "apaga", "apagar"]
+
+VACUUM_START = ["aspira", "limpa", "começa", "inicia"]
+VACUUM_STOP = ["para", "pára", "pausa"]
+VACUUM_HOME = ["base", "casa", "volta", "carrega", "recolhe"]
+
+# --- Configuração da Skill (Triggers Dinâmicos) ---
 TRIGGER_TYPE = "contains"
 
-LAMP_OBJECTS = ["candeeiro", "luz da mesinha", "abajur"]
-LAMP_ON_TRIGGERS = ["liga", "ligar", "acende", "acender"]
-LAMP_OFF_TRIGGERS = ["desliga", "desligar", "apaga", "apagar"]
+def _get_triggers():
+    """ Gera triggers baseados nos dispositivos configurados no config.py """
+    device_names = []
+    if hasattr(config, 'MIIO_DEVICES') and isinstance(config.MIIO_DEVICES, dict):
+        device_names = list(config.MIIO_DEVICES.keys())
+    
+    # Junta os nomes dos dispositivos + comandos de ação
+    return device_names + LAMP_ON + LAMP_OFF + VACUUM_START + VACUUM_STOP + VACUUM_HOME
 
-VACUUM_OBJECTS = ["aspirador", "robot", "viomi"]
-VACUUM_START_TRIGGERS = ["aspira", "limpa", "começa", "inicia"]
-VACUUM_STOP_TRIGGERS = ["para", "pára", "pausa"]
-VACUUM_HOME_TRIGGERS = ["base", "casa", "volta", "carrega", "recolhe"]
+TRIGGERS = _get_triggers()
 
-TRIGGERS = LAMP_OBJECTS + VACUUM_OBJECTS
 
-# --- Lógica Principal (Router) ---
+# --- Helpers ---
+
+def _detect_device_type(nickname):
+    """ Retorna 'lamp' ou 'vacuum' baseado no nome do dispositivo. """
+    nick_lower = nickname.lower()
+    if any(k in nick_lower for k in KEYWORDS_LAMP):
+        return 'lamp'
+    if any(k in nick_lower for k in KEYWORDS_VACUUM):
+        return 'vacuum'
+    return None
+
+
+# --- Router Principal ---
 
 def handle(user_prompt_lower, user_prompt_full):
     """
-    Router principal da skill Xiaomi.
+    Descobre qual o dispositivo mencionado e encaminha para a função correta.
     """
-    if "Yeelight" not in globals() or "ViomiVacuum" not in globals():
-        print("ERRO skill_xiaomi: Biblioteca 'python-miio' não importada ou incompleta.")
-        return "A skill Xiaomi está instalada, mas falta a biblioteca 'python-miio'."
+    if not hasattr(config, 'MIIO_DEVICES') or not config.MIIO_DEVICES:
+        return None
 
-    if any(obj in user_prompt_lower for obj in LAMP_OBJECTS):
-        print("Skill Xiaomi: Intenção detetada para o Candeeiro.")
-        return _handle_lamp(user_prompt_lower)
+    # 1. Encontrar o dispositivo no prompt
+    matched_device = None
+    matched_name = ""
 
-    if any(obj in user_prompt_lower for obj in VACUUM_OBJECTS):
-        print("Skill Xiaomi: Intenção detetada para o Aspirador.")
-        return _handle_vacuum(user_prompt_lower)
+    # Procura por matches diretos (o nome do dispositivo está na frase)
+    for name, details in config.MIIO_DEVICES.items():
+        if name.lower() in user_prompt_lower:
+            matched_name = name
+            matched_device = details
+            break # Assume-se o primeiro match
+    
+    if not matched_device:
+        return None # Nenhum dispositivo Xiaomi encontrado na frase
+
+    # 2. Detetar o tipo (Lâmpada ou Aspirador)
+    dev_type = _detect_device_type(matched_name)
+    
+    if not dev_type:
+        print(f"Skill Xiaomi: Dispositivo '{matched_name}' encontrado, mas não sei se é luz ou aspirador.")
+        return None
+
+    # 3. Encaminhar
+    ip = matched_device.get('ip')
+    token = matched_device.get('token')
+    
+    if not ip or not token:
+        return f"O dispositivo {matched_name} não tem IP ou Token configurado."
+
+    if dev_type == 'lamp':
+        return _handle_lamp(matched_name, ip, token, user_prompt_lower)
+    elif dev_type == 'vacuum':
+        return _handle_vacuum(matched_name, ip, token, user_prompt_lower)
 
     return None
 
-# --- Processador do Candeeiro (ORDEM CORRIGIDA) ---
 
-def _handle_lamp(prompt):
-    """ Processa os comandos do candeeiro (Ligar/Desligar) """
+# --- Controladores Específicos ---
 
-    if not hasattr(config, 'XIAOMI_LAMP_IP') or not config.XIAOMI_LAMP_TOKEN:
-        return "O candeeiro está configurado na skill, mas falta o IP ou Token no config.py."
-        
-    ip = config.XIAOMI_LAMP_IP
-    token = config.XIAOMI_LAMP_TOKEN
-
+def _handle_lamp(name, ip, token, prompt):
     try:
         dev = Yeelight(ip, token)
         
-        # --- [ CORREÇÃO: VERIFICAR 'OFF' PRIMEIRO ] ---
-        if any(action in prompt for action in LAMP_OFF_TRIGGERS):
+        if any(action in prompt for action in LAMP_OFF):
             dev.off()
-            return "Candeeiro desligado."
-        # --- [ FIM DA CORREÇÃO ] ---
+            return f"{name.capitalize()} desligado."
         
-        if any(action in prompt for action in LAMP_ON_TRIGGERS):
+        if any(action in prompt for action in LAMP_ON):
             dev.on()
-            return "Candeeiro ligado."
+            return f"{name.capitalize()} ligado."
 
     except DeviceException as e:
-        print(f"ERRO skill_xiaomi (Candeeiro): Falha ao ligar a {ip}: {e}")
-        return "Não consegui comunicar com o candeeiro. O IP ou o Token estão corretos?"
+        print(f"ERRO Xiaomi ({name}): {e}")
+        return f"Não consegui comunicar com o {name}."
     except Exception as e:
-        print(f"ERRO inesperado skill_xiaomi (Candeeiro): {e}")
-        return "Ocorreu um erro inesperado na skill do candeeiro."
-        
-    return None 
-
-# --- Processador do Aspirador (ORDEM CORRIGIDA) ---
-
-def _handle_vacuum(prompt):
-    """ Processa os comandos do aspirador (Limpar, Parar, Casa) """
+        print(f"ERRO Crítico Xiaomi ({name}): {e}")
+        return f"Ocorreu um erro ao controlar o {name}."
     
-    if not hasattr(config, 'XIAOMI_VACUUM_IP') or not config.XIAOMI_VACUUM_TOKEN:
-        return "O aspirador está configurado na skill, mas falta o IP ou Token no config.py."
-        
-    ip = config.XIAOMI_VACUUM_IP
-    token = config.XIAOMI_VACUUM_TOKEN
-    
+    return None
+
+def _handle_vacuum(name, ip, token, prompt):
     try:
         dev = ViomiVacuum(ip, token)
         
-        # --- [ CORREÇÃO: VERIFICAR 'HOME' E 'STOP' PRIMEIRO ] ---
-        if any(action in prompt for action in VACUUM_HOME_TRIGGERS):
+        if any(action in prompt for action in VACUUM_HOME):
             dev.home()
-            return "Aspirador a voltar à base."
+            return f"{name.capitalize()} a voltar à base."
         
-        if any(action in prompt for action in VACUUM_STOP_TRIGGERS):
+        if any(action in prompt for action in VACUUM_STOP):
             dev.stop()
-            return "Aspirador parado."
-        # --- [ FIM DA CORREÇÃO ] ---
+            return f"{name.capitalize()} parado."
         
-        if any(action in prompt for action in VACUUM_START_TRIGGERS):
+        if any(action in prompt for action in VACUUM_START):
             dev.start()
-            return "Aspirador a iniciar a limpeza."
+            return f"{name.capitalize()} a iniciar limpeza."
 
     except DeviceException as e:
-        print(f"ERRO skill_xiaomi (Aspirador): Falha ao ligar a {ip}: {e}")
-        return "Não consegui comunicar com o aspirador."
+        print(f"ERRO Xiaomi ({name}): {e}")
+        return f"Não consegui comunicar com o {name}."
     except Exception as e:
-        print(f"ERRO inesperado skill_xiaomi (Aspirador): {e}")
-        return "Ocorreu um erro inesperado na skill do aspirador."
+        print(f"ERRO Crítico Xiaomi ({name}): {e}")
+        return f"Ocorreu um erro ao controlar o {name}."
 
     return None
 
-# --- NOVA FUNÇÃO DE STATUS ---
+
+# --- API: Status para a Interface Web ---
 
 def get_status_for_device(nickname):
     """
-    Função pública chamada pelo assistant.py para obter o estado de um dispositivo.
-    Retorna: {"state": "on" | "off" | "unreachable"}
+    Obtém o estado (ON/OFF) para desenhar o botão na Web UI.
     """
-    # Esta skill só trata do candeeiro como um toggle
-    if nickname not in LAMP_OBJECTS:
-        return {"state": "unreachable"} # Não é um candeeiro que esta skill conheça
+    if not hasattr(config, 'MIIO_DEVICES') or nickname not in config.MIIO_DEVICES:
+        return {"state": "unreachable"}
 
-    if "Yeelight" not in globals():
-        return {"state": "unreachable"} # Biblioteca não carregada
+    details = config.MIIO_DEVICES[nickname]
+    ip = details.get('ip')
+    token = details.get('token')
+    dev_type = _detect_device_type(nickname)
 
-    if not hasattr(config, 'XIAOMI_LAMP_IP') or not config.XIAOMI_LAMP_TOKEN:
-        return {"state": "unreachable"} # Não configurado
-        
-    ip = config.XIAOMI_LAMP_IP
-    token = config.XIAOMI_LAMP_TOKEN
+    if not ip or not token:
+        return {"state": "unreachable"}
 
     try:
-        dev = Yeelight(ip, token)
-        # Pedimos apenas a propriedade "power"
-        props = dev.get_properties(['power'])
-        
-        if props and props[0] == 'on':
-            return {"state": "on"}
-        else:
-            return {"state": "off"} # Inclui 'off' e qualquer resposta inesperada
+        if dev_type == 'lamp':
+            dev = Yeelight(ip, token)
+            props = dev.get_properties(['power'])
+            if props and props[0] == 'on':
+                return {"state": "on"}
+            return {"state": "off"}
 
-    except DeviceException as e:
-        print(f"ERRO skill_xiaomi (get_status): Falha ao ligar a {ip}: {e}")
-        return {"state": "unreachable"}
+        elif dev_type == 'vacuum':
+            dev = ViomiVacuum(ip, token)
+            status = dev.status()
+            # Se estiver a limpar, consideramos "on". Na base/pausa é "off".
+            if status.is_on: 
+                return {"state": "on"}
+            return {"state": "off"}
+            
     except Exception as e:
-        print(f"ERRO inesperado skill_xiaomi (get_status): {e}")
+        print(f"ERRO Xiaomi Status ({nickname}): {e}")
         return {"state": "unreachable"}
+        
+    return {"state": "unreachable"}
