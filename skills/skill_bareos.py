@@ -91,7 +91,7 @@ def handle(user_prompt_lower, user_prompt_full):
         # Usamos regex para procurar "No" como uma palavra inteira, case-insensitive
         if re.search(r'\bno\b', output, re.IGNORECASE):
             print(f"Bareos: Output OK. Output: {output}")
-            return "Parece que está tudo ok com os backups."
+            return "Parece que está tudo ok com as cópias de segurança."
         
         # Caso 3: Falha (contém output, mas não contém "No")
         print(f"Bareos: FALHA. Output: {output}")
@@ -104,7 +104,7 @@ def handle(user_prompt_lower, user_prompt_full):
 
     except subprocess.TimeoutExpired:
         print("ERRO (skill_bareos): Timeout ao executar bconsole.")
-        return "Chefe, o comando dos backups demorou demasiado tempo a responder."
+        return "O comando dos backups demorou demasiado tempo a responder."
         
     except Exception as e:
         print(f"ERRO CRÍTICO (skill_bareos): {e}")

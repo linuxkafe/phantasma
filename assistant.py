@@ -259,6 +259,24 @@ def route_and_respond(user_prompt, speak_response=True):
             play_tts(error_msg)
         return error_msg
 
+def sanitize_transcript(text):
+    """ Corrige erros fonéticos usando a lista definida em config.PHONETIC_FIXES """
+    if not text: return ""
+
+    # Verifica se a lista existe no config para evitar erros
+    if not hasattr(config, 'PHONETIC_FIXES'):
+        return text
+
+    text_lower = text.lower()
+
+    # Itera sobre o dicionário do config
+    for error, fix in config.PHONETIC_FIXES.items():
+        if error in text_lower:
+            # Substituição case-insensitive
+            text = re.sub(r'(?i)' + re.escape(error), fix, text)
+
+    return text
+
 def process_user_query():
     """ Pipeline apenas para ÁUDIO: Ouve, transcreve, e envia para o router. """
     try:
@@ -592,6 +610,26 @@ def get_frontend_ui():
                     let text = '';
                     if (data.temperature !== undefined) text += Math.round(data.temperature) + '° ';
                     if (data.humidity !== undefined) text += data.humidity + '%';
+                    if (data.ppm !== undefined) {
+                        text = data.ppm + ' ppm';
+                        // Muda a cor se houver gás detetado (>0 é suspeito, mas depende da calibração)
+                        if (data.status !== 'normal' && data.status !== 'unknown') {
+                             element.style.color = '#ff5252'; // Vermelho se houver alarme
+                             text += ' ⚠️';
+                        }
+                    }
+                    if (data.smoke_status !== undefined) {
+                        text = data.smoke_status;
+                        if (data.is_danger) {
+                             element.style.color = '#ff0000'; // Vermelho Sangue
+                             element.style.fontWeight = 'bold';
+                             text = '🔥 FOGO 🔥';
+                             // Animação de pulso (opcional, via CSS inline)
+                             div.style.border = '1px solid red';
+                        } else {
+                             element.style.color = '#4caf50'; // Verde
+                        }
+                    }
                     if (!text) text = 'ON';
 
                     element.innerText = text;
@@ -630,28 +668,40 @@ def get_frontend_ui():
 def get_devices_list():
     """
     Endpoint da API para o frontend saber que botões desenhar.
-    Filtra os 'triggers' das skills para encontrar apenas nomes de dispositivos.
+    Filtra os 'triggers' das skills para encontrar apenas nomes de dispositivos reais.
     """
     global SKILLS_LIST
     
-    # Lista de 'lixo' a remover dos triggers
+    # 1. LISTA NEGRA (Palavras que NUNCA devem aparecer como dispositivos)
+    # Removemos verbos, comandos e nomes genéricos de divisões/tipos
     BLACKLIST_TRIGGERS = [
-        # skill_tuya
+        # Verbos e Ações
         "liga", "ligar", "acende", "acender", "desliga", "desligar", "apaga", "apagar",
-        "como está", "estado", "temperatura", "humidade", "nível", "diagnostico", "dps",
-        "sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", 
-        "quarto", "sala", "wc", "leitura"
+        "ativa", "desativa", "põe", "tira", "mostra", "diz", "ver",
+        "como está", "estado", "nível", "diagnostico", "dps", "leitura",
+        "quanto", "gastar", "consumir",
+        "aspira", "limpa", "começa", "inicia", "para", "pára", "pausa",
+        "base", "casa", "volta", "carrega", "recolhe",
         
-        # skill_xiaomi
-        "candeeiro", "luz da mesinha", "abajur", # Estes são os 'objects', não os 'nicknames'
-        "aspirador", "robot", "viomi",
-        "aspira", "limpa", "começa", "inicia",
-        "para", "pára", "pausa",
-        "base", "casa", "volta", "carrega", "recolhe"
+        # Nomes Genéricos (Tuya/Sistema) que não são devices específicos
+        "sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha",
+        "quarto", "sala", "wc", "cozinha", "corredor", "entrada",
+        
+        # Palavras Chave de Skills
+        "cloogy", "kiome", "lista", "listar", "lista dispositivos", "listar dispositivos"
+    ]
+    
+    # 2. Palavras que identificam um SENSOR (Apenas Leitura -> Barra de Cima)
+    # Se o nome do dispositivo (definido no config) tiver isto, vai para cima.
+    # Nota: "consumo" e "quadro" não estão na Blacklist, por isso se tiveres
+    # um device chamado "consumo", ele passa aqui e é classificado como Sensor.
+    SENSOR_KEYWORDS = [
+        "sensor", "consumo", "quadro", "energia", "bateria", 
+        "temperatura", "humidade", "casa", "watts", "voltage", "solar"
     ]
     
     device_toggles = []
-    device_status_only = [] # Para sensores, etc.
+    device_status_only = []
 
     DEVICE_SKILL_NAMES = ["skill_cloogy", "skill_tuya", "skill_xiaomi"]
 
@@ -661,21 +711,23 @@ def get_devices_list():
             
             all_triggers = skill.get("triggers", [])
             
-            # Filtra a lista de triggers para obter apenas os nicknames
+            # Filtra triggers para ignorar o lixo
             device_nicknames = [
                 trigger for trigger in all_triggers 
                 if trigger not in BLACKLIST_TRIGGERS
             ]
             
             for nickname in device_nicknames:
-                if "sensor" in nickname.lower():
-                    device_status_only.append(nickname)
+                # Verifica se é um SENSOR (pelo nome)
+                if any(k in nickname.lower() for k in SENSOR_KEYWORDS):
+                    if nickname not in device_status_only:
+                        device_status_only.append(nickname)
                 else:
-                    # Só adiciona a toggle se a skill tiver a função get_status
+                    # Se não é sensor, é um INTERRUPTOR (Toggle)
+                    # Só adiciona se a skill tiver a função de status
                     if 'get_status' in skill:
-                        device_toggles.append(nickname)
-                    else:
-                        print(f"AVISO (UI): Dispositivo '{nickname}' ignorado (skill '{skill_name}' não tem 'get_status_for_device')")
+                        if nickname not in device_toggles:
+                            device_toggles.append(nickname)
 
     return jsonify({"status": "ok", "devices": {
         "toggles": device_toggles,
@@ -756,12 +808,12 @@ def main_loop():
     # Nível de agressividade do VAD (0 a 3). 
     # 3 é o mais agressivo a filtrar ruído (menos falsos positivos, mas deves falar claro).
     # 2 é um bom equilíbrio.
-    vad = webrtcvad.Vad(3) 
+    vad = webrtcvad.Vad(1) 
     
     try:
         # --- CORREÇÕES DA HOTWORD "PHANTASMA" ---
-        HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/olá-fantasma_pt_linux_v3_0_0.ppn' 
-        HOTWORD_NAME = "olá fantasma" 
+        HOTWORD_CUSTOM_PATH = '/opt/phantasma/models/ei-fantasma_pt_linux_v3_0_0.ppn' 
+        HOTWORD_NAME = "ei fantasma" 
         
         # 1. Encontra o caminho da biblioteca 'pvporcupine' instalada
         porcupine_lib_dir = os.path.dirname(pvporcupine.__file__)
@@ -842,7 +894,7 @@ def main_loop():
                     stream = None
                     
                     # --- RESPOSTA ---
-                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ao dispor!", "Sim?"]
+                    greetings = ["Diz coisas!", "Aqui estou!", "Diz lá.", "Ei!", "Sim?"]
                     greeting = random.choice(greetings)
                     play_tts(greeting) 
                     

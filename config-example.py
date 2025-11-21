@@ -10,7 +10,7 @@ SKILLS_DIR = os.path.join(BASE_DIR, "skills") # <--- NOVO
 
 # --- Configs de Hotword (Porcupine) ---
 ACCESS_KEY = "CHAVEPORCUPINE"
-HOTWORD_KEYWORD = "bumblebee"
+HOTWORD_KEYWORD = "phantasma"
 
 # --- Configs de Hardware (Áudio) ---
 MIC_SAMPLERATE = 16000 # 16kHz
@@ -33,7 +33,23 @@ SEARXNG_URL = "http://127.0.0.1:8081" # A tua porta do SearxNG
 
 # --- Prompts de IA ---
 WHISPER_INITIAL_PROMPT = "Português de Portugal. Bumblebee. Como estás? Que horas são? Meteorologia. Quanto é? Toca música. Põe música. Memoriza isto. 1050 a dividir por 30."
-
+PHONETIC_FIXES = {
+    # Luzes / Domótica
+    "liga-nos": "liga a luz",
+    "liga nos": "liga a luz",
+    "ligar-nos": "ligar a luz",
+    "na sala": "da sala",
+    "no quarto": "do quarto",
+    "acende-nos": "acende a luz",
+    
+    # Meteorologia
+    "não é que está ótimo": "como está o tempo",
+    "não é que está o tempo": "como está o tempo",
+    "como é que está ótimo": "como está o tempo",
+    
+    # Outros
+    "o tempo amanhã": "como vai estar o tempo amanhã",
+}
 # Skills
 GEMINI_API_KEY = "GEMINI_API_KEY"
 SHELLY_GAS_URL = "http://ip-address/status"

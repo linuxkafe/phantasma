@@ -1,8 +1,7 @@
 import httpx
-import config  # Importa o ficheiro de configuração principal
+import config
 
 # --- Configuração da Skill ---
-
 TRIGGER_TYPE = "contains"
 TRIGGERS = [
     "alarme de gás", 
@@ -15,62 +14,62 @@ TRIGGERS = [
     "monóxido"
 ]
 
-# --- Lógica Principal ---
-
+# --- Lógica Principal (Voz) ---
 def handle(user_prompt_lower, user_prompt_full):
-    """
-    Contacta o Shelly Gas para obter o estado (PPM e estado geral),
-    lendo a configuração do config.py e a estrutura JSON correta.
-    """
+    """ Contacta o Shelly Gas para obter o estado via voz. """
     
     if not hasattr(config, 'SHELLY_GAS_URL') or not config.SHELLY_GAS_URL:
-        print("ERRO skill_gas: A variável 'SHELLY_GAS_URL' não está definida no config.py")
-        return "A skill do gás não está configurada. Falta o URL do Shelly no ficheiro de configuração."
-    
-    shelly_url = config.SHELLY_GAS_URL 
-    
-    print(f"A ativar skill: skill_gas. A contactar {shelly_url}")
+        return "A skill do gás não está configurada."
     
     try:
         client = httpx.Client(timeout=5.0)
-        response = client.get(shelly_url)
+        response = client.get(config.SHELLY_GAS_URL)
         response.raise_for_status() 
-        
         data = response.json()
         
-        # --- LÓGICA DE EXTRAÇÃO CORRIGIDA (AGORA SÃO IRMÃOS) ---
+        gas_sensor = data.get('gas_sensor', {})
+        concentration = data.get('concentration', {})
         
-        # 1. Tenta obter o bloco "gas_sensor"
-        gas_sensor_data = data.get('gas_sensor')
-        if not isinstance(gas_sensor_data, dict):
-            print("ERRO skill_gas: Resposta JSON não continha um objeto 'gas_sensor' válido.")
-            return "O alarme respondeu, mas não encontrei o bloco 'gas_sensor' nos dados."
+        ppm = concentration.get('ppm')
+        status = gas_sensor.get('sensor_state')
 
-        # 2. Tenta obter o bloco "concentration" (separadamente)
-        concentration_data = data.get('concentration')
-        if not isinstance(concentration_data, dict):
-            print("ERRO skill_gas: Resposta JSON não continha um objeto 'concentration' válido.")
-            return "O alarme respondeu, mas não encontrei dados de 'concentration'."
-            
-        # 3. Extrai os valores de cada bloco
-        ppm = concentration_data.get('ppm')
-        gas_status = gas_sensor_data.get('sensor_state') # Ex: "normal"
+        if ppm is None or status is None:
+            return "O alarme respondeu, mas os dados não são claros."
 
-        if ppm is None or gas_status is None:
-            print(f"ERRO skill_gas: Não foi possível encontrar 'ppm' ou 'sensor_state' nos dados JSON.")
-            return "O alarme de gás respondeu, mas não percebi os dados de PPM ou estado."
-        # --- FIM DA CORREÇÃO ---
-
-        return f"O sensor de gás reporta {ppm} ppm. O estado atual é considerado: {gas_status}."
-
-    except httpx.ConnectError:
-        print(f"ERRO skill_gas: Falha ao ligar a {shelly_url}")
-        return f"Não consegui ligar-me ao alarme de gás nesse endereço."
-    
-    except httpx.HTTPStatusError as e:
-        print(f"ERRO skill_gas: O Shelly devolveu um erro HTTP: {e.response.status_code}")
-        return f"O alarme de gás deu um erro {e.response.status_code}. Verifica o dispositivo."
+        return f"O sensor de gás reporta {ppm} ppm. O estado é: {status}."
 
     except Exception as e:
-        print(f"ERRO inesperado na skill_gas: {e}")
-        return "Ocorreu um erro inesperado ao tentar ler o sensor de gás."
+        print(f"ERRO skill_gas: {e}")
+        return "Não consegui ler o sensor de gás."
+
+# --- API Status (Web UI) ---
+def get_status_for_device(nickname):
+    """ 
+    Retorna o estado para o dashboard web. 
+    O 'nickname' é ignorado porque só temos um Shelly Gas no config. 
+    """
+    if not hasattr(config, 'SHELLY_GAS_URL') or not config.SHELLY_GAS_URL:
+        return {"state": "unreachable"}
+
+    try:
+        client = httpx.Client(timeout=3.0)
+        response = client.get(config.SHELLY_GAS_URL)
+        if response.status_code != 200:
+            return {"state": "unreachable"}
+            
+        data = response.json()
+        
+        # Extração segura
+        ppm = data.get('concentration', {}).get('ppm', 0)
+        status_str = data.get('gas_sensor', {}).get('sensor_state', 'unknown')
+        
+        # Mapeia para o formato que o frontend espera
+        return {
+            "state": "on",      # "on" para aparecer ativo (não cinzento)
+            "ppm": ppm,         # Valor específico para mostrarmos no JS
+            "status": status_str
+        }
+        
+    except Exception as e:
+        print(f"ERRO Gas Status: {e}")
+        return {"state": "unreachable"}
