@@ -289,22 +289,22 @@ def _handle_sensor(nickname, details, prompt):
     if hum is not None: parts.append(f"{int(hum)}%")
     return f"{nickname}: {' '.join(parts)}" if parts else f"{nickname}: Dados estranhos."
 
-# --- API Status (Ajustado para usar a Cache) ---
+# skill_tuya.py (Substituir função get_status_for_device)
+
 def get_status_for_device(nickname):
     if not hasattr(config, 'TUYA_DEVICES') or nickname not in config.TUYA_DEVICES: return {"state": "unreachable"}
     details = config.TUYA_DEVICES[nickname]
-    
-    # Prioriza a cache do daemon
+
+    # 1. PRIORIZAÇÃO EXCLUSIVA DA CACHE
     dps = None
     cached = _get_cached_status(nickname)
     if cached: dps = cached.get('dps')
-        
-    if not dps: 
-        # Fallback: Tenta uma ligação rápida se a cache falhar
-        (d, status, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
-        if d: dps = status.get('dps')
-        if not dps: return {"state": "unreachable"}
-        
+
+    if not dps:
+        # Se a cache está vazia, o dispositivo está a dormir ou inacessível.
+        # Não tentamos polling, confiamos apenas no daemon.
+        return {"state": "unreachable"}
+
 
     if "sensor" in nickname.lower():
         res = {"state": "on"}
@@ -312,11 +312,10 @@ def get_status_for_device(nickname):
         if t is not None: res["temperature"] = float(t)/10
         if h is not None: res["humidity"] = int(h)
         return res
-        
+
     if "desumidificador" in nickname.lower():
         power = float(dps.get('19', 0))/10
         return {"state": "on" if dps.get('1') else "off", "power_w": power}
-        
+
     idx = "20" if "luz" in nickname.lower() else "1"
-    # Assume que qualquer chave DPS válida indica que o dispositivo está acessível
     return {"state": "on" if dps.get(idx) else "off"}

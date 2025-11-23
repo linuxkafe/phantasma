@@ -1,4 +1,6 @@
 import config
+import time # NOVO: Necessário para o polling e timestamps
+import threading # NOVO: Necessário para o daemon
 
 try:
     from miio import DeviceException
@@ -6,7 +8,14 @@ try:
     from miio import Yeelight
 except ImportError:
     print("AVISO: Biblioteca 'python-miio' não encontrada. A skill_xiaomi será desativada.")
+    class Yeelight: pass
+    class ViomiVacuum: pass
     pass
+
+# --- CACHE GLOBAL (Em Memória) ---
+MIIO_CACHE = {} 
+POLL_INTERVAL = 60 # Poll a cada 60 segundos
+# -----------------------------------
 
 # --- Listas de Palavras-Chave para Deteção de Tipo ---
 KEYWORDS_LAMP = ["candeeiro", "luz", "abajur", "lâmpada"]
@@ -29,7 +38,6 @@ def _get_triggers():
     if hasattr(config, 'MIIO_DEVICES') and isinstance(config.MIIO_DEVICES, dict):
         device_names = list(config.MIIO_DEVICES.keys())
     
-    # Junta os nomes dos dispositivos + comandos de ação
     return device_names + LAMP_ON + LAMP_OFF + VACUUM_START + VACUUM_STOP + VACUUM_HOME
 
 TRIGGERS = _get_triggers()
@@ -46,38 +54,86 @@ def _detect_device_type(nickname):
         return 'vacuum'
     return None
 
+# --- DAEMON/POLLING LOGIC ---
 
-# --- Router Principal ---
+def _update_cache(nickname, state):
+    """ Atualiza o estado na cache global em memória. """
+    MIIO_CACHE[nickname] = {"state": state, "timestamp": time.time()}
+
+def _poll_xiaomi_status():
+    """ Tenta comunicar com cada dispositivo e atualiza a cache. """
+    if not hasattr(config, 'MIIO_DEVICES'): return
+
+    for nickname, details in config.MIIO_DEVICES.items():
+        ip = details.get('ip'); token = details.get('token'); dev_type = _detect_device_type(nickname)
+        if not ip or not token or not dev_type: continue
+        
+        try:
+            if dev_type == 'lamp':
+                # Ligação direta para obter o estado
+                dev = Yeelight(ip, token)
+                props = dev.get_properties(['power'])
+                is_on = props and props[0] == 'on'
+                _update_cache(nickname, 'on' if is_on else 'off')
+
+            elif dev_type == 'vacuum':
+                # Ligação direta para obter o estado
+                dev = ViomiVacuum(ip, token)
+                status = dev.status()
+                # Se estiver a limpar ou a carregar (assumimos "on")
+                is_on = status.is_on 
+                _update_cache(nickname, 'on' if is_on else 'off')
+            
+            print(f"[Xiaomi Daemon] Cache atualizada para {nickname}: {MIIO_CACHE[nickname]['state']}")
+
+        except Exception as e:
+            # Em caso de falha (timeout), a cache não é atualizada. 
+            # O estado antigo persiste, evitando o flicker.
+            print(f"[Xiaomi Daemon] ERRO polling {nickname}: {e}")
+            pass 
+
+def _poll_loop():
+    """ Loop principal do Daemon Xiaomi (Roda no background). """
+    while True:
+        _poll_xiaomi_status()
+        time.sleep(POLL_INTERVAL)
+
+def init_skill_daemon():
+    """ Starts the polling thread (Required by assistant.py). """
+    if not hasattr(config, 'MIIO_DEVICES') or not config.MIIO_DEVICES: return
+    print(f"[Xiaomi Daemon] A iniciar polling a cada {POLL_INTERVAL} segundos...")
+    # Corre a thread de polling em background
+    threading.Thread(target=_poll_loop, daemon=True).start()
+
+
+# --- Router Principal (Mantido) ---
 
 def handle(user_prompt_lower, user_prompt_full):
     """
     Descobre qual o dispositivo mencionado e encaminha para a função correta.
+    (O código de controlo direto (on/off/start) é mantido aqui)
     """
     if not hasattr(config, 'MIIO_DEVICES') or not config.MIIO_DEVICES:
         return None
 
-    # 1. Encontrar o dispositivo no prompt
     matched_device = None
     matched_name = ""
 
-    # Procura por matches diretos (o nome do dispositivo está na frase)
     for name, details in config.MIIO_DEVICES.items():
         if name.lower() in user_prompt_lower:
             matched_name = name
             matched_device = details
-            break # Assume-se o primeiro match
+            break 
     
     if not matched_device:
-        return None # Nenhum dispositivo Xiaomi encontrado na frase
+        return None 
 
-    # 2. Detetar o tipo (Lâmpada ou Aspirador)
     dev_type = _detect_device_type(matched_name)
     
     if not dev_type:
         print(f"Skill Xiaomi: Dispositivo '{matched_name}' encontrado, mas não sei se é luz ou aspirador.")
         return None
 
-    # 3. Encaminhar
     ip = matched_device.get('ip')
     token = matched_device.get('token')
     
@@ -92,7 +148,7 @@ def handle(user_prompt_lower, user_prompt_full):
     return None
 
 
-# --- Controladores Específicos ---
+# --- Controladores Específicos (Mantidos) ---
 
 def _handle_lamp(name, ip, token, prompt):
     try:
@@ -100,10 +156,13 @@ def _handle_lamp(name, ip, token, prompt):
         
         if any(action in prompt for action in LAMP_OFF):
             dev.off()
+            # Tenta atualizar cache imediatamente após a ação bem-sucedida
+            _update_cache(name, 'off') 
             return f"{name.capitalize()} desligado."
         
         if any(action in prompt for action in LAMP_ON):
             dev.on()
+            _update_cache(name, 'on')
             return f"{name.capitalize()} ligado."
 
     except DeviceException as e:
@@ -121,14 +180,17 @@ def _handle_vacuum(name, ip, token, prompt):
         
         if any(action in prompt for action in VACUUM_HOME):
             dev.home()
+            # O estado será "off" (na base) ou "on" (a voltar)
             return f"{name.capitalize()} a voltar à base."
         
         if any(action in prompt for action in VACUUM_STOP):
             dev.stop()
+            # O estado deve ser "off" (parado)
             return f"{name.capitalize()} parado."
         
         if any(action in prompt for action in VACUUM_START):
             dev.start()
+            # O estado deve ser "on" (a limpar)
             return f"{name.capitalize()} a iniciar limpeza."
 
     except DeviceException as e:
@@ -141,41 +203,13 @@ def _handle_vacuum(name, ip, token, prompt):
     return None
 
 
-# --- API: Status para a Interface Web ---
+# --- API: Status para a Interface Web (Lê da Cache!) ---
 
 def get_status_for_device(nickname):
     """
-    Obtém o estado (ON/OFF) para desenhar o botão na Web UI.
+    Obtém o estado (ON/OFF) lendo da cache em memória.
     """
-    if not hasattr(config, 'MIIO_DEVICES') or nickname not in config.MIIO_DEVICES:
-        return {"state": "unreachable"}
-
-    details = config.MIIO_DEVICES[nickname]
-    ip = details.get('ip')
-    token = details.get('token')
-    dev_type = _detect_device_type(nickname)
-
-    if not ip or not token:
-        return {"state": "unreachable"}
-
-    try:
-        if dev_type == 'lamp':
-            dev = Yeelight(ip, token)
-            props = dev.get_properties(['power'])
-            if props and props[0] == 'on':
-                return {"state": "on"}
-            return {"state": "off"}
-
-        elif dev_type == 'vacuum':
-            dev = ViomiVacuum(ip, token)
-            status = dev.status()
-            # Se estiver a limpar, consideramos "on". Na base/pausa é "off".
-            if status.is_on: 
-                return {"state": "on"}
-            return {"state": "off"}
-            
-    except Exception as e:
-        print(f"ERRO Xiaomi Status ({nickname}): {e}")
-        return {"state": "unreachable"}
-        
+    # Esta função é muito leve, pois só lê um dicionário.
+    if nickname in MIIO_CACHE:
+        return MIIO_CACHE[nickname]
     return {"state": "unreachable"}
