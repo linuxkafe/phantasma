@@ -3,12 +3,18 @@ import time
 import re
 import json
 import os
+import socket # NECESSÁRIO para o daemon
+import sys # NECESSÁRIO para o daemon
+import threading # NECESSÁRIO para o daemon
 
 try:
     import tinytuya
+    # Importar OutletDevice para o polling do daemon (mais robusto)
+    from tinytuya import OutletDevice, Device 
 except ImportError:
     print("AVISO: Biblioteca 'tinytuya' não encontrada. A skill_tuya será desativada.")
-    pass
+    class Device: pass
+    OutletDevice = Device
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
@@ -22,7 +28,14 @@ BASE_NOUNS = [
     "quarto", "sala", "wc" 
 ]
 VERSIONS_TO_TRY = [3.3, 3.1, 3.2, 3.4, 3.5]
-CACHE_FILE = "tuya_cache.json"
+
+# --- CONSTANTES DO DAEMON (Integradas) ---
+# Usamos o caminho absoluto do daemon original para o ficheiro de cache
+CACHE_FILE = "/opt/phantasma/tuya_cache.json" 
+PORTS_TO_LISTEN = [6666, 6667] 
+LAST_POLL = {} 
+POLL_COOLDOWN = 5 
+# ------------------------------------------
 
 def _get_tuya_triggers():
     all_actions = ACTIONS_ON + ACTIONS_OFF + STATUS_TRIGGERS + DEBUG_TRIGGERS
@@ -33,20 +46,161 @@ def _get_tuya_triggers():
 
 TRIGGERS = _get_tuya_triggers()
 
-# --- Helpers ---
-def _get_cached_status(nickname):
-    if not os.path.exists(CACHE_FILE): return None
+# --- Funções de Dados e Cache (Do Daemon) ---
+
+def _load_cache():
+    """ Carrega a cache persistente. """
+    if not os.path.exists(CACHE_FILE): return {}
     try:
         with open(CACHE_FILE, 'r') as f:
-            data = json.load(f)
-            return data.get(nickname)
-    except: return None
+            return json.load(f)
+    except: return {}
+
+def _save_cache(data):
+    """ Guarda a cache persistentemente. """
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE) or '.', exist_ok=True)
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"[ERRO IO] Ao guardar cache: {e}")
+
+def _get_cached_status(nickname):
+    """ Obtém o status de um dispositivo a partir da cache. """
+    data = _load_cache()
+    device_data = data.get(nickname)
+    if device_data and 'dps' in device_data:
+        return device_data
+    return None
+
+def _get_device_name_by_ip(ip):
+    """ Procura o nome do dispositivo pelo IP nas configs. """
+    if not hasattr(config, 'TUYA_DEVICES'): return None, None
+    for name, details in config.TUYA_DEVICES.items():
+        if details.get('ip') == ip:
+            return name, details
+    return None, None
+
+def _poll_device_task(name, details, force=False):
+    """ Tenta conectar e ler o estado do dispositivo (Lógica do Daemon). """
+    ip = details.get('ip')
+    global LAST_POLL 
+
+    if not force:
+        if time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN:
+            return
+    
+    LAST_POLL[name] = time.time()
+
+    versions = [3.3, 3.1, 3.4, 3.2]
+    success = False
+    data_dps = None
+    error_msg = ""
+    DeviceClass = OutletDevice if 'OutletDevice' in globals() else Device
+
+    for ver in versions:
+        try:
+            d = DeviceClass(details['id'], ip, details['key'])
+            d.set_socketTimeout(3)
+            d.set_version(ver)
+            status = d.status()
+            
+            if 'dps' in status:
+                data_dps = status['dps']
+                success = True
+                break
+            elif status.get('Err') == '905':
+                error_msg = "Erro 905 (Chave/IP)"
+                break
+        except Exception as e:
+            error_msg = str(e)
+            continue
+
+    if success and data_dps:
+        try:
+            current_cache = _load_cache()
+            prev_data = current_cache.get(name, {})
+            prev_dps = prev_data.get('dps')
+
+            current_cache[name] = {"dps": data_dps, "timestamp": time.time()}
+            
+            if prev_dps != data_dps:
+                print(f"[Tuya Daemon] [NOVO] '{name}': {data_dps}")
+                _save_cache(current_cache)
+            elif force:
+                print(f"[Tuya Daemon] [OK] '{name}' (Online)")
+                _save_cache(current_cache)
+            else:
+                _save_cache(current_cache)
+                
+        except Exception as e:
+            print(f"[Tuya Daemon] [ERRO Cache] {e}")
+    else:
+        if force or "905" in error_msg:
+             print(f"[Tuya Daemon] [FALHA] '{name}' ({ip}): {error_msg}")
+
+
+# --- Listener UDP (Do Daemon) ---
+
+def _udp_listener(port):
+    """ Mantém a escuta de heartbeats Tuya para triggerar o polling silencioso. """
+    if "tinytuya" not in globals(): return
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(('', port))
+        print(f"[Tuya Daemon] À escuta na porta UDP {port}...")
+    except Exception as e:
+        print(f"[Tuya Daemon] [ERRO] Falha ao bind na porta {port}: {e}")
+        return
+
+    while True:
+        try:
+            sock.settimeout(1.0) 
+            data, addr = sock.recvfrom(4096)
+            ip = addr[0]
+            name, details = _get_device_name_by_ip(ip)
+            if name and details:
+                threading.Thread(target=_poll_device_task, args=(name, details, False)).start()
+        except socket.timeout:
+            continue
+        except Exception as e:
+            time.sleep(1)
+
+
+# --- Função de Inicialização (Para chamar do assistant.py) ---
+
+def start_tuya_daemon():
+    """ 
+    Executa o warm-up e inicia as threads UDP listeners. 
+    Chamada a partir do assistant.py no startup.
+    """
+    if "tinytuya" not in globals() or not hasattr(config, 'TUYA_DEVICES') or not config.TUYA_DEVICES: 
+        print("[Tuya Daemon] Não iniciado: Requisitos em falta.")
+        return
+
+    print("--- Phantasma Tuya Daemon (Integrado) ---")
+    
+    # 1. Warm-up: Scan explícito no arranque
+    print("[Tuya Daemon] A verificar dispositivos (warm-up)...")
+    for name, details in config.TUYA_DEVICES.items():
+        threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
+
+    # 2. Inicia listeners UDP em threads separadas
+    for port in PORTS_TO_LISTEN:
+        t = threading.Thread(target=_udp_listener, args=(port,))
+        t.daemon = True 
+        t.start()
+    
+    print("[Tuya Daemon] Listeners UDP iniciados.")
+
+
+# --- Lógica Principal da Skill (Quase inalterada) ---
 
 def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
+    # Função para controlo direto (ON/OFF), que requer ligação imediata
     if 'x' in dev_ip.lower(): return (None, "IP inválido", None)
-    
-    # REMOVIDO: Print de tentativa de ligação para reduzir ruído
-    # print(f"Skill_Tuya: A tentar ligar a {dev_id} @ {dev_ip}...")
     
     for version in VERSIONS_TO_TRY:
         try:
@@ -58,7 +212,6 @@ def _try_connect_with_versioning(dev_id, dev_ip, dev_key):
         except: break 
     return (None, None, None)
 
-# --- Lógica Principal ---
 def handle(user_prompt_lower, user_prompt_full):
     if "tinytuya" not in globals(): return "Falta biblioteca tinytuya."
     if not hasattr(config, 'TUYA_DEVICES'): return None
@@ -71,7 +224,7 @@ def handle(user_prompt_lower, user_prompt_full):
     
     if not final_action: return None
 
-    # Matching Inteligente (Bulk vs Single)
+    # Matching Inteligente (MANTIDO)
     targets = []
     target_keyword = None
     for noun in BASE_NOUNS:
@@ -109,7 +262,7 @@ def handle(user_prompt_lower, user_prompt_full):
     if not responses: return None
     return ", ".join(responses) + "."
 
-# --- Processadores ---
+# --- Processadores (Ajustados para usar as helpers de cache) ---
 def _handle_debug_status(nickname, details):
     (d, result, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
     if d: return f"{nickname}: Online"
@@ -123,36 +276,47 @@ def _handle_switch(nickname, details, action, dps_index):
 
 def _handle_sensor(nickname, details, prompt):
     (d, data, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
-    dps = data.get('dps') if d else {}
+    dps = data.get('dps') if d and data else None
+    
     if not dps:
         cached = _get_cached_status(nickname)
         if cached and 'dps' in cached: dps = cached['dps']
         else: return f"Sem dados do {nickname}."
+        
     temp = dps.get('1') or dps.get('102'); hum = dps.get('2') or dps.get('103')
     parts = []
-    if temp: parts.append(f"{float(temp)/10}°C")
-    if hum: parts.append(f"{int(hum)}%")
+    if temp is not None: parts.append(f"{float(temp)/10}°C")
+    if hum is not None: parts.append(f"{int(hum)}%")
     return f"{nickname}: {' '.join(parts)}" if parts else f"{nickname}: Dados estranhos."
 
-# --- API Status ---
+# --- API Status (Ajustado para usar a Cache) ---
 def get_status_for_device(nickname):
     if not hasattr(config, 'TUYA_DEVICES') or nickname not in config.TUYA_DEVICES: return {"state": "unreachable"}
     details = config.TUYA_DEVICES[nickname]
-    (d, status, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
-    dps = status.get('dps') if d else None
-    if not dps:
-        cached = _get_cached_status(nickname)
-        if cached: dps = cached.get('dps')
-    if not dps: return {"state": "unreachable"}
+    
+    # Prioriza a cache do daemon
+    dps = None
+    cached = _get_cached_status(nickname)
+    if cached: dps = cached.get('dps')
+        
+    if not dps: 
+        # Fallback: Tenta uma ligação rápida se a cache falhar
+        (d, status, err) = _try_connect_with_versioning(details['id'], details['ip'], details['key'])
+        if d: dps = status.get('dps')
+        if not dps: return {"state": "unreachable"}
+        
 
     if "sensor" in nickname.lower():
         res = {"state": "on"}
         t = dps.get('1') or dps.get('102'); h = dps.get('2') or dps.get('103')
-        if t: res["temperature"] = float(t)/10
-        if h: res["humidity"] = int(h)
+        if t is not None: res["temperature"] = float(t)/10
+        if h is not None: res["humidity"] = int(h)
         return res
+        
     if "desumidificador" in nickname.lower():
         power = float(dps.get('19', 0))/10
         return {"state": "on" if dps.get('1') else "off", "power_w": power}
+        
     idx = "20" if "luz" in nickname.lower() else "1"
+    # Assume que qualquer chave DPS válida indica que o dispositivo está acessível
     return {"state": "on" if dps.get(idx) else "off"}

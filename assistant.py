@@ -27,39 +27,30 @@ from tools import search_with_searxng
 SKILLS_LIST = []
 
 def load_skills():
-    """ Carrega dinamicamente todas as 'skills' da pasta /skills """
     print("A carregar skills...")
     skill_files = glob.glob(os.path.join(config.SKILLS_DIR, "skill_*.py"))
-
     for f in skill_files:
         try:
             skill_name = os.path.basename(f)[:-3]
             spec = importlib.util.spec_from_file_location(skill_name, f)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-
-            # --- NOVO: Prepara o registo da skill (inclui triggers_lower) ---
+            
             raw_triggers = getattr(module, 'TRIGGERS', [])
             triggers_lower = [t.lower() for t in raw_triggers]
 
-            skill_registry_entry = {
+            SKILLS_LIST.append({
                 "name": skill_name,
-                "trigger_type": module.TRIGGER_TYPE,
+                "module": module, # <-- NOVO: Armazena o objeto do módulo
+                "trigger_type": getattr(module, 'TRIGGER_TYPE', 'contains'),
                 "triggers": raw_triggers,
                 "triggers_lower": triggers_lower,
-                "handle": module.handle
-            }
-            
-            if hasattr(module, 'get_status_for_device'):
-                print(f"  -> '{skill_name}' tem a função 'get_status_for_device'.")
-                skill_registry_entry['get_status'] = module.get_status_for_device
-            
-            # Regista a skill
-            SKILLS_LIST.append(skill_registry_entry)
+                "handle": module.handle,
+                "get_status": getattr(module, 'get_status_for_device', None)
+            })
             print(f"  -> Skill '{skill_name}' carregada.")
-            
         except Exception as e:
-            print(f"AVISO: Falha ao carregar a skill {f}: {e}")
+            print(f"AVISO: Falha ao carregar {f}: {e}")
 
 # --- Globais ---
 whisper_model = None
@@ -482,11 +473,58 @@ def main():
             print("Recursos do Porcupine libertados.")
         sys.exit(0)
 
-if __name__=="__main__":
-    setup_database(); load_skills();
-    try: whisper_model=whisper.load_model(config.WHISPER_MODEL,device="cpu"); ollama_client=ollama.Client()
-    except: pass
-    conversation_history=[{'role':'system','content':config.SYSTEM_PROMPT}]
-    threading.Thread(target=start_api_server, daemon=True).start()
-    main()
+if __name__ == "__main__":
 
+    # Define as threads globais (mantido do ficheiro original)
+    if config.OLLAMA_THREADS > 0:
+        os.environ['OLLAMA_NUM_THREAD'] = str(config.OLLAMA_THREADS)
+        print(f"INFO: A limitar threads do Ollama a {config.OLLAMA_THREADS} (Apenas para o snap service)")
+    try:
+        if config.WHISPER_THREADS > 0:
+            torch.set_num_threads(config.WHISPER_THREADS)
+            print(f"INFO: A limitar threads do Torch/Whisper a {config.WHISPER_THREADS}")
+        if not torch.cuda.is_available():
+            print("INFO: CUDA não disponível. A forçar Whisper a correr em CPU.")
+    except Exception as e:
+        print(f"AVISO: Falha ao definir threads do Torch: {e}")
+
+    # Inicializa a BD
+    setup_database()
+
+    # Carrega as skills dinamicamente
+    load_skills()
+
+    # Carrega os modelos pesados
+    try:
+        print(f"A carregar modelos pesados (Whisper: {config.WHISPER_MODEL}, Ollama: {config.OLLAMA_MODEL_PRIMARY})...")
+        whisper_model = whisper.load_model(config.WHISPER_MODEL, device="cpu")
+        ollama_client = ollama.Client()
+        print("Modelos carregados com sucesso.")
+    except Exception as e:
+        print(f"ERRO: Falha ao carregar modelos: {e}")
+        sys.exit(1)
+
+    # Inicializa o Histórico de Conversa
+    print("A inicializar o histórico de conversa (memória de sessão)...")
+    conversation_history = [
+            {'role': 'system', 'content': config.SYSTEM_PROMPT}
+            ]
+    # Iniciar API e Loop de Voz
+    threading.Thread(target=start_api_server, daemon=True).start()
+    
+    # --- NOVO: Executa inicialização de daemons genéricos nas skills ---
+    print("\n--- A procurar e iniciar daemons de skills em background ---")
+    for skill in SKILLS_LIST:
+        module = skill["module"] # <-- NOVO: Obtém o objeto do módulo
+        
+        # Verifica se o módulo tem a função 'init_skill_daemon'
+        if hasattr(module, 'init_skill_daemon'):
+            try:
+                print(f"-> A iniciar daemon para '{skill['name']}'...")
+                # Chama a função de inicialização no objeto do módulo
+                module.init_skill_daemon()
+            except Exception as e:
+                print(f"ERRO CRÍTICO: Falha ao iniciar daemon de '{skill['name']}': {e}")
+    # ----------------------------------------------------------------------
+    
+    main()
