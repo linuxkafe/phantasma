@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import threading
+import tempfile
 
 try:
     import tinytuya
@@ -46,27 +47,34 @@ def _load_cache():
 
 def _save_cache(data):
     """
-    Guarda a cache de forma atómica para evitar corrupção de dados
-    quando o daemon e a skill tentam escrever ao mesmo tempo.
+    Guarda a cache usando um ficheiro temporário ÚNICO para cada escrita.
+    Isto resolve conflitos entre threads ou processos simultâneos.
     """
-    tmp_file = f"{CACHE_FILE}.tmp"
+    # Garante que o ficheiro temporário é criado na mesma pasta (importante para o atomic rename)
+    dir_name = os.path.dirname(CACHE_FILE)
+    
     try:
-        # 1. Escreve primeiro num ficheiro temporário
-        with open(tmp_file, 'w') as f:
-            json.dump(data, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno()) # Força a escrita no disco físico
+        # Cria um ficheiro temporário com nome aleatório (ex: tmpxyz123)
+        # delete=False porque queremos renomeá-lo no fim
+        with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False) as tf:
+            json.dump(data, tf, indent=4)
+            tf.flush()
+            os.fsync(tf.fileno()) # Força a escrita física no disco
+            temp_name = tf.name # Guarda o nome para usar no replace
 
-        # 2. Executa a substituição atómica (Atomic Replace)
-        # No Linux, o os.replace é atómico. Se falhar, o ficheiro original mantém-se intacto.
-        os.replace(tmp_file, CACHE_FILE)
+        # Substituição atómica. 
+        # Como o nome temp_name é único, ninguém mais está a mexer nele.
+        os.replace(temp_name, CACHE_FILE)
+        
+        # Define permissões para que todos (daemon e skill) possam ler/escrever
+        os.chmod(CACHE_FILE, 0o666)
 
     except Exception as e:
         print(f"[Tuya] Erro cache: {e}")
-        # Limpeza: Se falhou, tenta apagar o lixo temporário
-        if os.path.exists(tmp_file):
+        # Limpeza em caso de erro
+        if 'temp_name' in locals() and os.path.exists(temp_name):
             try:
-                os.remove(tmp_file)
+                os.remove(temp_name)
             except OSError:
                 pass
 
@@ -166,13 +174,13 @@ def get_status_for_device(nickname):
     return result
 
 # --- Router de Voz ---
-
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'TUYA_DEVICES'): return None
 
     action = None
-    if any(x in user_prompt_lower for x in ACTIONS_ON): action = "on"
-    elif any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
+    # CORREÇÃO: Verificar "OFF" primeiro para evitar conflito com "liga"/"desliga"
+    if any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
+    elif any(x in user_prompt_lower for x in ACTIONS_ON): action = "on"
     elif any(x in user_prompt_lower for x in STATUS_TRIGGERS): action = "status"
     
     if not action: return None
@@ -180,6 +188,7 @@ def handle(user_prompt_lower, user_prompt_full):
     target_nick = None
     target_conf = None
     
+    # (O resto da função mantém-se igual daqui para baixo...)
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
             target_nick = nick; target_conf = conf; break
@@ -205,9 +214,13 @@ def handle(user_prompt_lower, user_prompt_full):
 
     if action in ["on", "off"]:
         try:
+            # Tenta ligação direta rápida para ação imediata
             d = OutletDevice(target_conf['id'], target_conf['ip'], target_conf['key'])
             d.set_socketTimeout(2); d.set_version(3.3)
+            
+            # Determina o DPS (20 para luzes, 1 para tomadas genéricas)
             idx = 20 if any(x in target_nick.lower() for x in ['luz', 'lâmpada']) else 1
+            
             d.set_value(idx, action == "on", nowait=True)
             return f"{target_nick} {'ligado' if action=='on' else 'desligado'}."
         except: return f"Erro ao controlar {target_nick}."

@@ -181,7 +181,7 @@ def handle(user_prompt_lower, user_prompt_full):
         if day_index == 0 and is_night:
             prefix = f"Nesta noite em {target_city_norm.title()}"
             # À noite não faz sentido falar de UV nem de Máxima do dia
-            response = f"{prefix}, o céu está {w_desc}. A mínima prevista foi de {t_min}°."
+            response = f"{prefix}, está previsto {w_desc}. A mínima prevista foi de {t_min}°."
         else:
             response = (
                 f"{prefix} em {target_city_norm.title()}: "
