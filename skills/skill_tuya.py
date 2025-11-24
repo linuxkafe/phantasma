@@ -24,7 +24,8 @@ LAST_POLL = {}
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar"]
-STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura"]
+# EDITADO: Adicionadas palavras "quanto", "gastar", "consumo"
+STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura", "quanto", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala"]
 VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.2]
@@ -36,7 +37,6 @@ def _get_tuya_triggers():
     return base
 
 TRIGGERS = _get_tuya_triggers()
-
 # --- Helpers de Cache e Daemon ---
 
 def _load_cache():
@@ -178,21 +178,24 @@ def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'TUYA_DEVICES'): return None
 
     action = None
-    # CORREÇÃO: Verificar "OFF" primeiro para evitar conflito com "liga"/"desliga"
+
+    # LÓGICA DE PRIORIDADE: OFF > ON > STATUS
+    # Verificamos sempre o OFF primeiro por segurança.
     if any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
     elif any(x in user_prompt_lower for x in ACTIONS_ON): action = "on"
     elif any(x in user_prompt_lower for x in STATUS_TRIGGERS): action = "status"
-    
+
     if not action: return None
 
     target_nick = None
     target_conf = None
-    
-    # (O resto da função mantém-se igual daqui para baixo...)
+
+    # 1. Procura direta pelo nickname completo (ex: "luz da sala")
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
             target_nick = nick; target_conf = conf; break
-            
+
+    # 2. Procura heurística (ex: "luz" + "sala")
     if not target_nick:
         for noun in BASE_NOUNS:
             if noun in user_prompt_lower:
@@ -203,25 +206,32 @@ def handle(user_prompt_lower, user_prompt_full):
 
     if not target_nick: return None
 
+    # Execução da Ação STATUS
     if action == "status":
+        # Nota: esta função depende da cache atualizada pelo daemon
         st = get_status_for_device(target_nick)
         if st['state'] == 'unreachable': return f"Não consigo aceder ao {target_nick}."
-        
+
         resp = f"O {target_nick} está {st['state']}"
         if 'power_w' in st: resp += f" a gastar {st['power_w']} Watts"
         if 'temperature' in st: resp += f", temperatura {st['temperature']} graus"
+
+        # Pequeno ajuste gramatical se a resposta for curta
         return resp + "."
 
+    # Execução das Ações ON/OFF
     if action in ["on", "off"]:
         try:
             # Tenta ligação direta rápida para ação imediata
             d = OutletDevice(target_conf['id'], target_conf['ip'], target_conf['key'])
             d.set_socketTimeout(2); d.set_version(3.3)
-            
-            # Determina o DPS (20 para luzes, 1 para tomadas genéricas)
+
+            # Determina o DPS (20 para luzes, 1 para tomadas genéricas/desumidificadores)
             idx = 20 if any(x in target_nick.lower() for x in ['luz', 'lâmpada']) else 1
-            
+
+            # Envia o comando (True para ON, False para OFF)
             d.set_value(idx, action == "on", nowait=True)
+
             return f"{target_nick} {'ligado' if action=='on' else 'desligado'}."
         except: return f"Erro ao controlar {target_nick}."
 
