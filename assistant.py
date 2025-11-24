@@ -477,6 +477,7 @@ def ui():
                 if (n.includes('exaustor')||n.includes('ventoinha')) return '💨';
                 if (n.includes('desumidificador')||n.includes('humidade')) return '💧';
                 if (n.includes('gás')||n.includes('incêndio')||n.includes('fumo')) return '🔥';
+                if (n.includes('carro')||n.includes('carrinha')) return '🚗';
                 if (n.includes('tomada')||n.includes('ficha')||n.includes('forno')) return '⚡';
                 return '⚡';
             }
