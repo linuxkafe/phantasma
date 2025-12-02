@@ -74,7 +74,7 @@ def _extract_json(text):
         return None
 
 def _consolidate_memories():
-    """ TAREFA DE MANUTENÇÃO: Funde memórias. """
+    """ TAREFA DE MANUTENÇÃO: Funde memórias (Robusta contra Texto Cru). """
     print("🧠 [Dream] A iniciar consolidação de memória...")
     
     conn = None
@@ -89,24 +89,34 @@ def _consolidate_memories():
             return
 
         ids_to_delete = [r[0] for r in rows]
-        texts_to_merge = [r[1] for r in rows]
         
+        # Tratamento Prévio: Tentar carregar JSON, se falhar, usa a string crua
+        processed_texts = []
+        for r in rows:
+            txt = r[1]
+            try:
+                # Se for JSON válido, ótimo
+                json.loads(txt)
+                processed_texts.append(txt)
+            except:
+                # Se for texto cru, envolve numa estrutura para o prompt entender
+                processed_texts.append(f"RAW_TEXT_ENTRY: {txt}")
+
+        # PROMPT OTIMIZADO PARA MIXED DATA
         consolidation_prompt = f"""
-        SYSTEM: You are a JSON Data Optimizer. Output JSON ONLY.
+        SYSTEM: You are a Database Cleaner. Input contains mixed JSON and RAW TEXT.
         
-        RAW FRAGMENTS:
-        {json.dumps(texts_to_merge, ensure_ascii=False)}
+        INPUT DATA:
+        {json.dumps(processed_texts, ensure_ascii=False)}
         
-        TASK: Merge into a SINGLE JSON object.
-        RULES:
-        1. "tags": Unique list of strings in Portuguese.
-        2. "facts": Unique list of STRINGS in English.
-           Format: "Subject -> Predicate -> Object"
-           DO NOT use objects {{}} inside the facts array.
-        3. Valid JSON syntax (double quotes).
+        TASK:
+        1. Convert RAW_TEXT_ENTRY items into "Subject -> Predicate -> Object" facts (English).
+        2. Merge with existing JSON facts.
+        3. Flatten any nested arrays (e.g. ["a","b"] becomes "a -> b").
+        4. Output SINGLE valid JSON.
         
         OUTPUT FORMAT:
-        {{ "tags": ["A", "B"], "facts": ["X -> Y -> Z"] }}
+        {{ "tags": ["TagPT"], "facts": ["Subj -> verb -> Obj"] }}
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
@@ -115,7 +125,7 @@ def _consolidate_memories():
         merged_json_obj = _extract_json(resp['message']['content'])
         
         if not merged_json_obj:
-            print("ERRO [Dream] Consolidação falhou: JSON inválido/irrecuperável.")
+            print("ERRO [Dream] Consolidação falhou: JSON inválido.")
             return
 
         merged_json_str = json.dumps(merged_json_obj, ensure_ascii=False)
@@ -125,7 +135,7 @@ def _consolidate_memories():
         cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", (datetime.datetime.now(), merged_json_str))
         
         conn.commit()
-        print(f"🧠 [Dream] Consolidação concluída! {len(ids_to_delete)} memórias fundidas.")
+        print(f"🧠 [Dream] Consolidação concluída! {len(ids_to_delete)} itens fundidos.")
         
     except Exception as e:
         print(f"ERRO [Dream] Falha na consolidação: {e}")
