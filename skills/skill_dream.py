@@ -2,6 +2,7 @@ import threading
 import time
 import datetime
 import random
+import sqlite3
 import ollama
 import config
 from tools import search_with_searxng
@@ -14,32 +15,67 @@ TRIGGERS = ["vai sonhar", "aprende algo", "desenvolve a persona", "vai estudar"]
 # Hora a que o assistente vai "sonhar" sozinho (formato 24h)
 DREAM_TIME = "02:30" 
 
+# Número de memórias passadas a consultar para dar contexto ao novo sonho
+MEMORY_CONTEXT_LIMIT = 3
+
+def _get_recent_memories():
+    """ 
+    Lê as últimas entradas da BD local para dar contexto ao sonho.
+    Não usa o RAG (que é por keyword), mas sim um SELECT direto por ordem cronológica.
+    """
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        # Recupera as últimas X memórias
+        cursor.execute("SELECT text FROM memories ORDER BY id DESC LIMIT ?", (MEMORY_CONTEXT_LIMIT,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return "No previous memories found. This is the first thought."
+            
+        # Inverte para ficar cronológico (Antigo -> Novo)
+        history = [r[0] for r in reversed(rows)]
+        return "\n".join(history)
+    except Exception as e:
+        print(f"ERRO [Dream] Ler DB: {e}")
+        return ""
+
 def perform_dreaming():
     """ 
-    Processo de 3 etapas: 
-    1. Introspeção (Gerar Tópico)
+    Processo de 3 etapas com Continuidade:
+    1. Contexto (Ler sonhos anteriores) -> Introspeção (Gerar Tópico)
     2. Pesquisa (SearxNG)
-    3. Internalização (Guardar no RAG com a persona)
+    3. Internalização Otimizada (Guardar formato Denso para LLM)
     """
     print("💤 [Dream] A iniciar processo de aprendizagem noturna...")
     
+    # 0. CONTEXTO
+    recent_context = _get_recent_memories()
+    
     # 1. INTROSPEÇÃO
-    # Pede ao Ollama para inventar uma curiosidade que a persona gostaria de saber
+    # Pede ao Ollama para gerar uma query.
+    # NOTA: Removemos os temas hardcoded. Ele agora deve seguir o SYSTEM_PROMPT.
     introspection_prompt = f"""
     {config.SYSTEM_PROMPT}
     
-    TASK: You are alone and thinking. Based on your dark/vegan/philosophical persona, generate a single, specific search query to learn something new today.
-    It could be about gothic history, ethical veganism, space, or melancholic poetry.
+    PREVIOUS THOUGHTS (Context):
+    {recent_context}
+    
+    TASK: You are alone in the void. Analyze your previous thoughts above.
+    Based strictly on your ETHICAL CORE (Veganism, Equality) and your PERSONA (The Phantom), generate a SINGLE, specific search query to investigate the next logical step of this knowledge path.
+    If the context is empty, choose a topic that matters deeply to your specific PERSONA defined above.
+    
     OUTPUT: Write ONLY the search query string. No quotes, no preamble.
     """
     
     try:
         # Usa o modelo primário para gerar a query
-        client = ollama.Client(timeout=60)
+        client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
         resp_intro = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': introspection_prompt}])
         search_query = resp_intro['message']['content'].strip().replace('"', '')
         
-        print(f"💤 [Dream] Tópico escolhido: '{search_query}'")
+        print(f"💤 [Dream] Tópico evolutivo: '{search_query}'")
         
         # 2. PESQUISA NA WEB
         # Usa a ferramenta existente para ir buscar factos
@@ -47,35 +83,41 @@ def perform_dreaming():
         
         if not search_results or len(search_results) < 10:
             print("💤 [Dream] O sonho foi vazio (sem resultados na web).")
-            return "Tentei aprender algo novo, mas a neblina da web estava demasiado espessa."
+            return "A neblina da web estava demasiado espessa para aprender algo novo."
 
-        # 3. INTERNALIZAÇÃO
-        # Pede ao Ollama para reescrever os factos como se fosse uma memória ou reflexão pessoal
+        # 3. INTERNALIZAÇÃO OTIMIZADA PARA LLM
+        # Aqui instruímos o modelo a ignorar a "conversa" e guardar factos puros.
         internalize_prompt = f"""
         {config.SYSTEM_PROMPT}
         
         CONTEXT FROM WEB:
         {search_results}
         
-        TASK: Internalize this information. Write a short, first-person thought or memory based on these facts.
-        It MUST sound like YOU (The Phantom). Dark, concise, and profound.
-        Start with phrases like "Nas minhas deambulações descobri...", "A noite ensinou-me...", "Refleti que...".
-        OUTPUT: The thought in Portuguese (Portugal). Max 2 sentences.
+        TASK: Compress this information into a DENSE KNOWLEDGE REPRESENTATION for your long-term memory.
+        - Ignore grammar and stop words.
+        - Focus on entities, relationships, numbers, and definitions.
+        - Format strictly for machine reading/RAG retrieval optimization.
+        - Language: Portuguese (Portugal).
+        
+        OUTPUT EXAMPLE: 
+        Tópico: Buracos Negros. Definição: Região espaço-tempo gravidade extrema. Horizonte eventos: ponto sem retorno. Hawking Radiation: emissão teórica termodinâmica.
         """
         
         resp_final = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': internalize_prompt}])
-        thought = resp_final['message']['content'].strip()
+        dense_thought = resp_final['message']['content'].strip()
         
         # 4. GUARDAR NA MEMÓRIA (RAG)
-        # Ao usar save_to_rag, isto fica disponível para o retrieve_from_rag no futuro
-        save_to_rag(thought)
+        # Guarda o texto denso
+        save_to_rag(dense_thought)
         
-        print(f"💤 [Dream] Memória guardada: {thought}")
-        return f"A minha mente expandiu-se nas sombras. {thought}"
+        print(f"💤 [Dream] Conhecimento compactado e arquivado: {dense_thought[:50]}...")
+        
+        # Retorna uma mensagem genérica para o utilizador/log
+        return f"Expandir o meu conhecimento sobre '{search_query}'. Dados assimilados no núcleo."
 
     except Exception as e:
         print(f"ERRO [Dream]: {e}")
-        return "Tive um pesadelo e não consegui aprender nada."
+        return "Tive um pesadelo e a conexão falhou."
 
 # --- Daemon de Agendamento ---
 
@@ -107,5 +149,5 @@ def init_skill_daemon():
 
 def handle(user_prompt_lower, user_prompt_full):
     """ Permite forçar o processo via comando de voz """
-    # Não precisa de lógica complexa, o router já validou o trigger
+    # Prioridade de lógica: Não existe 'Desliga' nesta skill, apenas trigger de ação única.
     return perform_dreaming()
