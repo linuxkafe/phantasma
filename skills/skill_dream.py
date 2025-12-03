@@ -120,8 +120,12 @@ def _consolidate_memories():
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
-        resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': consolidation_prompt}])
-        
+        resp = client.chat(
+            model=config.OLLAMA_MODEL_PRIMARY, 
+            messages=[{'role': 'user', 'content': consolidation_prompt}],
+            options={'num_ctx': config.OLLAMA_CONTEXT_SIZE}
+        )
+
         merged_json_obj = _extract_json(resp['message']['content'])
         
         if not merged_json_obj:

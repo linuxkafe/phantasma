@@ -46,8 +46,12 @@ def handle(user_prompt_lower, user_prompt_full):
     try:
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
         # Usamos o SYSTEM_PROMPT neutro aqui, não a Persona
-        resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': structure_prompt}])
-        
+        resp = client.chat(
+            model=config.OLLAMA_MODEL_PRIMARY, 
+            messages=[{'role': 'user', 'content': structure_prompt}],
+            options={'num_ctx': config.OLLAMA_CONTEXT_SIZE}
+        )
+
         json_output = resp['message']['content'].strip()
         
         # Limpeza de Markdown se necessário

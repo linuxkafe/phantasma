@@ -94,7 +94,11 @@ def process_with_ollama(prompt):
     try:
         print(f"A pensar ({config.OLLAMA_MODEL_PRIMARY})...")
         cli = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
-        resp = cli.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=conversation_history)
+        resp = cli.chat(
+            model=config.OLLAMA_MODEL_PRIMARY,
+            messages=conversation_history,
+            options={'num_ctx': config.OLLAMA_CONTEXT_SIZE}
+        )
         content = resp['message']['content']
         conversation_history.append({'role': 'assistant', 'content': content})
         return content
