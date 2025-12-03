@@ -35,37 +35,19 @@ def _get_recent_memories(limit=3):
         return ""
 
 def _repair_malformed_json(text):
-    """
-    Tenta corrigir erros comuns de alucinação JSON do LLM.
-    Corrige especificamente: {"A" -> "B" -> "C"} para "A -> B -> C"
-    """
-    # 1. Corrige o erro das setas dentro de objetos (o teu erro específico)
-    # Procura por { "Texto" -> "Texto" -> "Texto" } e remove as chavetas
-    # Regex explicaçao: \{ *"(.*?)" *-> *"(.*?)" *-> *"(.*?)" *\}
+    """ Tenta corrigir erros comuns de alucinação JSON do LLM. """
     pattern = r'\{\s*"(.*?)"\s*->\s*"(.*?)"\s*->\s*"(.*?)"\s*\}'
     text = re.sub(pattern, r'"\1 -> \2 -> \3"', text)
-    
-    # 2. Corrige aspas simples para duplas (erro comum JSON)
-    # Isto é arriscado se o texto tiver apóstrofos, mas ajuda na estrutura
-    # text = text.replace("'", '"') 
-    
     return text
 
 def _extract_json(text):
-    """ 
-    Tenta extrair um objeto JSON válido de uma string suja.
-    """
+    """ Tenta extrair um objeto JSON válido de uma string suja. """
     try:
-        # 1. Tenta encontrar o bloco JSON {...}
         match = re.search(r'\{.*\}', text, re.DOTALL)
         candidate = match.group(0) if match else text
-        
-        # 2. Tenta fazer parse direto
         return json.loads(candidate)
-        
     except json.JSONDecodeError:
         try:
-            # 3. Se falhar, tenta REPARAR o JSON
             fixed_text = _repair_malformed_json(candidate)
             return json.loads(fixed_text)
         except:
@@ -74,7 +56,7 @@ def _extract_json(text):
         return None
 
 def _consolidate_memories():
-    """ TAREFA DE MANUTENÇÃO: Funde memórias (Robusta contra Texto Cru). """
+    """ TAREFA DE MANUTENÇÃO: Funde memórias. """
     print("🧠 [Dream] A iniciar consolidação de memória...")
     
     conn = None
@@ -90,40 +72,31 @@ def _consolidate_memories():
 
         ids_to_delete = [r[0] for r in rows]
         
-        # Tratamento Prévio: Tentar carregar JSON, se falhar, usa a string crua
         processed_texts = []
         for r in rows:
             txt = r[1]
             try:
-                # Se for JSON válido, ótimo
                 json.loads(txt)
                 processed_texts.append(txt)
             except:
-                # Se for texto cru, envolve numa estrutura para o prompt entender
                 processed_texts.append(f"RAW_TEXT_ENTRY: {txt}")
 
-        # PROMPT OTIMIZADO PARA MIXED DATA
         consolidation_prompt = f"""
         SYSTEM: You are a Database Cleaner. Input contains mixed JSON and RAW TEXT.
-        
-        INPUT DATA:
-        {json.dumps(processed_texts, ensure_ascii=False)}
-        
-        TASK:
-        1. Convert RAW_TEXT_ENTRY items into "Subject -> Predicate -> Object" facts (English).
-        2. Merge with existing JSON facts.
-        3. Flatten any nested arrays (e.g. ["a","b"] becomes "a -> b").
-        4. Output SINGLE valid JSON.
-        
-        OUTPUT FORMAT:
-        {{ "tags": ["TagPT"], "facts": ["Subj -> verb -> Obj"] }}
+        INPUT DATA: {json.dumps(processed_texts, ensure_ascii=False)}
+        TASK: Convert RAW_TEXT_ENTRY items into "Subject -> Predicate -> Object" facts (English). Merge with existing JSON. Flatten arrays. Output SINGLE valid JSON.
+        OUTPUT FORMAT: {{ "tags": ["TagPT"], "facts": ["Subj -> verb -> Obj"] }}
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
+        
+        # LÊ O LIMITE DO CONFIG
+        ctx_limit = getattr(config, 'OLLAMA_CONTEXT_SIZE', 4096)
+
         resp = client.chat(
             model=config.OLLAMA_MODEL_PRIMARY, 
             messages=[{'role': 'user', 'content': consolidation_prompt}],
-            options={'num_ctx': config.OLLAMA_CONTEXT_SIZE}
+            options={'num_ctx': ctx_limit}
         )
 
         merged_json_obj = _extract_json(resp['message']['content'])
@@ -153,80 +126,70 @@ def perform_dreaming():
     
     recent_context = _get_recent_memories()
     
-    # 1. INTROSPEÇÃO
     introspection_prompt = f"""
     {config.SYSTEM_PROMPT}
-    
-    PREVIOUS MEMORIES:
-    {recent_context}
-    
+    PREVIOUS MEMORIES: {recent_context}
     TASK: Analyze knowledge gaps. Based on ETHICAL CORE/PERSONA, generate ONE search query.
     OUTPUT: Search query string ONLY. No quotes.
     """
     
     try:
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
-        resp_intro = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': introspection_prompt}])
+        
+        # LÊ O LIMITE DO CONFIG
+        ctx_limit = getattr(config, 'OLLAMA_CONTEXT_SIZE', 4096)
+        
+        # --- CORREÇÃO 1 ---
+        resp_intro = client.chat(
+            model=config.OLLAMA_MODEL_PRIMARY, 
+            messages=[{'role': 'user', 'content': introspection_prompt}],
+            options={'num_ctx': ctx_limit}
+        )
         search_query = resp_intro['message']['content'].strip().replace('"', '')
         
         print(f"💤 [Dream] Tópico: '{search_query}'")
         
-        # 2. PESQUISA
         search_results = search_with_searxng(search_query, max_results=3)
         if not search_results or len(search_results) < 10:
             return "Sonho vazio (sem dados)."
 
-        # 3. INTERNALIZAÇÃO
-        # Prompt reforçado para evitar objetos dentro do array
         internalize_prompt = f"""
         SYSTEM: You are a Data Extractor. Output JSON ONLY.
-        
-        WEB CONTEXT:
-        {search_results}
-        
+        WEB CONTEXT: {search_results}
         TASK: Extract knowledge to JSON.
-        RULES:
-        1. CLEAN DATA only.
-        2. "tags": Array of keyword strings in PORTUGUESE.
-        3. "facts": Array of STRINGS in ENGLISH.
-           Format: "Subject -> Predicate -> Object"
-           WARNING: Do NOT put curly braces {{}} inside the facts array. Use strings only.
-        4. Strict JSON syntax (double quotes).
-        
-        OUTPUT FORMAT:
-        {{ "tags": ["TagPT"], "facts": ["Subject -> verb -> Object"] }}
+        RULES: 1. CLEAN DATA only. 2. "tags": Array of keyword strings in PORTUGUESE. 3. "facts": Array of STRINGS in ENGLISH. 4. Strict JSON syntax.
+        OUTPUT FORMAT: {{ "tags": ["TagPT"], "facts": ["Subject -> verb -> Object"] }}
         """
         
-        resp_final = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': internalize_prompt}])
+        # --- CORREÇÃO 2 ---
+        resp_final = client.chat(
+            model=config.OLLAMA_MODEL_PRIMARY, 
+            messages=[{'role': 'user', 'content': internalize_prompt}],
+            options={'num_ctx': ctx_limit}
+        )
         
         json_data = _extract_json(resp_final['message']['content'])
         
         if not json_data:
-            print(f"ERRO [Dream] JSON Inválido. Output do modelo:\n{resp_final['message']['content']}")
-            return "Falha ao estruturar o sonho (JSON inválido)."
+            print(f"ERRO [Dream] JSON Inválido: {resp_final['message']['content']}")
+            return "Falha ao estruturar o sonho."
             
         dense_thought = json.dumps(json_data, ensure_ascii=False)
-        
         save_to_rag(dense_thought)
         print(f"💤 [Dream] Conhecimento arquivado: {json_data.get('tags', [])}")
         
-        # 4. CONSOLIDAÇÃO
         _consolidate_memories()
-        
         return f"Conhecimento sobre '{search_query}' assimilado."
 
     except Exception as e:
         print(f"ERRO CRÍTICO [Dream]: {e}")
         return "Pesadelo de conexão."
 
-# --- Daemon ---
-
 def _daemon_loop():
     print(f"[Dream] Daemon agendado para as {DREAM_TIME}...")
     while True:
         now = datetime.datetime.now()
         current_time = now.strftime("%H:%M")
-        
         if current_time == DREAM_TIME:
             try:
                 perform_dreaming()
