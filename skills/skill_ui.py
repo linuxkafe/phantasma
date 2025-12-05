@@ -1,10 +1,29 @@
+import os
+import json
+from flask import jsonify
+
 # Esta skill não tem triggers de voz, serve apenas para separar a UI do core.
 TRIGGER_TYPE = "none"
 TRIGGERS = []
 
+WEATHER_CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
+
 def register_routes(app):
-    """ Chamado pelo assistant.py para registar a rota web. """
+    """ Chamado pelo assistant.py para registar a rota web e a API de weather. """
     app.add_url_rule('/', 'ui', handle_request)
+    app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
+
+def handle_weather_api():
+    """ Lê a cache do disco e serve como JSON para o frontend. """
+    if not os.path.exists(WEATHER_CACHE_FILE):
+        return jsonify({"error": "No cache data"})
+    
+    try:
+        with open(WEATHER_CACHE_FILE, 'r') as f:
+            data = json.load(f)
+            return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 def handle_request():
     """ Serve a página HTML principal do frontend. """
@@ -100,6 +119,9 @@ def handle_request():
             /* Sensores */
             .sensor-data { font-size: 0.75rem; color: #4db6ac; font-weight: bold; display: flex; gap: 4px; }
             .sensor-label { font-size: 0.55rem; color: #888; margin-top: 3px; max-width: 65px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            
+            /* Ícones de Meteo Específicos */
+            .meteo-icon { font-size: 1.2rem; margin-bottom: 4px; }
 
             /* --- CHAT AREA --- */
             #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
@@ -167,7 +189,8 @@ def handle_request():
             // Variável global para guardar a lista de dispositivos (nome, tipo, e elemento DOM)
             const ALL_DEVICES_ELEMENTS = []; 
 
-            const ROOMS_ORDER = ["WC", "Sala", "Quarto", "Entrada", "Geral"];
+            // Adicionamos "Meteo" como primeira divisão
+            const ROOMS_ORDER = ["Meteo", "WC", "Sala", "Quarto", "Entrada", "Geral"];
 
             function triggerEasterEgg() {
                 document.body.classList.add('boo');
@@ -195,7 +218,6 @@ def handle_request():
                 return "Geral";
             }
 
-            // MANTIDO: Cria ou obtém o contentor da divisão
             function getOrCreateRoomContainer(room) {
                 let roomContainer = document.getElementById(`room-content-${room}`);
                 if (roomContainer) return roomContainer;
@@ -225,9 +247,7 @@ def handle_request():
             }
             function removeTypingIndicator() { const row = document.getElementById('typing-indicator-row'); if (row) row.remove(); }
 
-            function typeText(element, text, speed = 10) {
-                element.textContent = text; 
-            }
+            function typeText(element, text, speed = 10) { element.textContent = text; }
 
             function addToChatLog(text, sender = 'ia') {
                 removeTypingIndicator();
@@ -236,11 +256,7 @@ def handle_request():
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 row.appendChild(msgDiv); chatLog.appendChild(row);
 
-                if (sender === 'ia') { 
-                    typeText(msgDiv, text); 
-                } else { 
-                    msgDiv.textContent = text; 
-                }
+                if (sender === 'ia') { typeText(msgDiv, text); } else { msgDiv.textContent = text; }
                 chatLog.scrollTop = chatLog.scrollHeight;
             }
 
@@ -260,11 +276,11 @@ def handle_request():
                 try {
                     const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
                     const data = await res.json();
-                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypineIndicator();
+                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
                 } catch (e) { removeTypingIndicator(); }
             }
 
-            // CRIAÇÃO: Adiciona o elemento ao DOM e à lista global
+            // CRIAÇÃO DE DISPOSITIVOS
             function createToggle(device) {
                 const room = getRoomName(device);
                 const container = getOrCreateRoomContainer(room);
@@ -274,25 +290,20 @@ def handle_request():
                 const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
                 const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
                 
-                // Variáveis para estabilizar o estado
                 toggleDiv.dataset.state = 'unreachable'; 
                 toggleDiv.dataset.type = 'toggle';
 
                 input.onchange = () => {
                     handleDeviceAction(device, input.checked ? 'ligar' : 'desligar');
-                    // Atualiza o estado visual imediatamente
                     toggleDiv.dataset.state = input.checked ? 'on' : 'off';
                     if(input.checked) toggleDiv.classList.add('active'); else toggleDiv.classList.remove('active');
                 };
                 const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
                 const label = document.createElement('span'); label.className = 'device-label'; label.innerText = device.split(' ').pop().substring(0,9);
                 toggleDiv.append(icon, switchLabel, label); container.appendChild(toggleDiv);
-                
-                // ARMAZENA O ELEMENTO PARA ATUALIZAÇÃO NO LOOP
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: toggleDiv, input: input, label: label });
             }
             
-            // CRIAÇÃO: Adiciona o elemento ao DOM e à lista global
             function createSensor(device) {
                 const room = getRoomName(device);
                 const container = getOrCreateRoomContainer(room);
@@ -306,13 +317,36 @@ def handle_request():
                 let shortName = device.replace(/sensor|alarme/gi, '').replace(/ do | da | de /gi, ' ').trim().substring(0,10);
                 label.innerText = shortName;
                 div.append(dataSpan, label); container.appendChild(div);
-                
-                // ARMAZENA O ELEMENTO PARA ATUALIZAÇÃO NO LOOP
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', element: div, dataSpan: dataSpan, label: label });
             }
-            
+
+            // --- WIDGETS DE METEOROLOGIA ---
+            function createWeatherWidget(id, label) {
+                const container = getOrCreateRoomContainer("Meteo");
+                const div = document.createElement('div'); div.className = 'device-sensor'; 
+                div.id = `weather-${id}`;
+                div.style.opacity = '1';
+
+                const iconSpan = document.createElement('span'); 
+                iconSpan.className = 'meteo-icon';
+                iconSpan.id = `weather-icon-${id}`;
+                iconSpan.innerText = '-';
+
+                const dataSpan = document.createElement('span'); 
+                dataSpan.className = 'sensor-data'; 
+                dataSpan.id = `weather-data-${id}`;
+                dataSpan.innerText = '...';
+
+                const labelSpan = document.createElement('span'); 
+                labelSpan.className = 'sensor-label'; 
+                labelSpan.innerText = label;
+
+                div.append(iconSpan, dataSpan, labelSpan); 
+                container.appendChild(div);
+            }
+
             // ====================================================================
-            // === FUNÇÕES DE ATUALIZAÇÃO (RODAM NO LOOP DE INTERVALO) ===
+            // === FUNÇÕES DE ATUALIZAÇÃO ===
             // ====================================================================
 
            async function fetchDeviceStatus(item) {
@@ -320,110 +354,116 @@ def handle_request():
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
-
-                    // 1. ATUALIZAÇÃO DE ESTADO ON/OFF
                     const newStateIsOn = data.state === 'on';
-                    
-                    // --- CORREÇÃO: Forçar leitura de power_w se existir ---
                     let newPowerW = data.power_w;
-                    
-                    // Normaliza: se vier como string ou null, trata
-                    if (newPowerW === undefined || newPowerW === null) newPowerW = 0;
-                    else newPowerW = parseFloat(newPowerW);
+                    if (newPowerW === undefined || newPowerW === null) newPowerW = 0; else newPowerW = parseFloat(newPowerW);
 
                     if (element.dataset.state !== data.state) {
                         input.checked = newStateIsOn;
                         if (newStateIsOn) element.classList.add('active'); else element.classList.remove('active');
                         element.dataset.state = data.state;
                     }
-                    
-                    // 2. OPACIDADE
                     const newOpacity = data.state === 'unreachable' ? 0.3 : 1.0;
                     if (parseFloat(element.style.opacity) !== newOpacity) element.style.opacity = newOpacity;
-                    
                     input.disabled = false; element.classList.add('loaded');
                     
-                    // 3. ATUALIZAÇÃO DE WATTS (LÓGICA MELHORADA)
-                    // Se tiver consumo (> 0.5W para filtrar ruído) OU se for explicitamente um device de energia
                     if (newPowerW > 0.5) {
                         const newText = `${Math.round(newPowerW)} W`;
-                        
-                        // Só atualiza o DOM se o texto mudou (evita flicker)
                         if (label.innerText !== newText) {
-                            label.innerText = newText;
-                            label.style.color = "#ffb74d"; // Laranja
-                            label.style.fontWeight = "bold";
-                            label.title = `Consumo: ${newPowerW}W`;
+                            label.innerText = newText; label.style.color = "#ffb74d"; label.style.fontWeight = "bold";
                         }
                     } else {
-                        // REVERT: Se o consumo for 0, volta a mostrar o NOME do dispositivo
                         const originalName = name.split(' ').pop().substring(0,9);
-                        
                         if (label.innerText !== originalName && label.innerText.includes('W')) {
-                            label.innerText = originalName;
-                            label.style.color = "#aaa";
-                            label.style.fontWeight = "normal";
-                            label.title = name;
+                            label.innerText = originalName; label.style.color = "#aaa"; label.style.fontWeight = "normal";
                         }
                     }
-                } catch (e) { 
-                    if (element.style.opacity !== '0.3') element.style.opacity = 0.3;
-                }
+                } catch (e) { if (element.style.opacity !== '0.3') element.style.opacity = 0.3; }
             } 
+
             async function fetchSensorStatus(item) {
                 const { name, element, dataSpan } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
-                    
-                    // 1. ATUALIZAÇÃO DE ESTADO/OPACIDADE (Com cheque de flicker)
                     const newOpacity = data.state === 'unreachable' ? 0.5 : 1.0;
                     if (parseFloat(element.style.opacity) !== newOpacity) element.style.opacity = newOpacity;
-                    
-                    if (data.state === 'unreachable') { 
-                         if (dataSpan.innerText !== '?') dataSpan.innerText = '?';
-                        return; 
-                    }
+                    if (data.state === 'unreachable') { if (dataSpan.innerText !== '?') dataSpan.innerText = '?'; return; }
 
-                    let text = '';
-                    let tempColor = '#4db6ac';
-
-                    // --- FIX CLOOGY: Lógica de Consumo (Watts) para Sensores ---
-                    if (data.power_w !== undefined) {
-                        text = Math.round(data.power_w) + ' W';
-                        tempColor = "#ffb74d"; // Laranja para consumo
-                    } 
-                    // --- Lógica de Sensores (Temp/Hum/Gás) ---
+                    let text = ''; let tempColor = '#4db6ac';
+                    if (data.power_w !== undefined) { text = Math.round(data.power_w) + ' W'; tempColor = "#ffb74d"; } 
                     else {
                         if (data.temperature !== undefined) text += Math.round(data.temperature) + '° ';
                         if (data.humidity !== undefined) text += data.humidity + '%';
-
-                        if (data.ppm !== undefined) {
-                            text = data.ppm + ' ppm';
-                            if (data.status !== 'normal' && data.status !== 'unknown') {
-                                 tempColor = '#ff5252'; 
-                                 text += ' ⚠️';
-                            }
-                        }
+                        if (data.ppm !== undefined) { text = data.ppm + ' ppm'; if (data.status !== 'normal' && data.status !== 'unknown') { tempColor = '#ff5252'; text += ' ⚠️'; } }
                     }
-                    
                     if (!text) text = 'ON';
-
-                    // 3. ATUALIZAÇÃO CONDICIONAL (Só se o conteúdo mudou)
                     if (dataSpan.innerText !== text) dataSpan.innerText = text;
                     if (dataSpan.style.color !== tempColor) dataSpan.style.color = tempColor;
-
-                } catch (e) { 
-                    if (dataSpan.innerText !== 'Err') dataSpan.innerText = 'Err';
-                    if (element.style.opacity !== '0.5') element.style.opacity = 0.5;
-                }
+                } catch (e) { if (dataSpan.innerText !== 'Err') dataSpan.innerText = 'Err'; }
             }
-            
-            // ====================================================================
-            // === CONTROLADORES DE LOOP ===
-            // ====================================================================
 
-            // Roda a cada 5 segundos para atualizar os elementos existentes
+            async function updateWeather() {
+                try {
+                    const res = await fetch('/api/weather');
+                    const data = await res.json();
+                    if (!data || !data.forecast || data.forecast.length === 0) return;
+
+                    const today = data.forecast[0];
+                    
+                    // 1. TEMPERATURA & ESTADO
+                    const tMax = Math.round(today.tMax);
+                    const tMin = Math.round(today.tMin);
+                    const wType = today.idWeatherType;
+                    
+                    let wIcon = '☁️';
+                    if (wType === 1) wIcon = '☀️';
+                    else if (wType <= 5) wIcon = '⛅';
+                    else if (wType <= 15) wIcon = '🌧️';
+                    else if (wType === 16) wIcon = '🌫️';
+
+                    document.getElementById('weather-icon-temp').innerText = wIcon;
+                    document.getElementById('weather-data-temp').innerText = `${tMax}° / ${tMin}°`;
+
+                    // 2. LUA
+                    const moon = data.moon_phase || "Desconhecida";
+                    let mIcon = '🌑';
+                    if (moon.includes("Crescente")) mIcon = '🌓';
+                    else if (moon.includes("Cheia")) mIcon = '🌕';
+                    else if (moon.includes("Minguante")) mIcon = '🌗';
+                    
+                    document.getElementById('weather-icon-moon').innerText = mIcon;
+                    document.getElementById('weather-data-moon').innerText = moon.split(' ')[1] || moon; // Só a segunda palavra para caber
+
+                    // 3. QUALIDADE DO AR (AQI) ou UV
+                    const aqi = data.aqi;
+                    const uv = data.uv;
+                    
+                    let airText = "-";
+                    let airColor = "#888";
+                    let airIcon = "😷";
+
+                    if (aqi !== undefined) {
+                        airText = `AQI ${aqi}`;
+                        airIcon = "🍃";
+                        if (aqi <= 50) airColor = "#4db6ac"; // Bom
+                        else if (aqi <= 100) airColor = "#ffb74d"; // Moderado
+                        else airColor = "#ff5252"; // Mau
+                    } else if (uv !== undefined) {
+                        airText = `UV ${Math.round(uv)}`;
+                        airIcon = "☀️";
+                        if (uv < 5) airColor = "#4db6ac";
+                        else airColor = "#ff5252";
+                    }
+
+                    document.getElementById('weather-icon-air').innerText = airIcon;
+                    const elAir = document.getElementById('weather-data-air');
+                    elAir.innerText = airText;
+                    elAir.style.color = airColor;
+
+                } catch(e) { console.log("Weather update fail", e); }
+            }
+
             function deviceUpdateLoop() {
                 ALL_DEVICES_ELEMENTS.forEach(item => {
                     if (item.type === 'toggle') fetchDeviceStatus(item);
@@ -431,39 +471,37 @@ def handle_request():
                 });
             }
 
-            // Roda apenas UMA VEZ para construir a estrutura
             async function loadDevicesStructure() {
                 try {
+                    // 1. CRIAR WIDGETS DE METEOROLOGIA PRIMEIRO
+                    createWeatherWidget('temp', 'Previsão');
+                    createWeatherWidget('moon', 'Fase Lunar');
+                    createWeatherWidget('air', 'Ar / UV');
+                    updateWeather(); // Atualização inicial imediata
+
                     const res = await fetch('/get_devices'); 
                     const data = await res.json();
-                    
-                    // Se já existem elementos, a estrutura foi criada. Não faz nada e evita a re-renderização.
                     if (ALL_DEVICES_ELEMENTS.length > 0) return; 
                     
-                    // Prepara a lista de dispositivos para criação
                     const allDevices = [];
                     if (data.devices?.status) data.devices.status.forEach(d => allDevices.push({name: d, type: 'sensor'}));
                     if (data.devices?.toggles) data.devices.toggles.forEach(d => allDevices.push({name: d, type: 'toggle'}));
 
-                    // 1. Agrupar Dispositivos
                     const groupedDevices = {};
                     ROOMS_ORDER.forEach(room => groupedDevices[room] = []); 
                     allDevices.forEach(d => groupedDevices[getRoomName(d.name)].push(d));
 
-                    // 2. Criar Divisões e Widgets
                     for (const room of ROOMS_ORDER) {
+                        if (room === "Meteo") continue; // Já criado manualmente
                         const devicesInRoom = groupedDevices[room];
-                        if (devicesInRoom.length > 0) {
+                        if (devicesInRoom && devicesInRoom.length > 0) {
                             const container = getOrCreateRoomContainer(room); 
                             devicesInRoom.forEach(d => {
-                                // A função de criação também popula ALL_DEVICES_ELEMENTS
                                 if (d.type === 'sensor') createSensor(d.name);
                                 else createToggle(d.name);
                             });
                         }
                     }
-                    
-                    // Inicia o primeiro ciclo de atualização logo após a construção
                     deviceUpdateLoop();
 
                 } catch (e) {
@@ -484,12 +522,14 @@ def handle_request():
 
             addToChatLog("Nas sombras, aguardo...", "ia");
             
-            // 1. CRIA A ESTRUTURA E INICIA O PRIMEIRO UPDATE
             loadDevicesStructure(); 
             loadHelp();
             
-            // 2. CORRE O LOOP DE ATUALIZAÇÃO (SÓ DE DADOS)
-            setInterval(deviceUpdateLoop, 5000); 
+            // Loop principal (Dispositivos)
+            setInterval(deviceUpdateLoop, 5000);
+            
+            // Loop secundário (Meteorologia - a cada 10 min chega, é cache lenta)
+            setInterval(updateWeather, 600000); 
             
         </script>
     </body>
