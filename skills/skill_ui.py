@@ -39,11 +39,9 @@ def handle_request():
                 display: flex; align-items: flex-start; 
                 background: #181818; 
                 border-bottom: 1px solid #2a2a2a; 
-                /* Sombra para dar profundidade e separar do chat */
                 box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-                height: 175px; /* Altura equilibrada */
-                flex-shrink: 0;
-                z-index: 50; /* Garante que a sombra fica por cima do chat */
+                height: 175px; flex-shrink: 0;
+                z-index: 50; 
             }
             #brand {
                 display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
@@ -120,30 +118,23 @@ def handle_request():
             .room-header { font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 6px; text-transform: uppercase; }
             .room-content { display: flex; gap: 8px; flex-wrap: wrap; }
 
-            /* WIDGETS (TAMANHO EQUILIBRADO) */
+            /* WIDGETS */
             .device-toggle, .device-sensor { 
                 display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
                 background: #222; opacity: 0.5; transition: all 0.3s; 
-                
-                /* DIMENSÕES REVISTAS: Nem grande, nem pequeno */
-                min-width: 68px; 
-                height: 56px; 
-                
+                min-width: 68px; height: 56px; 
                 border-radius: 8px; padding: 3px 4px;
             }
             .device-sensor { background: #252525; border: 1px solid #333; }
             .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
             .device-toggle.active .device-icon { filter: grayscale(0%); }
             
-            /* Ícones e Texto ajustados */
             .device-icon { font-size: 1.3rem; filter: grayscale(100%); transition: filter 0.3s; margin-bottom: 2px; }
             
             .device-label { 
                 font-size: 0.6rem; color: #aaa; 
                 width: 100%; text-align: center;
-                line-height: 1.05; /* Espaço entre linhas */
-                white-space: normal; /* Permite quebra */
-                overflow: hidden; 
+                line-height: 1.05; white-space: normal; overflow: hidden; 
                 display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
             }
 
@@ -157,27 +148,44 @@ def handle_request():
             .sensor-data { font-size: 0.7rem; color: #4db6ac; font-weight: bold; }
             .sensor-label { font-size: 0.6rem; color: #888; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-            /* CHAT (COM MAIS "AR" NO TOPO) */
+            /* CHAT */
             #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
             #chat-log { 
-                flex: 1; 
-                padding: 15px; 
-                /* AUMENTADO: Empurra o texto para baixo para não colar à barra */
+                flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px;
                 padding-top: 25px; 
-                overflow-y: auto; 
-                display: flex; flex-direction: column; gap: 15px; 
             }
             .msg-row { display: flex; width: 100%; align-items: flex-end; }
             .msg-row.user { justify-content: flex-end; }
             .msg-row.ia { justify-content: flex-start; }
             .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; animation: floatGhost 4s ease-in-out infinite; }
-            .msg { max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 1rem; line-height: 1.4; }
+            
+            /* Mensagens - suporte a pre-wrap para quebras de linha */
+            .msg { 
+                max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 1rem; line-height: 1.4; 
+                white-space: pre-wrap; /* Permite quebras de linha */
+            }
             .msg-user { background: var(--user-msg); color: #fff; border-bottom-right-radius: 2px; }
             .msg-ia { background: var(--chat-bg); color: #ddd; border-bottom-left-radius: 2px; border: 1px solid #333; }
             
-            #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
-            #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 25px; font-size: 16px; outline: none; }
-            #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; }
+            /* TYPING INDICATOR (NOVO) */
+            .typing-indicator { display: inline-flex; align-items: center; padding: 12px 16px; background: var(--chat-bg); border-radius: 18px; border-bottom-left-radius: 2px; border: 1px solid #333; }
+            .dot { width: 6px; height: 6px; margin: 0 2px; background: #888; border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
+            .dot:nth-child(1) { animation-delay: -0.32s; }
+            .dot:nth-child(2) { animation-delay: -0.16s; }
+            @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+            #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); align-items: flex-end; }
+            
+            /* ALTERADO PARA TEXTAREA */
+            #chat-input { 
+                flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; 
+                resize: none; /* Remove puxador */
+                height: 24px; /* Altura inicial de uma linha */
+                max-height: 100px;
+                font-family: inherit;
+                overflow-y: hidden; /* Esconde scroll se for pequeno */
+            }
+            #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; height: 48px; }
 
             @keyframes floatGhost { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-5px); } }
             @keyframes floatWeather { 0%, 100% { transform: translateY(0px) scale(1); } 50% { transform: translateY(-3px) scale(1.05); } }
@@ -227,7 +235,7 @@ def handle_request():
             <div id="help-toggle" onclick="toggleHelp()">Ver Comandos</div>
             <div id="cli-help"><pre id="help-content" style="color:#888; font-size:0.8em; margin:0;">...</pre></div>
             <div id="chat-input-box">
-                <input type="text" id="chat-input" placeholder="Mensagem..." autocomplete="off">
+                <textarea id="chat-input" placeholder="Mensagem..." autocomplete="off"></textarea>
                 <button id="chat-send">Enviar</button>
             </div>
         </div>
@@ -278,25 +286,66 @@ def handle_request():
                 roomWrapper.append(header, roomContainer); topBar.appendChild(roomWrapper);
                 return roomContainer;
             }
+
+            // --- INDICADOR DE ESCRITA ---
+            function showTypingIndicator() {
+                if (document.getElementById('typing-indicator-row')) return;
+                const row = document.createElement('div'); 
+                row.id = 'typing-indicator-row'; 
+                row.className = 'msg-row ia'; 
+                
+                const avatar = document.createElement('div'); 
+                avatar.className = 'ia-avatar'; avatar.innerText = '👻';
+                
+                const bubble = document.createElement('div'); 
+                bubble.className = 'typing-indicator'; 
+                bubble.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+                
+                row.append(avatar, bubble); 
+                chatLog.appendChild(row); 
+                chatLog.scrollTop = chatLog.scrollHeight;
+            }
+
+            function removeTypingIndicator() { 
+                const row = document.getElementById('typing-indicator-row'); 
+                if (row) row.remove(); 
+            }
+
             function addToChatLog(text, sender = 'ia') {
+                removeTypingIndicator(); // Garante que remove antes de adicionar a resposta
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
                 if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻'; row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 msgDiv.innerText = text; row.appendChild(msgDiv); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
             }
+
             async function sendChatCommand() {
                 const prompt = chatInput.value.trim(); if (!prompt) return;
-                addToChatLog(prompt, 'user'); chatInput.value = '';
+                addToChatLog(prompt, 'user'); 
+                chatInput.value = '';
+                chatInput.style.height = '24px'; // Reset altura do textarea
+                
+                showTypingIndicator(); // MOSTRA "A PENSAR"
+                
                 try {
                     const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
-                    const data = await res.json(); if (data.response) addToChatLog(data.response, 'ia');
-                } catch (e) { addToChatLog('Erro rede.', 'ia'); }
+                    const data = await res.json(); 
+                    if (data.response) addToChatLog(data.response, 'ia');
+                    else removeTypingIndicator();
+                } catch (e) { 
+                    removeTypingIndicator();
+                    addToChatLog('Erro rede.', 'ia'); 
+                }
             }
+
             async function handleDeviceAction(device, action) {
+                showTypingIndicator();
                 try {
                     const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
-                    const data = await res.json(); if (data.response) addToChatLog(data.response, 'ia');
-                } catch (e) {}
+                    const data = await res.json(); 
+                    if (data.response) addToChatLog(data.response, 'ia');
+                    else removeTypingIndicator();
+                } catch (e) { removeTypingIndicator(); }
             }
 
             // --- BUILDERS ---
@@ -458,7 +507,20 @@ def handle_request():
                 } catch (e) {}
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
-            chatSend.onclick = sendChatCommand; chatInput.onkeypress = (e) => { if (e.key === 'Enter') sendChatCommand(); };
+            chatSend.onclick = sendChatCommand; 
+            
+            // LÓGICA SHIFT+ENTER
+            chatInput.onkeydown = (e) => { 
+                if (e.key === 'Enter' && !e.shiftKey) { 
+                    e.preventDefault();
+                    sendChatCommand(); 
+                }
+                // Auto-resize do textarea (opcional)
+                setTimeout(() => {
+                    chatInput.style.height = 'auto';
+                    chatInput.style.height = chatInput.scrollHeight + 'px';
+                }, 0);
+            };
 
             loadDevicesStructure(); loadHelp(); addToChatLog("Nas sombras, aguardo...", "ia");
         </script>
