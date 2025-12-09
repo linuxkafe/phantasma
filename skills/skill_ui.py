@@ -31,109 +31,114 @@ def handle_request():
                 background: var(--bg-color); color: var(--text); 
                 display: flex; flex-direction: column; 
                 height: 100vh; height: 100dvh; margin: 0; overflow: hidden;
-                transition: background 1s ease;
             }
 
-            /* --- SIDEBAR --- */
+            /* --- SIDEBAR UNIFICADA (DASHBOARD) --- */
             #header-strip {
                 display: flex; align-items: flex-start; 
                 background: #181818; 
                 border-bottom: 1px solid #2a2a2a; 
                 box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-                height: 175px; flex-shrink: 0;
-                z-index: 50; 
+                height: 240px; flex-shrink: 0; z-index: 50; 
             }
             #brand {
-                display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
-                width: 210px; 
-                height: 100%;
+                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                width: 210px; height: 100%;
                 border-right: 1px solid #333; background: #151515;
                 cursor: pointer; user-select: none; z-index: 10;
-                padding-top: 5px; padding-bottom: 5px;
+                padding: 10px; box-sizing: border-box;
                 position: relative; overflow: hidden;
             }
             #brand:active { background: #222; }
 
-            /* METEO & FANTASMA */
-            #weather-stage {
-                display: flex; flex-direction: column; align-items: center;
-                margin-bottom: 2px; z-index: 20;
+            /* ZONA DO CÉU (Tempo + Lua) */
+            #sky-stage {
+                display: flex; align-items: flex-end; justify-content: center;
+                gap: 15px; margin-bottom: 5px; width: 100%;
             }
-            #main-weather-icon {
-                font-size: 2.0rem; 
+            .sky-element {
+                display: flex; flex-direction: column; align-items: center;
+                position: relative;
+            }
+            #main-weather-icon, #main-moon-icon {
+                font-size: 1.8rem; 
                 filter: drop-shadow(0 0 5px rgba(0,0,0,0.5));
-                animation: floatWeather 4s ease-in-out infinite;
+                transition: all 0.5s ease;
             }
             #main-weather-temp {
                 font-size: 0.8rem; font-weight: bold; color: #bbb;
                 margin-top: -2px; background: rgba(0,0,0,0.4); padding: 1px 6px; border-radius: 10px;
             }
             
+            /* ZONA DO FANTASMA + AR */
+            #ghost-stage {
+                position: relative;
+                display: flex; justify-content: center; align-items: center;
+                margin-bottom: 5px;
+            }
             #brand-logo { 
-                font-size: 2.8rem; margin-bottom: 4px; margin-top: 4px;
+                font-size: 3.5rem; 
                 transition: all 1s ease; z-index: 10;
             }
+            
+            /* Indicador de Ar (Flutuante ao lado do fantasma) */
+            #aqi-indicator {
+                position: absolute;
+                right: -15px; bottom: 5px;
+                font-size: 1.2rem;
+                filter: drop-shadow(0 0 5px rgba(0,0,0,0.8));
+                animation: floatWeather 6s infinite ease-in-out;
+                opacity: 0.8;
+            }
+
+            /* Nome e Power */
+            #brand-name { 
+                font-size: 0.7rem; font-weight: bold; color: #555; 
+                letter-spacing: 2px; text-transform: uppercase; margin-bottom: 5px;
+            }
+            #power-display {
+                font-size: 1.3rem; font-weight: bold; color: #ffb74d;
+                text-shadow: 0 0 10px rgba(255, 183, 77, 0.2);
+                letter-spacing: 0.5px;
+            }
+
+            /* ANIMAÇÕES */
             .ghost-normal { animation: floatGhost 3s ease-in-out infinite; }
             .ghost-rain { filter: drop-shadow(0 0 10px #4db6ac) grayscale(0.6); animation: shakeGhost 5s infinite; }
             .ghost-sun  { filter: drop-shadow(0 0 15px #ffb74d) brightness(1.1); animation: floatGhost 3s infinite; }
             .ghost-storm { filter: drop-shadow(0 0 10px #7e57c2) contrast(1.2); animation: shakeGhost 0.5s infinite; }
 
-            #brand-name { font-size: 0.7rem; font-weight: bold; color: #555; margin-bottom: 10px; letter-spacing: 1px; }
-
-            /* STATS SIDEBAR */
-            .sidebar-stats {
-                display: flex; flex-direction: column; 
-                width: 100%; padding: 0 15px; box-sizing: border-box; gap: 5px; 
-            }
-            .power-row {
-                display: flex; align-items: center; justify-content: center;
-                background: #222; border-radius: 6px; border: 1px solid #333;
-                padding: 5px 0; margin-bottom: 4px;
-            }
-            .power-val { color: #ffb74d; font-weight: bold; font-size: 1.0rem; letter-spacing: 0.5px; }
-            .power-icon { font-size: 1.0rem; margin-right: 8px; }
-
-            .info-row {
-                display: flex; align-items: center; justify-content: flex-start; 
-                font-size: 0.85rem; color: #ccc; padding: 0 5px;
-            }
-            .info-icon { width: 24px; text-align: center; margin-right: 10px; font-size: 1.1rem; }
-            .info-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #bbb; }
-
             /* --- TOPBAR (DEVICES) --- */
             #topbar {
                 flex: 1; display: flex; align-items: flex-start; align-content: flex-start;
                 flex-wrap: wrap; overflow-y: auto; overflow-x: hidden;
-                height: 100%; padding: 12px 0 12px 20px;
+                height: 100%; padding: 20px 0 20px 20px;
             }
             #topbar::-webkit-scrollbar { width: 4px; }
             #topbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 
             .device-room {
                 display: inline-flex; flex-direction: column;
-                margin-right: 15px; margin-bottom: 10px;
+                margin-right: 15px; margin-bottom: 15px;
                 padding-right: 15px; border-right: 1px solid #333;
                 vertical-align: top;
             }
-            .room-header { font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 6px; text-transform: uppercase; }
+            .room-header { font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 8px; text-transform: uppercase; }
             .room-content { display: flex; gap: 8px; flex-wrap: wrap; }
 
             /* WIDGETS */
             .device-toggle, .device-sensor { 
                 display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
                 background: #222; opacity: 0.5; transition: all 0.3s; 
-                min-width: 68px; height: 56px; 
-                border-radius: 8px; padding: 3px 4px;
+                min-width: 68px; height: 56px; border-radius: 8px; padding: 3px 4px;
             }
             .device-sensor { background: #252525; border: 1px solid #333; }
             .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
             .device-toggle.active .device-icon { filter: grayscale(0%); }
             
             .device-icon { font-size: 1.3rem; filter: grayscale(100%); transition: filter 0.3s; margin-bottom: 2px; }
-            
             .device-label { 
-                font-size: 0.6rem; color: #aaa; 
-                width: 100%; text-align: center;
+                font-size: 0.6rem; color: #aaa; width: 100%; text-align: center;
                 line-height: 1.05; white-space: normal; overflow: hidden; 
                 display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
             }
@@ -158,33 +163,17 @@ def handle_request():
             .msg-row.user { justify-content: flex-end; }
             .msg-row.ia { justify-content: flex-start; }
             .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; animation: floatGhost 4s ease-in-out infinite; }
-            
-            /* Mensagens - suporte a pre-wrap para quebras de linha */
-            .msg { 
-                max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 1rem; line-height: 1.4; 
-                white-space: pre-wrap; /* Permite quebras de linha */
-            }
+            .msg { max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 1rem; line-height: 1.4; white-space: pre-wrap; }
             .msg-user { background: var(--user-msg); color: #fff; border-bottom-right-radius: 2px; }
             .msg-ia { background: var(--chat-bg); color: #ddd; border-bottom-left-radius: 2px; border: 1px solid #333; }
             
-            /* TYPING INDICATOR (NOVO) */
             .typing-indicator { display: inline-flex; align-items: center; padding: 12px 16px; background: var(--chat-bg); border-radius: 18px; border-bottom-left-radius: 2px; border: 1px solid #333; }
             .dot { width: 6px; height: 6px; margin: 0 2px; background: #888; border-radius: 50%; animation: bounce 1.4s infinite ease-in-out both; }
-            .dot:nth-child(1) { animation-delay: -0.32s; }
-            .dot:nth-child(2) { animation-delay: -0.16s; }
+            .dot:nth-child(1) { animation-delay: -0.32s; } .dot:nth-child(2) { animation-delay: -0.16s; }
             @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
 
             #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); align-items: flex-end; }
-            
-            /* ALTERADO PARA TEXTAREA */
-            #chat-input { 
-                flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; 
-                resize: none; /* Remove puxador */
-                height: 24px; /* Altura inicial de uma linha */
-                max-height: 100px;
-                font-family: inherit;
-                overflow-y: hidden; /* Esconde scroll se for pequeno */
-            }
+            #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; resize: none; height: 24px; max-height: 100px; font-family: inherit; overflow-y: hidden; }
             #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; height: 48px; }
 
             @keyframes floatGhost { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-5px); } }
@@ -205,27 +194,25 @@ def handle_request():
 
         <div id="header-strip">
             <div id="brand" onclick="triggerEasterEgg()">
-                <div id="weather-stage">
-                    <span id="main-weather-icon">☁️</span>
-                    <span id="main-weather-temp">--°</span>
+                
+                <div id="sky-stage">
+                    <div class="sky-element" title="Meteorologia">
+                        <div id="main-weather-icon">☁️</div>
+                        <div id="main-weather-temp">--°</div>
+                    </div>
+                    <div class="sky-element" title="Fase Lunar">
+                        <div id="main-moon-icon">🌑</div>
+                    </div>
                 </div>
-                <div id="brand-logo" class="ghost-normal">👻</div>
+
+                <div id="ghost-stage">
+                    <div id="brand-logo" class="ghost-normal">👻</div>
+                    <div id="aqi-indicator" title="Qualidade do Ar"></div>
+                </div>
+
                 <div id="brand-name">pHantasma</div>
                 
-                <div class="sidebar-stats">
-                    <div class="power-row" title="Consumo Geral">
-                        <span class="power-icon">⚡</span>
-                        <span class="power-val" id="power-val">-- W</span>
-                    </div>
-                    <div class="info-row" title="Fase Lunar">
-                        <span class="info-icon" id="side-moon-icon">🌑</span>
-                        <span class="info-text" id="side-moon-text">--</span>
-                    </div>
-                    <div class="info-row" title="Qualidade do Ar">
-                        <span class="info-icon" id="side-air-icon">🍃</span>
-                        <span class="info-text" id="side-air-text">--</span>
-                    </div>
-                </div>
+                <div id="power-display" title="Consumo Geral">-- W</div>
             </div>
             <div id="topbar"></div>
         </div>
@@ -290,29 +277,16 @@ def handle_request():
             // --- INDICADOR DE ESCRITA ---
             function showTypingIndicator() {
                 if (document.getElementById('typing-indicator-row')) return;
-                const row = document.createElement('div'); 
-                row.id = 'typing-indicator-row'; 
-                row.className = 'msg-row ia'; 
-                
-                const avatar = document.createElement('div'); 
-                avatar.className = 'ia-avatar'; avatar.innerText = '👻';
-                
-                const bubble = document.createElement('div'); 
-                bubble.className = 'typing-indicator'; 
+                const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'msg-row ia'; 
+                const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻';
+                const bubble = document.createElement('div'); bubble.className = 'typing-indicator'; 
                 bubble.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
-                
-                row.append(avatar, bubble); 
-                chatLog.appendChild(row); 
-                chatLog.scrollTop = chatLog.scrollHeight;
+                row.append(avatar, bubble); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
             }
-
-            function removeTypingIndicator() { 
-                const row = document.getElementById('typing-indicator-row'); 
-                if (row) row.remove(); 
-            }
+            function removeTypingIndicator() { const row = document.getElementById('typing-indicator-row'); if (row) row.remove(); }
 
             function addToChatLog(text, sender = 'ia') {
-                removeTypingIndicator(); // Garante que remove antes de adicionar a resposta
+                removeTypingIndicator(); 
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
                 if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻'; row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
@@ -322,20 +296,13 @@ def handle_request():
             async function sendChatCommand() {
                 const prompt = chatInput.value.trim(); if (!prompt) return;
                 addToChatLog(prompt, 'user'); 
-                chatInput.value = '';
-                chatInput.style.height = '24px'; // Reset altura do textarea
-                
-                showTypingIndicator(); // MOSTRA "A PENSAR"
-                
+                chatInput.value = ''; chatInput.style.height = '24px'; 
+                showTypingIndicator(); 
                 try {
                     const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
                     const data = await res.json(); 
-                    if (data.response) addToChatLog(data.response, 'ia');
-                    else removeTypingIndicator();
-                } catch (e) { 
-                    removeTypingIndicator();
-                    addToChatLog('Erro rede.', 'ia'); 
-                }
+                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
+                } catch (e) { removeTypingIndicator(); addToChatLog('Erro rede.', 'ia'); }
             }
 
             async function handleDeviceAction(device, action) {
@@ -343,8 +310,7 @@ def handle_request():
                 try {
                     const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
                     const data = await res.json(); 
-                    if (data.response) addToChatLog(data.response, 'ia');
-                    else removeTypingIndicator();
+                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
                 } catch (e) { removeTypingIndicator(); }
             }
 
@@ -353,7 +319,6 @@ def handle_request():
                 const container = getOrCreateRoomContainer(getRoomName(device));
                 const div = document.createElement('div'); div.className = 'device-toggle'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'toggle';
-                
                 const icon = document.createElement('span'); icon.className = 'device-icon'; icon.innerText = getDeviceIcon(device);
                 const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
                 const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
@@ -389,7 +354,6 @@ def handle_request():
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
                     const isOn = data.state === 'on';
-                    
                     if (element.dataset.state !== data.state) {
                         input.checked = isOn;
                         if (isOn) element.classList.add('active'); else element.classList.remove('active');
@@ -397,7 +361,6 @@ def handle_request():
                     }
                     element.style.opacity = data.state === 'unreachable' ? 0.3 : 1;
                     input.disabled = false; element.classList.add('loaded');
-                    
                     if (data.power_w > 0.5) {
                          label.innerText = `${Math.round(data.power_w)} W`; label.style.color = "#ffb74d";
                     } else {
@@ -413,12 +376,10 @@ def handle_request():
                     const data = await res.json();
                     element.style.opacity = data.state === 'unreachable' ? 0.5 : 1;
                     if (data.state === 'unreachable') return;
-
                     let text = 'ON'; let color = '#4db6ac';
                     if (data.power_w !== undefined) { text = Math.round(data.power_w) + ' W'; color = "#ffb74d"; }
                     else if (data.temperature !== undefined) text = Math.round(data.temperature) + '°';
                     else if (data.ppm !== undefined) { text = data.ppm + ' ppm'; if (data.status!=='normal') color='#ff5252'; }
-                    
                     dataSpan.innerText = text; dataSpan.style.color = color;
                 } catch (e) {}
             }
@@ -428,7 +389,7 @@ def handle_request():
                 try {
                     const res = await fetch(`/device_status?nickname=casa`);
                     const data = await res.json();
-                    const el = document.getElementById('power-val');
+                    const el = document.getElementById('power-display'); // ALTERADO ID
                     if (data.power_w !== undefined) {
                         el.innerText = `${Math.round(data.power_w)} W`; el.style.color = "#ffb74d"; 
                     } else {
@@ -458,15 +419,22 @@ def handle_request():
                     const ghost = document.getElementById('brand-logo');
                     ghost.className = ''; ghost.classList.add(ghostClass);
 
+                    // LUA
                     let mIcon = '🌑'; const moon = data.moon_phase || "";
                     if (moon.includes("Crescente")) mIcon = '🌓'; else if (moon.includes("Cheia")) mIcon = '🌕'; else if (moon.includes("Minguante")) mIcon = '🌗';
-                    document.getElementById('side-moon-icon').innerText = mIcon;
-                    document.getElementById('side-moon-text').innerText = moon.split(' ')[1] || "Lua";
+                    document.getElementById('main-moon-icon').innerText = mIcon;
+                    // Tooltip da lua
+                    document.querySelector('.sky-element[title="Fase Lunar"]').title = moon || "Fase Lunar";
 
+                    // AR (AQI) - Ícone flutuante
                     const aqi = data.aqi;
+                    const aqiEl = document.getElementById('aqi-indicator');
                     if (aqi !== undefined) {
-                        document.getElementById('side-air-text').innerText = `AQI ${aqi}`;
-                        document.getElementById('side-air-text').style.color = aqi <= 50 ? "#4db6ac" : "#ff5252";
+                        if (aqi <= 50) { aqiEl.innerText = '🍃'; aqiEl.title = `AQI ${aqi} (Bom)`; }
+                        else if (aqi <= 100) { aqiEl.innerText = '😷'; aqiEl.title = `AQI ${aqi} (Moderado)`; }
+                        else { aqiEl.innerText = '☠️'; aqiEl.title = `AQI ${aqi} (Mau)`; }
+                    } else {
+                        aqiEl.innerText = '';
                     }
                 } catch(e) {}
             }
@@ -509,13 +477,11 @@ def handle_request():
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
             chatSend.onclick = sendChatCommand; 
             
-            // LÓGICA SHIFT+ENTER
             chatInput.onkeydown = (e) => { 
                 if (e.key === 'Enter' && !e.shiftKey) { 
                     e.preventDefault();
                     sendChatCommand(); 
                 }
-                // Auto-resize do textarea (opcional)
                 setTimeout(() => {
                     chatInput.style.height = 'auto';
                     chatInput.style.height = chatInput.scrollHeight + 'px';
