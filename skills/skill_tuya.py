@@ -17,18 +17,18 @@ except ImportError:
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
-CACHE_FILE = "/opt/phantasma/tuya_cache.json"
+CACHE_FILE = "/opt/phantasma/cache/tuya_cache.json"
 PORTS_TO_LISTEN = [6666, 6667]
-POLL_COOLDOWN = 5
+POLL_COOLDOWN = 10 
 LAST_POLL = {}
+VERBOSE_LOGGING = False 
 
-ACTIONS_ON = ["liga", "ligar", "acende", "acender"]
-ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar"]
-# EDITADO: Adicionadas palavras "quanto", "gastar", "consumo"
+ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
+ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
 STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura", "quanto", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala"]
-VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.2]
+VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.5]
 
 def _get_tuya_triggers():
     base = BASE_NOUNS + ACTIONS_ON + ACTIONS_OFF + STATUS_TRIGGERS + DEBUG_TRIGGERS
@@ -37,7 +37,12 @@ def _get_tuya_triggers():
     return base
 
 TRIGGERS = _get_tuya_triggers()
-# --- Helpers de Cache e Daemon ---
+
+# --- Helpers de Cache ---
+def _ensure_permissions():
+    if os.path.exists(CACHE_FILE):
+        try: os.chmod(CACHE_FILE, 0o666)
+        except: pass
 
 def _load_cache():
     if not os.path.exists(CACHE_FILE): return {}
@@ -46,37 +51,18 @@ def _load_cache():
     except: return {}
 
 def _save_cache(data):
-    """
-    Guarda a cache usando um ficheiro temporário ÚNICO para cada escrita.
-    Isto resolve conflitos entre threads ou processos simultâneos.
-    """
-    # Garante que o ficheiro temporário é criado na mesma pasta (importante para o atomic rename)
-    dir_name = os.path.dirname(CACHE_FILE)
-    
     try:
-        # Cria um ficheiro temporário com nome aleatório (ex: tmpxyz123)
-        # delete=False porque queremos renomeá-lo no fim
-        with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False) as tf:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(CACHE_FILE), delete=False) as tf:
             json.dump(data, tf, indent=4)
             tf.flush()
-            os.fsync(tf.fileno()) # Força a escrita física no disco
-            temp_name = tf.name # Guarda o nome para usar no replace
-
-        # Substituição atómica. 
-        # Como o nome temp_name é único, ninguém mais está a mexer nele.
+            os.fsync(tf.fileno())
+            temp_name = tf.name
         os.replace(temp_name, CACHE_FILE)
-        
-        # Define permissões para que todos (daemon e skill) possam ler/escrever
         os.chmod(CACHE_FILE, 0o666)
-
     except Exception as e:
         print(f"[Tuya] Erro cache: {e}")
-        # Limpeza em caso de erro
-        if 'temp_name' in locals() and os.path.exists(temp_name):
-            try:
-                os.remove(temp_name)
-            except OSError:
-                pass
+        if 'temp_name' in locals() and os.path.exists(temp_name): os.remove(temp_name)
 
 def _get_cached_status(nickname):
     data = _load_cache()
@@ -89,150 +75,165 @@ def _get_device_name_by_ip(ip):
     return None, None
 
 # --- Lógica do Daemon ---
-
 def _poll_device_task(name, details, force=False):
     ip = details.get('ip')
+    if not ip or ip.endswith('x'): return 
+
     global LAST_POLL
     if not force and (time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN): return
     LAST_POLL[name] = time.time()
 
     dps = None
+    connected_ver = None
+
+    if VERBOSE_LOGGING: print(f"[Tuya] A sondar '{name}' ({ip})...")
+
     for ver in VERSIONS_TO_TRY:
         try:
             d = OutletDevice(details['id'], ip, details['key'])
-            d.set_socketTimeout(2); d.set_version(ver)
+            d.set_socketTimeout(3); d.set_version(ver)
             status = d.status()
-            if 'dps' in status:
-                dps = status['dps']
+            if status and 'dps' in status:
+                dps = status['dps']; connected_ver = ver
+                if VERBOSE_LOGGING: print(f"[Tuya] SUCESSO '{name}' (v{ver}): {dps}")
                 break
         except: continue
 
     if dps:
         try:
             cache = _load_cache()
-            # Só loga se mudou DPS importantes
-            prev = cache.get(name, {}).get('dps')
-            if prev != dps: 
-                print(f"[Tuya] '{name}' atualizado: {dps}")
-            
-            cache[name] = {"dps": dps, "timestamp": time.time()}
+            prev_dps = cache.get(name, {}).get("dps", {})
+            if prev_dps != dps: print(f"[Tuya] Estado alterado: '{name}'")
+            if name not in cache: cache[name] = {}
+            cache[name]["dps"] = dps; cache[name]["timestamp"] = time.time(); cache[name]["version"] = connected_ver
             _save_cache(cache)
-        except: pass
+        except Exception as e: print(f"[Tuya] Erro ao guardar dados: {e}")
+    else:
+        if force or VERBOSE_LOGGING: print(f"[Tuya] Falha ao comunicar com '{name}'.")
 
 def _udp_listener(port):
     if "tinytuya" not in globals(): return
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try: sock.bind(('', port))
-    except: return
+    except Exception as e: print(f"[Tuya] Erro bind porta {port}: {e}"); return
 
     while True:
         try:
-            sock.settimeout(1.0)
+            sock.settimeout(None)
             data, addr = sock.recvfrom(4096)
             name, details = _get_device_name_by_ip(addr[0])
-            if name: threading.Thread(target=_poll_device_task, args=(name, details, False)).start()
-        except: continue
+            if name: 
+                if VERBOSE_LOGGING: print(f"[Tuya] Broadcast recebido de '{name}'! A atualizar...")
+                threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
+        except Exception as e: print(f"[Tuya] Erro UDP: {e}"); time.sleep(1)
 
 def init_skill_daemon():
     if "tinytuya" not in globals() or not hasattr(config, 'TUYA_DEVICES'): return
     print("[Tuya] A iniciar daemon integrado...")
-    for name, details in config.TUYA_DEVICES.items():
-        threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
-    for port in PORTS_TO_LISTEN:
-        threading.Thread(target=_udp_listener, args=(port,), daemon=True).start()
+    for name, details in config.TUYA_DEVICES.items(): threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
+    for port in PORTS_TO_LISTEN: threading.Thread(target=_udp_listener, args=(port,), daemon=True).start()
 
-# --- API Pública (Web UI) ---
-
+# --- API Pública ---
 def get_status_for_device(nickname):
-    """ Determina estado e consumo para a barra de topo """
     cached = _get_cached_status(nickname)
     if not cached or 'dps' not in cached: return {"state": "unreachable"}
-    
-    dps = cached['dps']
-    result = {}
+    dps = cached['dps']; result = {}
 
-    # 1. Estado ON/OFF
     is_on = dps.get('1') or dps.get('20')
-    result['state'] = 'on' if is_on else 'off'
+    if is_on is not None: result['state'] = 'on' if is_on else 'off'
+    else: result['state'] = 'on' 
 
-    # 2. Consumo (Watts)
     power_raw = dps.get('19') or dps.get('104')
     if power_raw is not None:
-        try:
-            result['power_w'] = float(power_raw) / 10.0
+        try: result['power_w'] = float(power_raw) / 10.0
         except: pass
 
-    # 3. Sensores
-    if "sensor" in nickname.lower():
-        result['state'] = 'on'
-        t = dps.get('1') or dps.get('102')
-        h = dps.get('2') or dps.get('103')
-        if t: result['temperature'] = float(t) / 10.0
-        if h: result['humidity'] = int(h)
+    temp = None
+    for k in ['1', '101', '102', 'va_temperature', 'temp_current']:
+        if k in dps: temp = dps[k]; break
+    hum = None
+    for k in ['2', '103', '104', 'va_humidity', 'humidity_value']:
+        if k in dps: hum = dps[k]; break
 
+    if temp is not None: 
+        try: result['temperature'] = float(temp) / 10.0
+        except: result['temperature'] = float(temp)
+    if hum is not None:
+        try: result['humidity'] = int(hum)
+        except: pass
     return result
 
-# --- Router de Voz ---
+# --- Router de Voz (COM MULTI-AÇÃO) ---
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'TUYA_DEVICES'): return None
 
+    # 1. Determinar Ação
     action = None
-
-    # LÓGICA DE PRIORIDADE: OFF > ON > STATUS
-    # Verificamos sempre o OFF primeiro por segurança.
     if any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
     elif any(x in user_prompt_lower for x in ACTIONS_ON): action = "on"
     elif any(x in user_prompt_lower for x in STATUS_TRIGGERS): action = "status"
-
     if not action: return None
 
-    target_nick = None
-    target_conf = None
+    targets = [] # Lista de (nome, config)
 
-    # 1. Procura direta pelo nickname completo (ex: "luz da sala")
+    # 2. Tentar encontrar alvo ESPECÍFICO (ex: "Exaustor da Sala")
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
-            target_nick = nick; target_conf = conf; break
+            targets.append((nick, conf))
+            break # Encontrou exato, para aqui
 
-    # 2. Procura heurística (ex: "luz" + "sala")
-    if not target_nick:
+    # 3. Se não encontrou específico, procurar GENÉRICO (ex: "Exaustor")
+    if not targets:
         for noun in BASE_NOUNS:
-            if noun in user_prompt_lower:
+            # Se a palavra-chave estiver na frase (ex: "liga os exaustores")
+            # Nota: usamos plural simples "s" para apanhar "exaustores" se "exaustor" for a base
+            if noun in user_prompt_lower or (noun + "es") in user_prompt_lower or (noun + "s") in user_prompt_lower:
                 for nick, conf in config.TUYA_DEVICES.items():
-                    if noun in nick.lower() and any(loc in user_prompt_lower for loc in ["sala", "quarto", "wc"]):
-                        target_nick = nick; target_conf = conf; break
-                if target_nick: break
+                    # Se o nome do dispositivo contiver a palavra-chave (ex: "Exaustor da Sala" contém "Exaustor")
+                    if noun in nick.lower():
+                        targets.append((nick, conf))
+    
+    if not targets: return None
 
-    if not target_nick: return None
-
-    # Execução da Ação STATUS
+    # 4. Executar Ação (Loop pelos alvos)
+    
+    # Se for "status" e houver muitos, pode ser chato, então respondemos só ao primeiro ou fazemos um resumo
     if action == "status":
-        # Nota: esta função depende da cache atualizada pelo daemon
+        target_nick, _ = targets[0] # Só o primeiro para não falar demais
         st = get_status_for_device(target_nick)
         if st['state'] == 'unreachable': return f"Não consigo aceder ao {target_nick}."
-
         resp = f"O {target_nick} está {st['state']}"
         if 'power_w' in st: resp += f" a gastar {st['power_w']} Watts"
         if 'temperature' in st: resp += f", temperatura {st['temperature']} graus"
-
-        # Pequeno ajuste gramatical se a resposta for curta
         return resp + "."
 
-    # Execução das Ações ON/OFF
-    if action in ["on", "off"]:
+    # Se for ON/OFF, executamos em todos
+    success_count = 0
+    fail_count = 0
+    
+    for nick, conf in targets:
         try:
-            # Tenta ligação direta rápida para ação imediata
-            d = OutletDevice(target_conf['id'], target_conf['ip'], target_conf['key'])
+            d = OutletDevice(conf['id'], conf['ip'], conf['key'])
             d.set_socketTimeout(2); d.set_version(3.3)
-
-            # Determina o DPS (20 para luzes, 1 para tomadas genéricas/desumidificadores)
-            idx = 20 if any(x in target_nick.lower() for x in ['luz', 'lâmpada']) else 1
-
-            # Envia o comando (True para ON, False para OFF)
+            idx = 20 if any(x in nick.lower() for x in ['luz', 'lâmpada']) else 1
             d.set_value(idx, action == "on", nowait=True)
+            success_count += 1
+            # Pequena pausa para não engasgar a rede se forem muitos
+            if len(targets) > 1: time.sleep(0.2)
+        except: 
+            fail_count += 1
 
-            return f"{target_nick} {'ligado' if action=='on' else 'desligado'}."
-        except: return f"Erro ao controlar {target_nick}."
-
-    return None
+    # 5. Resposta Final
+    action_str = 'ligado' if action == 'on' else 'desligado'
+    
+    if len(targets) == 1:
+        nick = targets[0][0]
+        if fail_count > 0: return f"Erro ao controlar {nick}."
+        return f"{nick} {action_str}."
+    else:
+        # Resposta de grupo
+        if fail_count == 0:
+            return f"Feito. {len(targets)} dispositivos {action_str}s."
+        else:
+            return f"Consegui controlar {success_count} dispositivos, mas {fail_count} falharam."
