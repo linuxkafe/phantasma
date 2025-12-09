@@ -153,6 +153,7 @@ def route_and_respond(user_prompt, speak_response=True):
                 if llm_response is None:
                     if speak_response:
                         thinking_phrases = ["Deixa-me pensar...", "Ok, deixa ver...", "Um segundo.", "A verificar."]
+                        # Frases fixas continuam a usar a cache (use_cache=True por defeito)
                         play_tts(random.choice(thinking_phrases))
 
                     llm_response = process_with_ollama(prompt=user_prompt)
@@ -167,14 +168,16 @@ def route_and_respond(user_prompt, speak_response=True):
             llm_response = llm_response.get("response", str(llm_response))
 
         if speak_response:
-            play_tts(llm_response)
+            # --- MODIFICAÇÃO: Não usar cache para a resposta dinâmica do LLM/Skill ---
+            play_tts(llm_response, use_cache=False)
 
         return llm_response
 
     except Exception as e:
         print(f"ERRO CRÍTICO no router de intenções: {e}")
         error_msg = f"Ocorreu um erro ao processar: {e}"
-        if speak_response: play_tts(error_msg)
+        # Erros também não devem poluir a cache
+        if speak_response: play_tts(error_msg, use_cache=False)
         return error_msg
 
 def process_user_query():
@@ -351,9 +354,14 @@ if __name__ == "__main__":
         print(f"AVISO: Threads Torch: {e}")
 
     setup_database()
+    
+    # --- NOVO: Limpeza da Cache TTS (> 30 dias) ---
+    clean_old_cache(days=30)
+    # ----------------------------------------------
+    
     load_skills()
     
-    # --- NOVO: Registar rotas web das skills (UI, etc) ---
+    # --- Registar rotas web das skills (UI, etc) ---
     print("A registar rotas web das skills...")
     for skill in SKILLS_LIST:
         module = skill["module"]
