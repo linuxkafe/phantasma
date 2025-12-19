@@ -67,7 +67,7 @@ def _extract_python_code(text):
     return '\n'.join(clean_lines).strip()
 
 def _consolidate_memories():
-    print("🧠 [Dream] A iniciar consolidação de memória...")
+    print("🧠 [Dream] A iniciar consolidação de memória híbrida...")
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
@@ -78,15 +78,21 @@ def _consolidate_memories():
         ids_to_delete = [r[0] for r in rows]
         processed_texts = []
         for r in rows:
-            try: json.loads(r[1]); processed_texts.append(r[1])
-            except: processed_texts.append(f"RAW: {r[1]}")
+            processed_texts.append(r[1])
 
+        # Prompt atualizado para suportar Factos e Mermaid
         prompt = f"""
-        SYSTEM: You are a Data Optimizer.
+        SYSTEM: You are a Data Optimizer for Phantasma.
         INPUT: {json.dumps(processed_texts, ensure_ascii=False)}
-        TASK: Merge into SINGLE JSON. Tags (PT), Facts (EN, Strings).
-        OUTPUT: {{ "tags": [], "facts": [] }}
+        
+        TASK: Merge these memories into a SINGLE structured JSON.
+        RULES:
+        1. Keep "tags" in Portuguese.
+        2. Merge "facts" (strings) and "mermaid" (graphs) into a unified Knowledge Graph.
+        3. PREFER Mermaid syntax for the final output.
+        4. OUTPUT FORMAT: {{ "tags": [], "mermaid": "graph TD; ..." }}
         """
+        
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
         resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': prompt}])
         merged = _extract_json(resp['message']['content'])
@@ -94,10 +100,12 @@ def _consolidate_memories():
         if merged:
             pl = ','.join('?'*len(ids_to_delete))
             cursor.execute(f"DELETE FROM memories WHERE id IN ({pl})", ids_to_delete)
-            cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", (datetime.datetime.now(), json.dumps(merged, ensure_ascii=False)))
+            cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", 
+                           (datetime.datetime.now(), json.dumps(merged, ensure_ascii=False)))
             conn.commit()
-            print("🧠 [Dream] Consolidação concluída.")
-    except Exception as e: print(f"ERRO Consolidação: {e}")
+            print("🧠 [Dream] Consolidação híbrida concluída.")
+    except Exception as e: 
+        print(f"ERRO Consolidação: {e}")
     finally: 
         if conn: conn.close()
 
