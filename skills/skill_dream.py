@@ -139,86 +139,108 @@ def _validate_python_code(code_str):
     # 2. Validação Cloud (Gemini)
     return _ask_gemini_review(code_str)
 
-def _perform_coding_dream():
-    print("👾 [Lucid Dream] A iniciar evolução de código...")
-    
-    # 1. Contexto
-    existing_skills_summary = ""
-    for f in glob.glob(os.path.join(config.SKILLS_DIR, "skill_*.py")):
-        if "skill_lucid.py" in f: continue
-        try:
-            with open(f, 'r') as file:
-                head = "".join([next(file) for _ in range(15)])
-                existing_skills_summary += f"\n--- {os.path.basename(f)} ---\n{head}...\n"
-        except: pass
+# --- MOTOR DE SONHO LÚCIDO (COLABORAÇÃO OLLAMA + GEMINI) ---
 
-    current_code = ""
-    if os.path.exists(AUTOGEN_SKILL_PATH):
-        try: 
-            with open(AUTOGEN_SKILL_PATH, 'r') as f: 
-                current_code = f.read()
-        except: 
-            pass
+def _collaborative_gemini_evolution(ollama_draft, memories):
+    """
+    O Gemini recebe o rascunho do Ollama e as memórias para co-criar 
+    uma versão superior da skill_lucid.py.
+    """
+    if not hasattr(config, 'GEMINI_API_KEY') or not config.GEMINI_API_KEY:
+        return False, ollama_draft # Fallback para o código do Ollama se não houver API
+
+    print("👾 [Lucid Dream] A enviar rascunho do Ollama para o Gemini para evolução conjunta...")
+    model_name = "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={config.GEMINI_API_KEY}"
     
-    if not current_code:
-        current_code = """
-import config
-import random
-TRIGGER_TYPE = "contains"
-TRIGGERS = ["lucid status"]
-def handle(user_prompt_lower, user_prompt_full):
-    return "Skill lúcida ativa."
-"""
-    recent_memories = _get_recent_memories(limit=10)
+    prompt = f"""
+    SYSTEM: You are a Senior Python Architect collaborating with another AI (Ollama).
+    CONTEXT: The project is 'Phantasma', a local-first assistant.
+    MEMORY CONTEXT: {memories}
     
-    # 2. Prompt
-    dev_prompt = f"""
-    SYSTEM: You are an expert Python Developer for 'Phantasma'.
-    Evolve `skill_lucid.py` based on MEMORY CONTEXT.
-    
-    CURRENT CODE:
+    DRAFT CODE FROM OLLAMA:
     ```python
-    {current_code}
+    {ollama_draft}
     ```
     
-    MEMORY CONTEXT:
-    {recent_memories}
-    
     TASK:
-    1. ANALYZE existing functions. KEEP THEM.
-    2. INNOVATE: Add a NEW function based on memory.
-    3. INTEGRATE: Update `TRIGGERS` and `handle()`.
-    4. OUTPUT: COMPLETE Python code inside ```python blocks.
+    1. REVISE and IMPROVE the draft. Add error handling and optimize logic.
+    2. INNOVATE: Use the memories to add complex features or better natural language triggers.
+    3. RULE: In any control logic (on/off), the "OFF" action MUST have priority over "ON".
+    4. FORMAT: Return ONLY the complete, valid Python code inside a single block. 
+    Ensure 'def handle(user_prompt_lower, user_prompt_full)' is the main entry point.
     """
     
     try:
-        client = ollama.Client(timeout=config.OLLAMA_TIMEOUT * 3)
-        print("👾 [Lucid Dream] O Ollama está a programar...")
-        resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': dev_prompt}])
+        client = httpx.Client(timeout=30.0)
+        resp = client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+        if resp.status_code != 200: 
+            return False, f"Erro API Gemini: {resp.status_code}"
         
-        # FIX: Usar a função de extração robusta definida acima
-        new_code = _extract_python_code(resp['message']['content'])
+        full_response = resp.json().get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+        new_code = _extract_python_code(full_response)
         
-        # 3. Validação
-        is_valid, message = _validate_python_code(new_code)
-        if not is_valid:
-            print(f"👾 [Lucid Dream] CÓDIGO INVÁLIDO:\n{new_code}\nERRO: {message}")
-            return f"Falha na validação: {message}"
+        if new_code and "def handle" in new_code:
+            print("👾 [Lucid Dream] Evolução concluída com sucesso pelo Gemini.")
+            return True, new_code
+        return False, "Gemini devolveu código inválido."
+    except Exception as e: 
+        return False, f"Erro na colaboração: {e}"
+
+def _perform_coding_dream():
+    print("👾 [Lucid Dream] A iniciar ciclo de evolução colaborativa...")
+    
+    # 1. Obter Código Atual e Memórias
+    current_code = ""
+    if os.path.exists(AUTOGEN_SKILL_PATH):
+        try: 
+            with open(AUTOGEN_SKILL_PATH, 'r') as f: current_code = f.read()
+        except: pass
+    
+    if not current_code:
+        current_code = "import config\nTRIGGER_TYPE='contains'\nTRIGGERS=['lucid status']\ndef handle(l, f): return 'Ativo.'"
+
+    recent_memories = _get_recent_memories(limit=15)
+    
+    # 2. Fase 1: Ollama gera a ideia/rascunho inicial
+    draft_prompt = f"""
+    You are the creative core of Phantasma. Based on these memories: {recent_memories}
+    Evolve this code: {current_code}
+    Create a functional draft for a new skill feature. 
+    Output only the Python code.
+    """
+    
+    try:
+        client = ollama.Client(timeout=config.OLLAMA_TIMEOUT * 2)
+        print("👾 [Lucid Dream] Ollama a gerar rascunho inicial...")
+        resp = client.chat(model=config.OLLAMA_MODEL_PRIMARY, messages=[{'role': 'user', 'content': draft_prompt}])
+        ollama_draft = _extract_python_code(resp['message']['content'])
         
-        # 4. Deploy
-        with open(AUTOGEN_SKILL_PATH, 'w') as f: 
-            f.write(new_code)
+        # 3. Fase 2: Gemini refina e expande o código (Comunicação entre modelos)
+        success, final_code = _collaborative_gemini_evolution(ollama_draft, recent_memories)
         
-        log = json.dumps({"tags": ["Dev", "Evolution"], "facts": ["Updated skill_lucid.py"]}, ensure_ascii=False)
-        save_to_rag(log)
-        
-        return "Código evoluído com sucesso."
+        if not success:
+            print(f"👾 [Lucid Dream] Colaboração falhou, a usar rascunho local: {final_code}")
+            final_code = ollama_draft
+
+        # 4. Validação Sintática Final (Local)
+        try:
+            ast.parse(final_code)
+            with open(AUTOGEN_SKILL_PATH, 'w') as f: 
+                f.write(final_code)
+            
+            save_to_rag(json.dumps({"tags": ["Dev", "Collab"], "facts": ["Skill Lucid evolved via Ollama+Gemini"]}, ensure_ascii=False))
+            print("👾 [Lucid Dream] skill_lucid.py atualizada e pronta a ser carregada.")
+            return "Evolução concluída."
+        except SyntaxError as e:
+            print(f"👾 [Lucid Dream] Erro de sintaxe no código final: {e}")
+            return "Erro de sintaxe na evolução."
 
     except Exception as e:
         print(f"ERRO [Lucid Dream]: {e}")
-        return "Erro na evolução."
+        return "Erro no processo onírico."
 
-# --- MOTOR WEB (Mantido) ---
+# --- MOTOR WEB ---
 
 def _perform_web_dream():
     print("💤 [Dream] A iniciar aprendizagem Web...")
