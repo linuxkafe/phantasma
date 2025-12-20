@@ -5,12 +5,8 @@ ALERT_EMAIL = "ALERT@EMAIL"
 # --- Caminhos Base ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "memory.db")
-TTS_MODEL_PATH = os.path.join(BASE_DIR, "models/pt_PT-dii-high.onnx")
-SKILLS_DIR = os.path.join(BASE_DIR, "skills") # <--- NOVO
-
-# --- Configs de Hotword (Porcupine) ---
-ACCESS_KEY = "CHAVEPORCUPINE"
-HOTWORD_KEYWORD = "phantasma"
+TTS_MODEL_PATH = os.path.join(BASE_DIR, "models/tts/pt_PT-dii-high.onnx")
+SKILLS_DIR = os.path.join(BASE_DIR, "skills")
 
 # --- Configs de Hardware (Áudio) ---
 MIC_SAMPLERATE = 16000 # 16kHz
@@ -18,11 +14,11 @@ ALSA_DEVICE_IN = 0
 ALSA_DEVICE_OUT = "plughw:0,0"
 
 # --- Configs de Processamento (IA) ---
-OLLAMA_MODEL_PRIMARY = "llama3:8b-instruct-8k" # O teu modelo 8K
-OLLAMA_MODEL_FALLBACK = "phi3:mini"
-OLLAMA_TIMEOUT = 120
+OLLAMA_MODEL_PRIMARY = "qwen3:8b" # O teu modelo 8K
+OLLAMA_MODEL_FALLBACK = "qwen3:8b"
+OLLAMA_TIMEOUT = 600
 WHISPER_MODEL = "medium"
-RECORD_SECONDS = 8 # Aumentado
+RECORD_SECONDS = 7
 
 # --- Configs de Performance ---
 OLLAMA_THREADS = 4
