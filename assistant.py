@@ -247,56 +247,55 @@ def main():
             print(f"WakeWords ativas: {list(oww_model.models.keys())}")
         except Exception as e: print(f"Erro WakeWord: {e}")
 
-    print(f"--- Phantasma ONLINE (Modo Adaptativo) ---")
+    print(f"--- Phantasma ONLINE (Smart Noise Gate) ---")
 
-    # Configurações de Adaptação
-    BASE_THRESHOLD = config.WAKEWORD_CONFIDENCE # Valor base (ex: 0.45)
-    NOISE_LIMIT = 500  # Nível de volume considerado "Barulho de Fundo" (ajustável)
+    # --- DEFINIÇÕES DE SENSIBILIDADE ---
+    NOISE_LIMIT = 1000    # Acima disto é considerado "Barulho de Fundo Alto" (TV)
     
+    # Valores de Confiança (0.0 a 1.0)
+    # BASE: O valor normal. 0.5 filtra bem conversas distantes.
+    THRESH_BASE = config.WAKEWORD_CONFIDENCE 
+    
+    # HIGH: Só ativa se tiver 100% certeza (para quando a TV está aos berros)
+    THRESH_HIGH = 0.75   
+
     while True:
         if oww_model:
             try:
-                # 1. Escuta Hotword
                 with sd.InputStream(channels=1, samplerate=16000, dtype='int16', blocksize=1280) as stream:
                     while True:
                         chunk, _ = stream.read(1280)
                         
-                        # --- CÁLCULO DE ENERGIA (RUÍDO) ---
-                        # Converter para float para calcular RMS (Root Mean Square)
+                        # 1. Medir o volume ambiente (RMS)
                         chunk_float = chunk.flatten().astype(np.float32)
                         rms = np.sqrt(np.mean(chunk_float**2))
                         
-                        # --- LÓGICA DINÂMICA ---
-                        current_threshold = BASE_THRESHOLD
-                        
-                        # Se houver muito barulho (TV), somos mais exigentes
+                        # 2. Lógica de Proteção Unidirecional
+                        # Se houver muito barulho, sobe o escudo.
+                        # Se houver silêncio, MANTÉM o padrão (não baixa a guarda).
                         if rms > NOISE_LIMIT:
-                            current_threshold = 0.75 # Muito exigente
-                            status_ruido = "(Ruído Alto -> Exigente)"
+                            current_threshold = THRESH_HIGH
+                            mode = "Escudo 🛡️"
                         else:
-                            current_threshold = BASE_THRESHOLD # Normal
-                            status_ruido = ""
+                            current_threshold = THRESH_BASE
+                            mode = "Normal"
 
-                        # Predição
+                        # 3. Verificar WakeWord
                         prediction = oww_model.predict(chunk.flatten())
                         best_model = max(prediction, key=prediction.get)
                         best_score = prediction[best_model]
 
-                        # --- DEBUG VISUAL (Opcional, comenta depois) ---
-                        # Mostra o volume atual e o score se for relevante
-                        # if best_score > 0.1 or rms > 1000:
-                        #    print(f"\rVol: {int(rms)} | Score: {best_score:.2f} | Meta: {current_threshold} {status_ruido}", end='', flush=True)
+                        # DEBUG: Descomenta para ver os scores de vozes distantes
+                        # if best_score > 0.3:
+                        #    print(f"\rDetetado: {best_model} ({best_score:.2f}) | Vol: {int(rms)} | Modo: {mode}", end='', flush=True)
 
-                        # Verifica ativação com o limiar dinâmico
                         if best_score > current_threshold:
-                            print(f"\n\n**** ATIVADO: '{best_model}' (Score: {best_score:.2f} | Ruído: {int(rms)}) ****")
+                            print(f"\n\n**** ATIVADO ({mode}): '{best_model}' (Score: {best_score:.2f} | Vol: {int(rms)}) ****")
                             
-                            # 2. Respiro ALSA
                             stream.stop()
                             stream.close()
                             time.sleep(0.3)
                             
-                            # 3. Processamento
                             play_cached_greeting()
                             process_user_query()
                             
