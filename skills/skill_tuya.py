@@ -27,7 +27,7 @@ ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
 STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura", "quanto", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
-BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala"]
+BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala", "luzes", "fichas"]
 VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.5]
 
 def _get_tuya_triggers():
@@ -135,17 +135,15 @@ def handle(user_prompt_lower, user_prompt_full):
     if not action: return None
 
     targets = []
-    # 1. Procurar alcunha direta
+    # 1. Procurar alcunha direta (Exata)
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
-            targets.append((nick, conf)); break
-
-    # 2. Lógica inteligente para Sensores e Dispositivos Genéricos
+            targets.append((nick, conf))
+    
+    # 2. Lógica inteligente para Sensores e Locais
     if not targets:
         locations = ["sala", "quarto", "wc", "cozinha", "entrada"]
         mentioned_loc = next((loc for loc in locations if loc in user_prompt_lower), None)
-        
-        # Se pedir temperatura/humidade sem especificar o dispositivo, assume o sensor da zona
         is_sensor_query = any(x in user_prompt_lower for x in ["temperatura", "humidade"])
         
         for nick, conf in config.TUYA_DEVICES.items():
@@ -156,27 +154,50 @@ def handle(user_prompt_lower, user_prompt_full):
                 elif any(noun in user_prompt_lower for noun in BASE_NOUNS) and any(noun in nick_l for noun in BASE_NOUNS):
                     targets.append((nick, conf)); break
 
+    # 3. Lógica Genérica (Fallback): "Liga o exaustor" -> Liga TODOS os exaustores
+    if not targets:
+        for noun in BASE_NOUNS:
+            if noun in user_prompt_lower:
+                for nick, conf in config.TUYA_DEVICES.items():
+                    if noun in nick.lower(): targets.append((nick, conf))
+                if targets: break
+
     if not targets: return None
 
+    # Processar STATUS
     if action == "status":
         target_nick, _ = targets[0]
         st = get_status_for_device(target_nick)
         if st['state'] == 'unreachable': return f"O {target_nick} não responde das sombras."
-        
         res_parts = [f"O {target_nick} está {st['state']}"]
         if 'temperature' in st: res_parts.append(f"com {st['temperature']} graus")
         if 'humidity' in st: res_parts.append(f"e {st['humidity']}% de humidade")
         if 'power_w' in st: res_parts.append(f"a gastar {st['power_w']} Watts")
         return ", ".join(res_parts) + "."
 
+    # Processar AÇÃO (On/Off)
     success = 0
     for nick, conf in targets:
         try:
             d = OutletDevice(conf['id'], conf['ip'], conf['key'])
-            d.set_version(3.3); idx = 20 if "luz" in nick.lower() else 1
+            d.set_version(3.3); d.set_socketTimeout(2)
+            idx = 20 if any(x in nick.lower() for x in ["luz", "lâmpada", "candeeiro"]) else 1
+            
+            # Executa sem esperar retorno (nowait=True não retorna bool útil)
             d.set_value(idx, action == "on", nowait=True)
+            
+            # Se não houve exceção, contamos como sucesso
             success += 1
-        except: pass
+            print(f"[Tuya] {nick} -> {action}")
+        except Exception as e: 
+            print(f"[Tuya] Erro ao controlar {nick}: {e}")
+            continue
 
     action_pt = "ligado" if action == "on" else "desligado"
-    return f"{targets[0][0]} {action_pt}." if len(targets) == 1 else f"Processados {success} dispositivos."
+    
+    if len(targets) > 1:
+        return f"{success} dispositivos {action_pt}s."
+    elif len(targets) == 1:
+        return f"{targets[0][0]} {action_pt}."
+    else:
+        return "Tentei, mas nenhum dispositivo respondeu."
