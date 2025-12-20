@@ -103,7 +103,7 @@ def transcribe_audio(audio_data):
         res = whisper_model.transcribe(
             audio_data, language='pt', fp16=False, 
             initial_prompt=config.WHISPER_INITIAL_PROMPT, 
-            no_speech_threshold=0.7, logprob_threshold=-1.0
+            no_speech_threshold=0.8, logprob_threshold=-1.0
         )
         text = res['text'].strip()
         
