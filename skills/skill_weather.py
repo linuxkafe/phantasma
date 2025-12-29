@@ -20,6 +20,9 @@ POLL_INTERVAL = 1800  # 30 minutos
 DEFAULT_CITY_ID = getattr(config, 'IPMA_GLOBAL_ID', 1131200)
 DEFAULT_CITY_NAME = getattr(config, 'CITY_NAME', "Porto")
 
+# Cache em memória para os IDs das cidades (para não bater na API do IPMA sempre)
+_LOCATIONS_CACHE = {}
+
 # --- Helpers ---
 
 def _normalize(text):
@@ -56,11 +59,9 @@ def _get_weather_desc(type_id):
     }
     return types.get(type_id, "céu nublado")
 
-# --- Helpers de Aconselhamento (NOVO) ---
-
 def _get_uv_advice(uv):
     val = int(round(uv))
-    if val < 3: return "baixo", "" # Não chateia com UV baixo
+    if val < 3: return "baixo", "" 
     if val < 6: return "moderado", "usa óculos de sol"
     if val < 8: return "alto", "usa protetor solar"
     if val < 11: return "muito alto", "evita o sol direto"
@@ -68,12 +69,34 @@ def _get_uv_advice(uv):
 
 def _get_aqi_advice(aqi):
     val = int(aqi)
-    if val <= 50: return "boa", "" # Ar bom, sem avisos
+    if val <= 50: return "boa", "" 
     if val <= 100: return "moderada", "se fores sensível tem cuidado"
     if val <= 150: return "insalubre", "evita exercício na rua"
     return "perigosa", "usa máscara ou fica em casa"
 
-# --- Fetch de Dados ---
+# --- Fetch de Dados e Localizações ---
+
+def _get_city_id(city_name):
+    """ Tenta encontrar o ID de uma cidade pelo nome usando a API do IPMA """
+    global _LOCATIONS_CACHE
+    
+    # Se a cache estiver vazia, popula-a
+    if not _LOCATIONS_CACHE:
+        try:
+            url = "https://api.ipma.pt/open-data/distrits-islands.json"
+            resp = httpx.get(url, timeout=5.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                for entry in data.get('data', []):
+                    # Guarda normalizado: "lisboa" -> 1110600
+                    norm_name = _normalize(entry['local'])
+                    _LOCATIONS_CACHE[norm_name] = entry['globalIdLocal']
+        except Exception as e:
+            print(f"[Weather] Falha ao obter lista de cidades: {e}")
+            return None
+
+    # Tenta encontrar a cidade
+    return _LOCATIONS_CACHE.get(_normalize(city_name))
 
 def _fetch_city_data(global_id):
     result = {"timestamp": time.time(), "city_id": global_id}
@@ -98,7 +121,6 @@ def _fetch_city_data(global_id):
 
             # 3. AQI
             try:
-                # Tenta Open-Meteo como primário (mais rápido/estável para free tier)
                 url_oma = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=us_aqi"
                 oma_res = client.get(url_oma, timeout=5.0).json()
                 result['aqi'] = oma_res['current']['us_aqi']
@@ -135,6 +157,7 @@ def _save_cache(data):
 
 def _daemon_loop():
     while True:
+        # O Daemon guarda apenas a cidade PADRÃO
         data = _fetch_city_data(DEFAULT_CITY_ID)
         if data: _save_cache(data)
         time.sleep(POLL_INTERVAL)
@@ -147,20 +170,41 @@ def init_skill_daemon():
 
 def handle(user_prompt_lower, user_prompt_full):
     try:
-        if not os.path.exists(CACHE_FILE):
-            return "Ainda estou a recolher dados meteorológicos."
+        target_data = None
+        target_city_name = DEFAULT_CITY_NAME
+
+        # 1. Tentar detetar localização no prompt (em/no/na)
+        # Regex procura por "em x", "no x", "na x", ignorando "hoje" ou "amanhã" como locais
+        location_match = re.search(r'\b(em|no|na)\s+(?!(?:hoje|amanhã)\b)([a-zà-ú\s]+)', user_prompt_lower)
+        
+        if location_match:
+            city_searched = location_match.group(2).strip()
+            city_id = _get_city_id(city_searched)
             
-        with open(CACHE_FILE, 'r') as f:
-            data = json.load(f)
+            if city_id:
+                print(f"[Weather] Localização detetada: {city_searched} (ID: {city_id}) - A obter dados em tempo real...")
+                # Fetch síncrono para a cidade pedida
+                target_data = _fetch_city_data(city_id)
+                target_city_name = city_searched.title()
+            else:
+                print(f"[Weather] Cidade '{city_searched}' não encontrada na lista do IPMA.")
+
+        # 2. Se não houver dados específicos (ou cidade não encontrada), usa a cache padrão
+        if not target_data:
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, 'r') as f:
+                    target_data = json.load(f)
+            else:
+                return "Ainda estou a recolher dados meteorológicos."
             
-        if not data or not data.get('forecast'):
+        if not target_data or not target_data.get('forecast'):
             return "Não tenho dados de previsão disponíveis."
 
         is_tomorrow = "amanhã" in user_prompt_lower
         idx = 1 if is_tomorrow else 0
-        if len(data['forecast']) <= idx: return "Previsão indisponível."
+        if len(target_data['forecast']) <= idx: return "Previsão indisponível."
         
-        day = data['forecast'][idx]
+        day = target_data['forecast'][idx]
         
         # Valores Inteiros
         t_max = int(round(float(day.get('tMax', 0))))
@@ -171,40 +215,46 @@ def handle(user_prompt_lower, user_prompt_full):
         current_hour = datetime.now().hour
         is_night = (current_hour >= 19 or current_hour < 7) and not is_tomorrow
 
-        # 1. Pergunta CHUVA
-        if any(x in user_prompt_lower for x in ["chover", "chuva", "molhar", "água"]):
-            if precip >= 50: return f"Sim, vai chover ({precip}%)."
-            elif precip > 0: return f"Talvez, há {precip}% de hipóteses."
-            else: return "Não, não vai chover."
+        # 3. Construir a Resposta
 
-        # 2. Resposta GERAL
-        resp = f"Previsão: {w_desc}, máxima de {t_max} e mínima de {t_min} graus."
+        # Pergunta CHUVA
+        if any(x in user_prompt_lower for x in ["chover", "chuva", "molhar", "água"]):
+            prefix = ""
+            if target_city_name != DEFAULT_CITY_NAME:
+                prefix = f"Em {target_city_name}, "
+
+            if precip >= 50: return f"{prefix}Sim, vai chover ({precip}%)."
+            elif precip > 0: return f"{prefix}Talvez, há {precip}% de hipóteses."
+            else: return f"{prefix}Não, não vai chover."
+
+        # Resposta GERAL
+        day_str = "amanhã" if is_tomorrow else "hoje"
+        resp = f"Previsão para {day_str} em {target_city_name}: {w_desc}, máxima de {t_max} e mínima de {t_min} graus."
         
         extras = []
         
         # Qualidade do Ar (Com conselhos)
-        if 'aqi' in data:
-            aqi = int(data['aqi'])
+        if 'aqi' in target_data:
+            aqi = int(target_data['aqi'])
             desc, advice = _get_aqi_advice(aqi)
-            # Constrói a frase do ar
             air_str = f"qualidade do ar {desc} ({aqi})"
             if advice: air_str += f", {advice}"
             extras.append(air_str)
             
         # UV (Com conselhos, só de dia)
-        if 'uv' in data and not is_night:
-            uv = float(data['uv'])
+        if 'uv' in target_data and not is_night:
+            uv = float(target_data['uv'])
             desc, advice = _get_uv_advice(uv)
             uv_str = f"índice UV {int(round(uv))}"
             if advice: uv_str += f" ({advice})"
             extras.append(uv_str)
             
-        # Lua (Só à noite)
-        if is_night and 'moon_phase' in data:
-            extras.append(f"fase lunar {data['moon_phase']}")
+        # Lua (Só à noite e se for a cidade padrão ou se os dados tiverem lua)
+        # Nota: O fetch dinâmico também calcula a lua, por isso é seguro.
+        if is_night and 'moon_phase' in target_data:
+            extras.append(f"fase lunar {target_data['moon_phase']}")
             
         if extras:
-            # Junta tudo de forma natural
             resp += " " + ", ".join(extras).capitalize() + "."
             
         return resp
