@@ -17,6 +17,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 import traceback
 import config
+import queue
 
 # --- FALLBACKS ---
 try: from audio_utils import play_tts, record_audio, clean_old_cache
@@ -65,36 +66,30 @@ def safe_play_tts(text, use_cache=True, request_id=None, speak=True):
 
 def force_volume_down(card_index):
     """ 
-    Aplica o volume definido no config APENAS aos canais de Captura (Mic).
-    Tenta também DESATIVAR o AGC (Auto Gain Control) para evitar falsos positivos
-    causados pela flutuação do ruído de fundo.
+    Aplica o volume definido no config e DESLIGA o AGC (Auto Gain Control).
     """
-    # Baixei o default de 80 para 60. 80% num Jabra é demasiado "quente".
-    target = getattr(config, 'ALSA_VOLUME_PERCENT', 60)
-    print(f"🎚️ A verificar volumes no Card {card_index} (Alvo: {target}%)...")
+    target = getattr(config, 'ALSA_VOLUME_PERCENT', 85)
+    print(f"🎚️ A configurar áudio no Card {card_index} (Alvo: {target}%)...")
     
     try:
-        # Lista todos os controlos do cartão
         cmd = ['amixer', '-c', str(card_index), 'scontrols']
         result = subprocess.run(cmd, capture_output=True, text=True)
-        # Regex para apanhar o nome entre plicas simples 'Nome'
         controls = re.findall(r"Simple mixer control '([^']+)'", result.stdout)
         
         if not controls: return
 
         for ctrl in controls:
-            # FILTRO DE SEGURANÇA: Ignora saídas de som
+            # Ignora canais de saída
             if any(x in ctrl for x in ['PCM', 'Master', 'Speaker', 'Headphone', 'Playback']):
                 continue
             
             # 1. Ajuste de Volume (Capture/Mic)
             if 'Capture' in ctrl or 'Mic' in ctrl:
-                print(f"   ↘ Ajustando entrada: '{ctrl}' -> {target}%")
+                print(f"   ↘ Ajustando ganho: '{ctrl}' -> {target}%")
                 subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, f'{target}%', 'unmute', 'cap'], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-            # 2. CRÍTICO: Desativar AGC (Auto Gain Control)
-            # Isto impede que o microfone aumente a sensibilidade no silêncio
+            # 2. Desligar AGC (Crucial para estabilidade da Hotword)
             if 'AGC' in ctrl or 'Auto Gain' in ctrl:
                 print(f"   🚫 A desativar AGC: '{ctrl}'")
                 subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, 'off'], 
@@ -104,7 +99,7 @@ def force_volume_down(card_index):
         print(f"⚠️ Erro ao ajustar volumes: {e}")
 
 def find_working_samplerate(device_index):
-    candidates = [48000, 44100, 32000, 16000]
+    candidates = [16000, 48000, 44100, 32000]
     print(f"🕵️ A negociar Sample Rate para o device {device_index}...")
     for rate in candidates:
         try:
@@ -121,6 +116,7 @@ class PhantasmaEngine:
         self.ready = False
         try:
             from openwakeword.model import Model
+            # Carrega modelos ONNX
             self.model = Model(wakeword_models=model_paths, inference_framework="onnx")
             self.ready = True
             print(f"👻 Motor Phantasma: ONLINE")
@@ -130,6 +126,7 @@ class PhantasmaEngine:
 
     def predict(self, audio_chunk_int16):
         if not self.ready: return 0.0
+        # openWakeWord espera int16 ou float32
         prediction = self.model.predict(audio_chunk_int16)
         if prediction: return max(prediction.values())
         return 0.0
@@ -178,30 +175,20 @@ def route_and_respond(prompt, req_id, speak=True):
 
     p_low = prompt.lower()
     
-    # 1. Skills (COM FALLTHROUGH - PASSA A BATATA QUENTE)
+    # 1. Skills
     for s in SKILLS_LIST:
         trigs = [t.lower() for t in s['triggers']]
         match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
         
         if match and s['handle']:
             try:
-                # Tenta executar a skill
                 resp = s['handle'](p_low, prompt)
-                
                 if req_id != CURRENT_REQUEST_ID: return
-
-                # CRÍTICO: Se a skill devolveu None/Vazio, IGNORA e continua o loop!
-                if not resp:
-                    print(f"⏩ Skill '{s['name']}' ignorou o pedido.")
-                    continue
+                if not resp: continue
                 
                 txt = resp.get("response", "") if isinstance(resp, dict) else resp
-                
-                # Se a resposta for vazia, também continua
-                if not txt:
-                    continue
+                if not txt: continue
 
-                # Se chegámos aqui, é porque a skill resolveu!
                 print(f"🔧 Skill '{s['name']}' resolveu.")
                 safe_play_tts(txt, False, req_id, speak)
                 return txt
@@ -285,9 +272,6 @@ def get_help():
 def main():
     global CURRENT_REQUEST_ID, IS_SPEAKING
     
-    # Import local para não mexer no topo do ficheiro
-    import queue 
-
     if not config.WAKEWORD_MODELS: print("❌ WAKEWORD_MODELS vazio!"); return
     
     engine = PhantasmaEngine(config.WAKEWORD_MODELS)
@@ -296,98 +280,90 @@ def main():
     # Config Audio
     device_in = getattr(config, 'ALSA_DEVICE_IN', 0)
     force_volume_down(device_in) 
+    
+    # Negociar sample rate
     DETECTED_RATE = find_working_samplerate(device_in)
     
-    # Lógica de Downsample
-    if DETECTED_RATE > 32000: DOWNSAMPLE_FACTOR = 3
-    elif DETECTED_RATE > 24000: DOWNSAMPLE_FACTOR = 2
-    else: DOWNSAMPLE_FACTOR = 1
-        
-    CHUNK_SIZE = 1280
+    # openWakeWord prefere 16000. Se o hardware só der 48k, fazemos downsample.
+    DOWNSAMPLE_FACTOR = 1
+    if DETECTED_RATE == 48000: DOWNSAMPLE_FACTOR = 3
+    elif DETECTED_RATE == 32000: DOWNSAMPLE_FACTOR = 2
+    
+    # Chunk padrão do openWakeWord é 1280 samples (80ms a 16khz)
+    CHUNK_SIZE = 1280 
+    # Tamanho a ler do hardware
     READ_SIZE = CHUNK_SIZE * DOWNSAMPLE_FACTOR
     
     debug = getattr(config, 'DEBUG_MODE', False)
-    thresh = getattr(config, 'WAKEWORD_CONFIDENCE', 0.6)
-    persistence = getattr(config, 'WAKEWORD_PERSISTENCE', 3)
+    # Valor padrão mais alto para filtrar TV, confiando no volume de input mais alto
+    thresh = getattr(config, 'WAKEWORD_CONFIDENCE', 0.7) 
+    persistence = getattr(config, 'WAKEWORD_PERSISTENCE', 4)
 
     print(f"👻 A ouvir no device {device_in} @ {DETECTED_RATE}Hz -> Fator {DOWNSAMPLE_FACTOR}x")
+    print(f"   (Threshold: {thresh}, Persistence: {persistence})")
 
     streak = 0
-    cooldown = 0
-    log_counter = 0
+    patience = 0 # Tolerância para falhas breves
+    MAX_PATIENCE = 2 # Quantos frames podemos "perder" sem zerar o streak
     
-    # Fila para desacoplar a leitura
+    cooldown = 0
     audio_queue = queue.Queue()
 
     def audio_callback(indata, frames, time, status):
-        """Callback do sistema de som (Thread separada)"""
-        if status:
-            print(f"⚠️ Audio Status: {status}", file=sys.stderr)
+        if status: print(f"⚠️ Audio Status: {status}", file=sys.stderr)
         audio_queue.put(indata.copy())
     
     while True:
         try:
-            # blocksize=READ_SIZE garante pacotes do tamanho certo
             with sd.InputStream(device=device_in, channels=1, samplerate=DETECTED_RATE, 
                                 dtype='int16', blocksize=READ_SIZE, callback=audio_callback):
                 
                 print(f"👂 Stream Ativo")
                 
                 while True:
-                    # Lê da fila (bloqueia na RAM, não no driver)
                     chunk = audio_queue.get()
-                    
                     audio_raw = np.frombuffer(chunk, dtype=np.int16)
 
-                    # Processamento de Audio
+                    # Downsample manual se necessário (simples decimação)
                     if DOWNSAMPLE_FACTOR > 1: audio_resampled = audio_raw[::DOWNSAMPLE_FACTOR]
                     else: audio_resampled = audio_raw
 
-                    audio_float = audio_resampled.astype(np.float32)
-                    audio_float -= np.mean(audio_float)
-                    audio_np = np.clip(audio_float, -32767, 32767).astype(np.int16)
-
-                    if IS_SPEAKING or time.time() < cooldown: streak=0; continue
+                    if IS_SPEAKING or time.time() < cooldown: 
+                        streak=0; patience=0; continue
 
                     # Previsão
-                    score = engine.predict(audio_np)
-                    amplitude = np.max(np.abs(audio_np))
+                    score = engine.predict(audio_resampled)
+                    
+                    # Log visual (Debug)
+                    if debug or (score > 0.3):
+                        bar = "█" * int(score * 20)
+                        print(f"Score:{score:.4f} | Streak:{streak} {bar}")
 
-                    # --- SILENT DEBUG LOGIC ---
-                    # 1. Calculamos sempre a string (mantém CPU/Timing ativo como no debug)
-                    stat = "🔴 CLIP" if amplitude > 32500 else "🟢 SOM"
-                    bar = "█" * int(score * 20)
-                    debug_str = f"[{stat}] Vol:{amplitude:<5} | Score:{score:.4f} {bar}"
-                    
-                    log_counter += 1
-                    
-                    # 2. Mostramos SÓ se o score for interessante (> 0.2) ou se estivermos em debug total
-                    # Isto permite-te ver se ele te está a ouvir "baixo" (0.3, 0.4) sem encher o log de lixo
-                    if debug or (score > 0.2):
-                         # Limita o spam visual mesmo quando deteta algo
-                         if log_counter % 2 == 0 or score > thresh:
-                            print(debug_str)
-                    
-                    # 3. Pequeno yield para garantir que a thread de áudio respira
-                    if not debug:
-                        time.sleep(0.002) 
-                    # --------------------------
-
-                    if score > thresh: streak += 1
-                    else: streak = 0
+                    # --- LÓGICA DE DETECÇÃO COM TOLERÂNCIA ---
+                    if score >= thresh:
+                        streak += 1
+                        patience = MAX_PATIENCE # Reset da paciência se acertou
+                    else:
+                        if streak > 0 and patience > 0:
+                            patience -= 1 # Não zera o streak, apenas gasta paciência
+                            if debug: print(f"   (Paciência: {patience})")
+                        else:
+                            streak = 0
+                            patience = 0 # Zera tudo
+                    # ----------------------------------------
 
                     if streak >= persistence:
-                        print(f"\n⚡ WAKEWORD DETETADA! (Score: {score:.2f})")
+                        print(f"\n⚡ WAKEWORD DETETADA! (Score final: {score:.2f})")
                         stop_audio_output()
                         if is_quiet_time(): streak=0; engine.reset(); continue
                         break
             
-            # --- Fora do Stream (Ação) ---
+            # --- Ação ---
             with audio_queue.mutex: audio_queue.queue.clear()
             
             req_id = str(uuid.uuid4())[:8]
             CURRENT_REQUEST_ID = req_id
-            engine.reset(); streak=0
+            engine.reset(); streak=0; patience=0
             
             print("🎤 Fala...")
             safe_play_tts("Sim?", speak=True)
@@ -400,6 +376,7 @@ def main():
 
         except Exception as e:
             print(f"❌ Erro Main: {e}")
+            traceback.print_exc()
             time.sleep(1)
 
 if __name__ == "__main__":
