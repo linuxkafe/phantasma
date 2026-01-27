@@ -153,7 +153,7 @@ journalctl -u phantasma -f
 
 ### 1. Comandos de Voz
 
-1.  Diz a *hotword*: **"Fantasma"**.
+1.  Diz a *hotword*: **"Olá Fantasma"** ou **"Hey Fantasma"**.
 2.  Espera pela reposta).
 3.  Faz o teu pedido (ex: "como vai estar o tempo amanhã?", "memoriza que o meu gato se chama Bimby", "põe música").
 
