@@ -29,7 +29,9 @@ WAKEWORD_PERSISTENCE = 1
 WAKEWORD_CONFIDENCE = 0.6
 
 # --- Configs de Processamento (IA) ---
-OLLAMA_MODEL_PRIMARY = "qwen3:8b" # O teu modelo 8K
+OLLAMA_HOST_PRIMARY = "http://10.0.0.128:11434"  # Ex: Servidor com GPU dedicada
+OLLAMA_HOST_FALLBACK = "http://localhost:11434" # Fallback para processamento local
+OLLAMA_MODEL_PRIMARY = "llama3:8b"
 OLLAMA_MODEL_FALLBACK = "qwen3:8b"
 OLLAMA_TIMEOUT = 600
 WHISPER_MODEL = "medium"

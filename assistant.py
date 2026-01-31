@@ -170,18 +170,32 @@ def transcribe_audio(audio_data):
 
 def route_and_respond(prompt, req_id, speak=True):
     global CURRENT_REQUEST_ID
-    if req_id == "API_REQ": CURRENT_REQUEST_ID = "API_REQ"; stop_audio_output()
-    elif req_id != CURRENT_REQUEST_ID: return
+    # Prioridade Máxima: Se o comando for para parar ou interromper, 
+    # cancelamos o processamento de áudio imediatamente.
+    if req_id == "API_REQ": 
+        CURRENT_REQUEST_ID = "API_REQ"
+        stop_audio_output()
+    elif req_id != CURRENT_REQUEST_ID: 
+        return
 
     p_low = prompt.lower()
     
-    # 1. Skills
-    for s in SKILLS_LIST:
+    # --- 1. SKILLS (Lógica de Prioridade OFF > ON) ---
+    # Definimos palavras que indicam intenção de desligar
+    OFF_KEYWORDS = ['desliga', 'para', 'apaga', 'fecha', 'recolhe', 'stop', 'cancelar']
+    is_off_intent = any(k in p_low for k in OFF_KEYWORDS)
+
+    # Ordenamos a lista para que se houver intenção de "desligar", 
+    # as skills que tratam disso sejam validadas primeiro.
+    sorted_skills = sorted(SKILLS_LIST, key=lambda x: is_off_intent, reverse=True)
+
+    for s in sorted_skills:
         trigs = [t.lower() for t in s['triggers']]
         match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
         
         if match and s['handle']:
             try:
+                # Executa a skill
                 resp = s['handle'](p_low, prompt)
                 if req_id != CURRENT_REQUEST_ID: return
                 if not resp: continue
@@ -196,27 +210,49 @@ def route_and_respond(prompt, req_id, speak=True):
                 print(f"⚠️ Erro Skill {s['name']}: {e}")
                 pass 
 
-    # 2. Cache
+    # --- 2. CACHE ---
     cached = get_cached_response(prompt)
     if cached:
         safe_play_tts(cached, True, req_id, speak)
         return cached
 
-    # 3. LLM
+    # --- 3. LLM (Lógica de Failover com Modelos Dedicados) ---
     safe_play_tts("Deixa ver...", True, req_id, speak)
     rag = retrieve_from_rag(prompt)
     web = search_with_searxng(prompt)
-    try:
-        if req_id != CURRENT_REQUEST_ID: return
-        model = getattr(config, 'OLLAMA_MODEL_PRIMARY', 'llama3')
-        full_p = f"{getattr(config,'SYSTEM_PROMPT','')}\nContext:{rag}\n{web}\nUser:{prompt}"
-        resp = ollama_client.chat(model=model, messages=[{'role':'user','content':full_p}])
-        ans = resp['message']['content']
+    
+    # Lista de tentativas: (Host, Modelo)
+    inference_targets = [
+        (getattr(config, 'OLLAMA_HOST_PRIMARY', None), getattr(config, 'OLLAMA_MODEL_PRIMARY', 'llama3')),
+        (getattr(config, 'OLLAMA_HOST_FALLBACK', 'http://localhost:11434'), getattr(config, 'OLLAMA_MODEL_FALLBACK', 'llama3'))
+    ]
+
+    ans = None
+    full_p = f"{getattr(config,'SYSTEM_PROMPT','')}\nContext:{rag}\n{web}\nUser:{prompt}"
+
+    for host, model in inference_targets:
+        if not host: continue
+        try:
+            print(f"🤖 Tentativa Ollama: {host} (Modelo: {model})")
+            # Criamos o cliente apenas para a tentativa (evita problemas de timeout persistente)
+            temp_client = ollama.Client(host=host)
+            resp = temp_client.chat(model=model, messages=[{'role':'user','content':full_p}])
+            ans = resp['message']['content']
+            if ans: break # Sucesso!
+        except Exception as e:
+            print(f"⚠️ Falha no host {host}: {e}")
+            continue # Tenta o próximo host da lista
+
+    if ans:
         if req_id != CURRENT_REQUEST_ID: return
         save_cached_response(prompt, ans)
         safe_play_tts(ans, False, req_id, speak)
         return ans
-    except Exception as e: return f"Erro: {e}"
+    
+    # Se chegarmos aqui, ambos falharam
+    fallback_err = "As minhas sombras de processamento estão inalcançáveis de momento."
+    safe_play_tts(fallback_err, False, req_id, speak)
+    return fallback_err
 
 def process_command_thread(audio, req_id):
     txt = transcribe_audio(audio)
