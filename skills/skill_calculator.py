@@ -16,7 +16,6 @@ TRIGGERS = [
 ]
 
 # Apenas estes prefixos serão removidos do início da string.
-# As palavras de operação (como 'a dividir') devem ser mantidas para o cálculo.
 PREFIXES_TO_CLEAN = ["quanto é", "quantos são", "calcula", "diz-me", "sabes"]
 
 def handle(user_prompt_lower, user_prompt_full):
@@ -30,7 +29,16 @@ def handle(user_prompt_lower, user_prompt_full):
             break
     
     try:
-        expr = re.sub(r"[?!]", "", expression_str)
+        # Limpeza de pontuação de fim de frase (evita que o "." final da frase estrague o número)
+        expr = expression_str.rstrip(".?!")
+        
+        # --- Tratamento de Números em Formato Português (PT) ---
+        
+        # 1. Remover pontos de milhar: 1.108 -> 1108
+        # Um ponto é considerado separador de milhar se estiver entre dígitos e seguido de exatamente 3 algarismos.
+        expr = re.sub(r"(\d)\.(\d{3})(?!\d)", r"\1\2", expr)
+        
+        # 2. Converter vírgula decimal para ponto (padrão Python): 1,5 -> 1.5
         expr = expr.replace(",", ".")
         
         # Conversão de palavras numéricas para dígitos
@@ -44,34 +52,29 @@ def handle(user_prompt_lower, user_prompt_full):
 
         # Substituição de operadores naturais por matemáticos
         expr = expr.replace("x", "*").replace("vezes", "*").replace("multiplicado por", "*")
-        
-        # Tratamento específico para a divisão
-        # Adicionada a palavra "dividir" para suportar variações como a do log.
         expr = expr.replace("a dividir por", "/").replace("dividido por", "/").replace("dividir por", "/")
         expr = expr.replace("a dividir", "/").replace("dividido", "/").replace("dividir", "/")
-        
         expr = expr.replace("mais", "+").replace("somado a", "+")
         expr = expr.replace("menos", "-").replace("subtraído de", "-")
 
-        # Limpeza final: mantém apenas números e operadores
+        # Limpeza final: mantém apenas números, operadores e parênteses
         allowed_chars_pattern = r"[^0-9\.\+\-\*\/\(\)\s]"
         cleaned_expr = re.sub(allowed_chars_pattern, "", expr)
 
-        # 2. Verificação de Segurança: 
-        # Como usamos "contains" com palavras comuns ("mais"), precisamos de garantir
-        # que a expressão tem realmente números antes de tentar calcular.
+        # Verificação de Segurança
         if not cleaned_expr.strip() or not any(char.isdigit() for char in cleaned_expr):
             return None
             
         print(f"A tentar calcular localmente: '{cleaned_expr}'")
 
+        # Cálculo
         result = eval(cleaned_expr)
         
-        # Formatação do resultado (inteiro vs float)
+        # Formatação do resultado para o utilizador (voltar ao formato PT com vírgula)
         if result == int(result): 
             result = int(result)
         else:
-            result = round(result, 2) # Arredonda a 2 casas decimais se for float
+            result = round(result, 2)
             
         result_str = str(result).replace(".", ",")
         return f"O resultado é {result_str}."
@@ -79,5 +82,5 @@ def handle(user_prompt_lower, user_prompt_full):
     except ZeroDivisionError:
         return "Não é possível dividir por zero."
     except Exception as e:
-        # Se falhar (ex: SyntaxError), retornamos None para o Ollama tratar
+        # Em caso de erro de sintaxe, deixa o Ollama tentar resolver
         return None
