@@ -1,3 +1,5 @@
+# vim skill_calculator.py
+
 import re
 
 # --- Configuração da Skill ---
@@ -6,7 +8,7 @@ TRIGGER_TYPE = "contains"
 # Gatilhos expandidos para apanhar operações no meio da frase
 TRIGGERS = [
     "quanto é", "quantos são", "calcula", 
-    "a dividir", "dividido", 
+    "dividir", "a dividir", "dividido", 
     "vezes", "multiplicado", 
     "mais", "somado", 
     "menos", "subtraído",
@@ -44,8 +46,9 @@ def handle(user_prompt_lower, user_prompt_full):
         expr = expr.replace("x", "*").replace("vezes", "*").replace("multiplicado por", "*")
         
         # Tratamento específico para a divisão
-        expr = expr.replace("a dividir por", "/").replace("dividido por", "/")
-        expr = expr.replace("a dividir", "/").replace("dividido", "/")
+        # Adicionada a palavra "dividir" para suportar variações como a do log.
+        expr = expr.replace("a dividir por", "/").replace("dividido por", "/").replace("dividir por", "/")
+        expr = expr.replace("a dividir", "/").replace("dividido", "/").replace("dividir", "/")
         
         expr = expr.replace("mais", "+").replace("somado a", "+")
         expr = expr.replace("menos", "-").replace("subtraído de", "-")
@@ -57,7 +60,6 @@ def handle(user_prompt_lower, user_prompt_full):
         # 2. Verificação de Segurança: 
         # Como usamos "contains" com palavras comuns ("mais"), precisamos de garantir
         # que a expressão tem realmente números antes de tentar calcular.
-        # Isto evita ativar o eval() em frases como "gosto mais de ti".
         if not cleaned_expr.strip() or not any(char.isdigit() for char in cleaned_expr):
             return None
             
@@ -78,5 +80,4 @@ def handle(user_prompt_lower, user_prompt_full):
         return "Não é possível dividir por zero."
     except Exception as e:
         # Se falhar (ex: SyntaxError), retornamos None para o Ollama tratar
-        # print(f"Cálculo local falhou: {e}") 
         return None
