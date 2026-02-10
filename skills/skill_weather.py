@@ -1,35 +1,42 @@
-import re
-import httpx
-import unicodedata
-import config
-import json
-import os
-import time
-import threading
-import tempfile
+# skill_weather.py
+import re, httpx, unicodedata, config, json, os, time, threading
 from datetime import datetime
 
-# --- Configuração ---
 TRIGGER_TYPE = "contains"
-TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "está frio", "está calor", "qualidade do ar", "lua"]
+TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "frio", "calor", "vento", "ar", "uv", "qualidade", "lua"]
 
 CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
-POLL_INTERVAL = 1800  # 30 minutos
+POLL_INTERVAL = 1800 
 
-# ID Padrão (Porto) se não houver config
 DEFAULT_CITY_ID = getattr(config, 'IPMA_GLOBAL_ID', 1131200)
 DEFAULT_CITY_NAME = getattr(config, 'CITY_NAME', "Porto")
 
-# Cache em memória para os IDs das cidades (para não bater na API do IPMA sempre)
-_LOCATIONS_CACHE = {}
+LAST_SEARCHED_CITY = {"id": DEFAULT_CITY_ID, "name": DEFAULT_CITY_NAME}
 
-# --- Helpers ---
+DIST_TO_AREA = {
+    "101": "AVR", "102": "BJA", "103": "BRG", "104": "BGC", "105": "CBO",
+    "106": "CBR", "107": "EVR", "108": "FAR", "109": "GDA", "110": "LRA",
+    "111": "LSB", "112": "PTG", "113": "PTO", "114": "STM", "115": "STB",
+    "116": "VCT", "117": "VRL", "118": "VIS"
+}
+
+CITY_MAP = {
+    "porto": 1131200, "lisboa": 1110600, "coimbra": 1060300,
+    "braga": 1030300, "faro": 1080500, "faro": 1080500,
+    "aveiro": 1010500, "viana do castelo": 1160900
+}
 
 def _normalize(text):
-    try:
-        return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8').lower()
-    except:
-        return text.lower()
+    try: return "".join(c for c in unicodedata.normalize('NFKD', text) if not unicodedata.combining(c)).lower()
+    except: return text.lower()
+
+def _get_uv_qualitative(uv):
+    """ Escala qualitativa do IPMA """
+    if uv <= 2: return "baixo"
+    if uv <= 5: return "moderado"
+    if uv <= 7: return "elevado"
+    if uv <= 10: return "muito elevado"
+    return "extremo"
 
 def _get_moon_phase():
     try:
@@ -38,326 +45,107 @@ def _get_moon_phase():
         now = datetime.now()
         days_passed = (now - known_new_moon).total_seconds() / 86400
         current_pos = days_passed % lunar_cycle
-        
-        if current_pos < 1.84: return "Lua Nova"
-        if current_pos < 5.53: return "Crescente"
-        if current_pos < 9.22: return "Quarto Crescente"
-        if current_pos < 12.91: return "Crescente Gibosa"
-        if current_pos < 16.61: return "Lua Cheia"
-        if current_pos < 20.30: return "Minguante Gibosa"
-        if current_pos < 23.99: return "Quarto Minguante"
-        if current_pos < 27.68: return "Minguante"
+        phases = [
+            (1.84, "Lua Nova"), (5.53, "Crescente"), (9.22, "Quarto Crescente"),
+            (12.91, "Crescente Gibosa"), (16.61, "Lua Cheia"), (20.30, "Minguante Gibosa"),
+            (23.99, "Quarto Minguante"), (27.68, "Minguante")
+        ]
+        for limit, name in phases:
+            if current_pos < limit: return name
         return "Lua Nova"
     except: return ""
 
-def _get_weather_desc(type_id):
-    types = {
-        1: "céu limpo", 2: "céu pouco nublado", 3: "céu nublado",
-        4: "céu muito nublado", 5: "céu encoberto", 6: "chuva",
-        7: "aguaceiros fracos", 8: "aguaceiros", 9: "chuva",
-        10: "chuva fraca", 11: "chuva forte", 16: "nevoeiro"
-    }
-    return types.get(type_id, "céu nublado")
-
-def _get_uv_advice(uv):
-    if not uv: return "desconhecido", ""
-    val = int(round(uv))
-    if val < 3: return "baixo", "" 
-    if val < 6: return "moderado", "usa óculos de sol"
-    if val < 8: return "alto", "usa protetor solar"
-    if val < 11: return "muito alto", "evita o sol direto"
-    return "extremo", "é perigoso sair sem proteção"
-
-def _get_aqi_advice(aqi):
-    if not aqi: return "desconhecido", ""
-    val = int(aqi)
-    if val <= 50: return "boa", "" 
-    if val <= 100: return "moderada", "se fores sensível tem cuidado"
-    if val <= 150: return "insalubre", "evita exercício na rua"
-    return "perigosa", "usa máscara ou fica em casa"
-
-# --- Fetch de Dados e Localizações ---
-
-def _get_city_id(city_name):
-    """ Tenta encontrar o ID de uma cidade pelo nome usando a API do IPMA """
-    global _LOCATIONS_CACHE
-    
-    if not _LOCATIONS_CACHE:
-        try:
-            url = "https://api.ipma.pt/open-data/distrits-islands.json"
-            resp = httpx.get(url, timeout=5.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                for entry in data.get('data', []):
-                    norm_name = _normalize(entry['local'])
-                    _LOCATIONS_CACHE[norm_name] = entry['globalIdLocal']
-        except Exception as e:
-            print(f"[Weather] Falha ao obter lista de cidades: {e}")
-            return None
-
-    return _LOCATIONS_CACHE.get(_normalize(city_name))
-
-def _analyze_hourly_rain(lat, lon):
-    """ 
-    Usa Open-Meteo para verificar se a chuva é só de noite ou no horário laboral (08-20).
-    Retorna um dicionário com contexto.
-    """
+def _get_ipma_warnings(city_id):
     try:
-        # Pede probabilidade de precipitação horária
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=precipitation_probability&timezone=auto&forecast_days=2"
+        dist_key = str(city_id)[:3]
+        area_code = DIST_TO_AREA.get(dist_key)
+        url = "https://api.ipma.pt/open-data/forecast/warnings/warnings_www.json"
         resp = httpx.get(url, timeout=5.0)
-        data = resp.json()
-        
-        hourly = data.get('hourly', {})
-        probs = hourly.get('precipitation_probability', [])
-        # 'time' vem em ISO, mas a lista 'probs' começa na hora 00:00 do dia atual.
-        
-        # Índices para HOJE
-        # Laboral: 08:00 (idx 8) a 20:00 (idx 20)
-        # Noite/Manhã Cedo: 00-08 e 20-24
-        
-        today_probs = probs[0:24]
-        
-        work_hours = today_probs[8:21] # 08h às 20h (inclusive)
-        off_hours = today_probs[0:8] + today_probs[21:24]
-        
-        max_work = max(work_hours) if work_hours else 0
-        max_off = max(off_hours) if off_hours else 0
-        
-        # Amanhã (índices 24 a 48)
-        tomorrow_probs = probs[24:48]
-        max_tomorrow = max(tomorrow_probs) if tomorrow_probs else 0
-        
-        return {
-            "max_rain_work": max_work,
-            "max_rain_off": max_off,
-            "max_rain_tomorrow": max_tomorrow
-        }
-    except Exception as e:
-        print(f"[Weather] Erro na análise horária: {e}")
-        return None
-
-def _fetch_wunderground(lat, lon):
-    """
-    Tenta obter dados do Wunderground se a chave estiver configurada.
-    """
-    key = getattr(config, 'WUNDERGROUND_API_KEY', None)
-    if not key: return None
-    
-    try:
-        # Endpoint de previsão diária 5 dias
-        url = f"https://api.weather.com/v3/wx/forecast/daily/5day?geocode={lat},{lon}&format=json&units=m&language=pt-PT&apiKey={key}"
-        resp = httpx.get(url, timeout=5.0)
-        
         if resp.status_code == 200:
-            data = resp.json()
-            # Retorna o texto narrativo para o dia e para a noite
-            daypart = data.get('daypart', [{}])[0]
-            narratives = daypart.get('narrative', [])
-            # O array daypart geralmente tem [dia, noite, dia, noite...] ou [noite, dia...] se já for tarde
-            # Vamos simplificar e devolver a primeira narrativa disponível
-            if narratives:
-                return narratives[0]
-    except Exception as e:
-        print(f"[Weather] Erro Wunderground: {e}")
-    
-    return None
+            active = []
+            now = datetime.now().isoformat()
+            for w in resp.json():
+                # Apenas avisos relevantes para a zona e acima de 'green'
+                if w.get('idAreaAviso') == area_code and w.get('awarenessLevelID') != 'green':
+                    if w['startTime'] <= now <= w['endTime']:
+                        lvl = w['awarenessLevelID'].replace('yellow','amarelo').replace('orange','laranja').replace('red','vermelho')
+                        active.append(f"{lvl} de {w['awarenessTypeName'].lower()}")
+            return sorted(list(set(active)), reverse=True)[:2]
+    except: return []
+    return []
 
 def _fetch_city_data(global_id):
-    result = {"timestamp": time.time(), "city_id": global_id}
-    client = httpx.Client(timeout=10.0)
-    
     try:
-        # 1. IPMA (Base Oficial)
-        url = f"https://api.ipma.pt/open-data/forecast/meteorology/cities/daily/{global_id}.json"
-        data = client.get(url).json()
-        result['forecast'] = data.get('data', [])
-        
-        if result['forecast']:
-            lat = result['forecast'][0].get('latitude')
-            lon = result['forecast'][0].get('longitude')
-            
-            # 2. Open-Meteo (UV, AQI e Análise Horária)
-            try:
-                # UV e AQI
-                url_metrics = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index,us_aqi"
-                metrics_data = client.get(url_metrics, timeout=3.0).json()
-                
-                result['uv'] = metrics_data.get('current', {}).get('uv_index')
-                result['aqi'] = metrics_data.get('current', {}).get('us_aqi')
-                
-                # Análise Horária (Chuva Laboral vs Noturna)
-                result['hourly_analysis'] = _analyze_hourly_rain(lat, lon)
-                
-            except Exception as e:
-                print(f"[Weather] Erro Open-Meteo: {e}")
-
-            # 3. Fallback IQAir (se Open-Meteo falhar AQI e houver chave)
-            if 'aqi' not in result and hasattr(config, 'IQAIR_KEY') and config.IQAIR_KEY:
-                try:
-                    url_iq = f"http://api.airvisual.com/v2/nearest_city?lat={lat}&lon={lon}&key={config.IQAIR_KEY}"
-                    iq_data = client.get(url_iq, timeout=5.0).json()
-                    result['aqi'] = iq_data['data']['current']['pollution']['aqius']
-                except: pass
-
-            # 4. Comparativo Wunderground (Opcional)
-            wg_narrative = _fetch_wunderground(lat, lon)
-            if wg_narrative:
-                result['wunderground_narrative'] = wg_narrative
-
-        result['moon_phase'] = _get_moon_phase()
-        return result
-
-    except Exception as e:
-        print(f"[Weather] Erro fetch principal: {e}")
-        return None
-    finally:
-        client.close()
-
-# --- Daemon ---
-
-def _save_cache(data):
-    try:
-        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-        with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(CACHE_FILE), delete=False) as tf:
-            json.dump(data, tf)
-            temp_name = tf.name
-        os.replace(temp_name, CACHE_FILE)
-        os.chmod(CACHE_FILE, 0o666)
-    except Exception as e:
-        print(f"[Weather] Erro cache: {e}")
-
-def _daemon_loop():
-    while True:
-        data = _fetch_city_data(DEFAULT_CITY_ID)
-        if data: _save_cache(data)
-        time.sleep(POLL_INTERVAL)
+        with httpx.Client(timeout=10.0) as client:
+            f = client.get(f"https://api.ipma.pt/open-data/forecast/meteorology/cities/daily/{global_id}.json").json()
+            forecast = f.get('data', [])
+            if forecast:
+                lat, lon = forecast[0]['latitude'], forecast[0]['longitude']
+                m = client.get(f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index,us_aqi").json()
+                return {
+                    "forecast": forecast,
+                    "warnings": _get_ipma_warnings(global_id),
+                    "uv": m['current']['uv_index'],
+                    "aqi": m['current']['us_aqi'],
+                    "moon": _get_moon_phase()
+                }
+    except: return None
 
 def init_skill_daemon():
-    print("[Weather] Daemon iniciado.")
-    threading.Thread(target=_daemon_loop, daemon=True).start()
+    def loop():
+        while True:
+            d = _fetch_city_data(DEFAULT_CITY_ID)
+            if d:
+                os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+                with open(CACHE_FILE, 'w') as f: json.dump(d, f)
+            time.sleep(POLL_INTERVAL)
+    threading.Thread(target=loop, daemon=True).start()
 
-# --- Handler ---
+def handle(p_low, prompt):
+    global LAST_SEARCHED_CITY
+    norm_prompt = _normalize(p_low)
+    
+    for name, cid in CITY_MAP.items():
+        if name in norm_prompt:
+            LAST_SEARCHED_CITY = {"id": cid, "name": name.capitalize()}
+            break
+    
+    target_id, target_name = LAST_SEARCHED_CITY["id"], LAST_SEARCHED_CITY["name"]
 
-def handle(user_prompt_lower, user_prompt_full):
-    try:
-        target_data = None
-        target_city_name = DEFAULT_CITY_NAME
+    if target_id == DEFAULT_CITY_ID and os.path.exists(CACHE_FILE) and "amanha" not in norm_prompt:
+        with open(CACHE_FILE, 'r') as f: data = json.load(f)
+    else:
+        data = _fetch_city_data(target_id)
 
-        # 1. Tentar detetar localização
-        location_match = re.search(r'\b(em|no|na)\s+(?!(?:hoje|amanhã)\b)([a-zà-ú\s]+)', user_prompt_lower)
-        if location_match:
-            city_searched = location_match.group(2).strip()
-            city_id = _get_city_id(city_searched)
-            if city_id:
-                print(f"[Weather] Fetch on-demand para: {city_searched}")
-                target_data = _fetch_city_data(city_id)
-                target_city_name = city_searched.title()
-            else:
-                print(f"[Weather] Cidade '{city_searched}' desconhecida.")
+    if not data or not data.get('forecast'): return "Não consegui aceder ao IPMA agora."
 
-        # 2. Fallback Cache
-        if not target_data:
-            if os.path.exists(CACHE_FILE):
-                with open(CACHE_FILE, 'r') as f: target_data = json.load(f)
-            else: return "Ainda estou a recolher dados meteorológicos."
-            
-        if not target_data or not target_data.get('forecast'):
-            return "Não tenho dados de previsão disponíveis."
+    idx = 1 if "amanha" in norm_prompt else 0
+    day = data['forecast'][idx]
+    is_daylight = (7 <= datetime.now().hour <= 19)
+    asked_air = re.search(r'\b(ar|qualidade|uv)\b', norm_prompt)
+    
+    avisos_list = data.get('warnings', [])
+    avisos_str = f"Atenção, temos aviso {' e '.join(avisos_list)}. " if avisos_list else ""
 
-        # Dados Básicos IPMA
-        is_tomorrow = "amanhã" in user_prompt_lower
-        idx = 1 if is_tomorrow else 0
-        if len(target_data['forecast']) <= idx: return "Previsão indisponível."
-        
-        day_forecast = target_data['forecast'][idx]
-        t_max = int(round(float(day_forecast.get('tMax', 0))))
-        t_min = int(round(float(day_forecast.get('tMin', 0))))
-        ipma_prob = int(float(day_forecast.get('precipitaProb', 0)))
-        w_desc = _get_weather_desc(day_forecast.get('idWeatherType'))
-        
-        current_hour = datetime.now().hour
-        is_night = (current_hour >= 19 or current_hour < 7) and not is_tomorrow
+    if asked_air and idx == 0:
+        aqi, uv = data.get('aqi', 0), int(data.get('uv', 0))
+        qualidade_ar = "boa" if aqi < 50 else "moderada"
+        qualidade_uv = _get_uv_qualitative(uv)
+        return f"{avisos_str}Em {target_name}, a qualidade do ar está {qualidade_ar} e o índice UV está {qualidade_uv}, com valor {uv}."
 
-        # Análise Horária (08-20h vs Noite)
-        hourly = target_data.get('hourly_analysis')
-        
-        # --- Construção da Resposta ---
+    t_max, t_min = int(float(day['tMax'])), int(float(day['tMin']))
+    condicao = day['idWeatherType']
+    intro = "Vais apanhar uma molha se não te cuidares." if condicao in [6, 9, 11] else "Olha, o cenário é este:"
+    quando = "amanhã" if idx == 1 else "hoje"
+    
+    resp = f"{avisos_str}{intro} Para {quando} em {target_name}, conta com {t_min} a {t_max} graus."
 
-        # Se for pergunta sobre CHUVA
-        if any(x in user_prompt_lower for x in ["chover", "chuva", "molhar", "água"]):
-            prefix = f"Em {target_city_name}, " if target_city_name != DEFAULT_CITY_NAME else ""
-            
-            # Se for AMANHÃ
-            if is_tomorrow:
-                if ipma_prob > 50: return f"{prefix}Sim, prevê-se chuva ({ipma_prob}%) para amanhã."
-                return f"{prefix}Para amanhã a probabilidade é de {ipma_prob}%."
-            
-            # Se for HOJE (Lógica Inteligente)
-            if hourly and not is_night:
-                max_work = hourly.get('max_rain_work', 0)
-                max_off = hourly.get('max_rain_off', 0)
-                
-                # Caso 1: Chuva Laboral (A que chateia)
-                if max_work >= 40:
-                    return f"{prefix}Sim, conta com chuva durante o dia (probabilidade de {max_work}% no horário laboral)."
-                
-                # Caso 2: Chuva só "fora de horas"
-                elif max_off >= 40:
-                    return f"{prefix}Durante o dia de trabalho deve estar tranquilo, mas há previsão de chuva ({max_off}%) para o início da manhã ou noite."
-                
-                # Caso 3: IPMA diz chuva, mas horário diz pouco
-                elif ipma_prob > 50:
-                    return f"{prefix}O IPMA indica chuva, mas a análise horária mostra probabilidades baixas. Leva guarda-chuva só por precaução."
-                    
-                else:
-                    return f"{prefix}Não, não deve chover hoje."
-            
-            # Fallback se não houver dados horários
-            if ipma_prob >= 50: return f"{prefix}Sim, vai chover ({ipma_prob}%)."
-            return f"{prefix}Não, não vai chover."
+    extras = []
+    if idx == 0:
+        if data.get('aqi', 0) < 50: extras.append("a qualidade do ar está boa")
+        if is_daylight: extras.append(f"o UV está {_get_uv_qualitative(data['uv'])}")
+        if not is_daylight and data.get('moon'): extras.append(f"estamos em fase de {data['moon'].lower()}")
+    
+    if extras: resp += " Além disso, " + " e ".join(extras) + "."
 
-        # Resposta GERAL
-        day_str = "amanhã" if is_tomorrow else "hoje"
-        resp = f"Previsão para {day_str} em {target_city_name}: {w_desc}, máxima {t_max}°, mínima {t_min}°."
-
-        # Adiciona nuance sobre a chuva na resposta geral de HOJE
-        if not is_tomorrow and hourly and not is_night:
-            max_work = hourly.get('max_rain_work', 0)
-            if max_work > 30:
-                resp += f" Atenção à chuva durante o dia ({max_work}%)."
-            elif hourly.get('max_rain_off', 0) > 30:
-                resp += " Possibilidade de chuva apenas de manhã cedo ou à noite."
-        elif ipma_prob > 0:
-             resp += f" Probabilidade de chuva: {ipma_prob}%."
-
-        # Wunderground (Opcional - "Segunda Opinião")
-        wg_text = target_data.get('wunderground_narrative')
-        if wg_text:
-            # Só adicionamos se o utilizador não perguntou especificamente "vai chover",
-            # para não ficar uma resposta gigante, ou se a previsão divergir muito.
-            resp += f" O Wunderground diz: \"{wg_text}\""
-
-        # Extras (UV, AQI, Lua)
-        extras = []
-        if 'aqi' in target_data:
-            aqi = target_data['aqi']
-            d, a = _get_aqi_advice(aqi)
-            extras.append(f"Ar {d} ({aqi})")
-            
-        if 'uv' in target_data and not is_night:
-            uv = target_data['uv']
-            d, a = _get_uv_advice(uv)
-            extras.append(f"UV {int(round(uv))}")
-            
-        if is_night and 'moon_phase' in target_data:
-            extras.append(f"Lua: {target_data['moon_phase']}")
-
-        if extras:
-            resp += " [" + ", ".join(extras) + "]"
-
-        return resp
-
-    except Exception as e:
-        print(f"[Weather] Erro handle: {e}")
-        return "Erro na meteorologia."
+    return resp
