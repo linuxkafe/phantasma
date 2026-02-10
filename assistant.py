@@ -181,21 +181,25 @@ def route_and_respond(prompt, req_id, speak=True):
     p_low = prompt.lower()
     
     # --- 1. SKILLS (Lógica de Prioridade OFF > ON) ---
-    # Definimos palavras que indicam intenção de desligar
     OFF_KEYWORDS = ['desliga', 'para', 'apaga', 'fecha', 'recolhe', 'stop', 'cancelar']
     is_off_intent = any(k in p_low for k in OFF_KEYWORDS)
 
-    # Ordenamos a lista para que se houver intenção de "desligar", 
-    # as skills que tratam disso sejam validadas primeiro.
-    sorted_skills = sorted(SKILLS_LIST, key=lambda x: is_off_intent, reverse=True)
+    # Ordenamos a lista: se houver intenção de "desligar", as skills com triggers 
+    # relacionados com desligar/parar ganham prioridade máxima.
+    def get_priority(skill):
+        if not is_off_intent: return 0
+        skill_trigs = [str(t).lower() for t in skill.get('triggers', [])]
+        if any(k in t for k in skill_trigs for k in OFF_KEYWORDS):
+            return 1
+        return 0
 
+    sorted_skills = sorted(SKILLS_LIST, key=get_priority, reverse=True)
     for s in sorted_skills:
         trigs = [t.lower() for t in s['triggers']]
         match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
         
         if match and s['handle']:
             try:
-                # Executa a skill
                 resp = s['handle'](p_low, prompt)
                 if req_id != CURRENT_REQUEST_ID: return
                 if not resp: continue
@@ -204,7 +208,13 @@ def route_and_respond(prompt, req_id, speak=True):
                 if not txt: continue
 
                 print(f"🔧 Skill '{s['name']}' resolveu.")
-                safe_play_tts(txt, False, req_id, speak)
+                
+                # --- ALTERAÇÃO AQUI ---
+                # Se a skill for a de TTS, forçamos o áudio independentemente do 'speak' original
+                must_speak = speak or (s['name'] == 'skill_tts')
+                safe_play_tts(txt, False, req_id, must_speak)
+                # -----------------------
+                
                 return txt
             except Exception as e:
                 print(f"⚠️ Erro Skill {s['name']}: {e}")
@@ -221,7 +231,6 @@ def route_and_respond(prompt, req_id, speak=True):
     rag = retrieve_from_rag(prompt)
     web = search_with_searxng(prompt)
     
-    # Lista de tentativas: (Host, Modelo)
     inference_targets = [
         (getattr(config, 'OLLAMA_HOST_PRIMARY', None), getattr(config, 'OLLAMA_MODEL_PRIMARY', 'llama3')),
         (getattr(config, 'OLLAMA_HOST_FALLBACK', 'http://localhost:11434'), getattr(config, 'OLLAMA_MODEL_FALLBACK', 'llama3'))
@@ -234,14 +243,13 @@ def route_and_respond(prompt, req_id, speak=True):
         if not host: continue
         try:
             print(f"🤖 Tentativa Ollama: {host} (Modelo: {model})")
-            # Criamos o cliente apenas para a tentativa (evita problemas de timeout persistente)
             temp_client = ollama.Client(host=host)
             resp = temp_client.chat(model=model, messages=[{'role':'user','content':full_p}])
             ans = resp['message']['content']
-            if ans: break # Sucesso!
+            if ans: break 
         except Exception as e:
             print(f"⚠️ Falha no host {host}: {e}")
-            continue # Tenta o próximo host da lista
+            continue 
 
     if ans:
         if req_id != CURRENT_REQUEST_ID: return
@@ -249,7 +257,6 @@ def route_and_respond(prompt, req_id, speak=True):
         safe_play_tts(ans, False, req_id, speak)
         return ans
     
-    # Se chegarmos aqui, ambos falharam
     fallback_err = "As minhas sombras de processamento estão inalcançáveis de momento."
     safe_play_tts(fallback_err, False, req_id, speak)
     return fallback_err
