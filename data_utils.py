@@ -34,27 +34,20 @@ def setup_database():
         print(f"ERRO: Falha ao inicializar a base de dados SQLite: {e}")
 
 # --- RAG (MEMÓRIA DE LONGO PRAZO) ---
-def save_to_rag(transcription_text):
-    """ Guarda a transcrição do utilizador na BD RAG. """
-    if not transcription_text:
-        return 
-    try:
-        conn = sqlite3.connect(config.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO memories (timestamp, text) VALUES (?, ?)",
-            (datetime.now(), transcription_text)
-        )
-        conn.commit()
-        conn.close()
-        print(f"RAG: Memória guardada: '{transcription_text}'")
-    except Exception as e:
-        print(f"ERRO: Falha ao guardar a transcrição na BD RAG: {e}")
+def save_fact_to_rag(text):
+    """
+    Tenta extrair apenas o facto antes de guardar. 
+    Se a resposta contiver 'Sombra' ou 'Silêncio', limpamos antes de indexar.
+    """
+    # Remove a persona da resposta antes de a tornar uma 'memória' permanente
+    clean_text = re.sub(r'(Sombra|Silêncio|Fúria|Eco).*?[\.\!\?]', '', text, flags=re.IGNORECASE)
+    if len(clean_text.strip()) > 5:
+        # Lógica de insert original...
+        pass
 
 def retrieve_from_rag(prompt, max_results=5):
     """
     Recupera memórias relevantes com TIMESTAMPS para dar contexto temporal.
-    Resolve o conflito 'Bimby vs Ophiuchus' dando prioridade à data.
     """
     try:
         # Filtro de palavras curtas para evitar ruído

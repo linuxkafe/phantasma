@@ -67,30 +67,32 @@ def _extract_python_code(text):
     return '\n'.join(clean_lines).strip()
 
 def _consolidate_memories():
-    print("🧠 [Dream] A iniciar consolidação de memória híbrida...")
+    print("🧠 [Dream] A iniciar purga e consolidação histórica...")
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, text FROM memories ORDER BY id DESC LIMIT ?", (MEMORY_CHUNK_SIZE,))
+        # Pegamos nas últimas 10 memórias para analisar conflitos
+        cursor.execute("SELECT id, timestamp, text FROM memories ORDER BY id DESC LIMIT 10")
         rows = cursor.fetchall()
-        if len(rows) < MEMORY_CHUNK_SIZE: return
-
-        ids_to_delete = [r[0] for r in rows]
-        processed_texts = []
-        for r in rows:
-            processed_texts.append(r[1])
-
-        # Prompt atualizado para suportar Factos e Mermaid
-        prompt = f"""
-        SYSTEM: You are a Data Optimizer for Phantasma.
-        INPUT: {json.dumps(processed_texts, ensure_ascii=False)}
         
-        TASK: Merge these memories into a SINGLE structured JSON.
-        RULES:
-        1. Keep "tags" in Portuguese.
-        2. Merge "facts" (strings) and "mermaid" (graphs) into a unified Knowledge Graph.
-        3. PREFER Mermaid syntax for the final output.
-        4. OUTPUT FORMAT: {{ "tags": [], "mermaid": "graph TD; ..." }}
+        if len(rows) < 3: return # Não há massa crítica para sonhar
+
+        ids_to_purge = [r[0] for r in rows]
+        # Criamos uma lista cronológica (do mais antigo para o mais recente)
+        memory_bundle = [{"ts": r[1], "content": r[2]} for r in reversed(rows)]
+
+        prompt = f"""
+        SYSTEM: You are the Memory Janitor for Phantasma.
+        INPUT: {json.dumps(memory_bundle)}
+        
+        TASK: Merge these chronological memories.
+        CRITICAL RULES:
+        1. CONFLICT RESOLUTION: If two facts contradict, ONLY keep the most recent one (higher timestamp).
+        2. DEDUPLICATION: Remove redundant information.
+        3. Persona Cleanup: Remove any "Gloomy/Goth" metadata or repetitive phrases like "Sombra". Keep only the FACTUAL essence.
+        4. Output ONE single Mermaid graph representing the final state of knowledge.
+        
+        OUTPUT FORMAT: {{ "tags": [], "mermaid": "graph TD; ..." }}
         """
         
         client = ollama.Client(timeout=config.OLLAMA_TIMEOUT)
@@ -98,16 +100,15 @@ def _consolidate_memories():
         merged = _extract_json(resp['message']['content'])
         
         if merged:
-            pl = ','.join('?'*len(ids_to_delete))
-            cursor.execute(f"DELETE FROM memories WHERE id IN ({pl})", ids_to_delete)
+            # Apagamos o "ruído" antigo e inserimos a "verdade" consolidada
+            cursor.execute(f"DELETE FROM memories WHERE id IN ({','.join(['?']*len(ids_to_purge))})", ids_to_purge)
             cursor.execute("INSERT INTO memories (timestamp, text) VALUES (?, ?)", 
                            (datetime.datetime.now(), json.dumps(merged, ensure_ascii=False)))
             conn.commit()
-            print("🧠 [Dream] Consolidação híbrida concluída.")
+            print("🧠 [Dream] Memória limpa e consolidada com sucesso.")
     except Exception as e: 
-        print(f"ERRO Consolidação: {e}")
-    finally: 
-        if conn: conn.close()
+        print(f"❌ Erro na purga de memória: {e}")
+    finally: conn.close()
 
 # --- MOTOR DE SONHO LÚCIDO (CODING) ---
 

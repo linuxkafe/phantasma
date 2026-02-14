@@ -168,10 +168,16 @@ def transcribe_audio(audio_data):
         return text
     except: return ""
 
+def sanitize_context(text):
+    if not text: return ""
+    # Remove timestamps tipo [2026-02-14 12:00:00]
+    text = re.sub(r'\[\d{4}-\d{2}-\d{2}.*?\]', '', text)
+    # Remove múltiplos espaços e quebras de linha que baralham o modelo
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 def route_and_respond(prompt, req_id, speak=True):
     global CURRENT_REQUEST_ID
-    # Prioridade Máxima: Se o comando for para parar ou interromper, 
-    # cancelamos o processamento de áudio imediatamente.
     if req_id == "API_REQ": 
         CURRENT_REQUEST_ID = "API_REQ"
         stop_audio_output()
@@ -180,45 +186,45 @@ def route_and_respond(prompt, req_id, speak=True):
 
     p_low = prompt.lower()
     
-    # --- 1. SKILLS (Lógica de Prioridade OFF > ON) ---
-    OFF_KEYWORDS = ['desliga', 'para', 'apaga', 'fecha', 'recolhe', 'stop', 'cancelar']
-    is_off_intent = any(k in p_low for k in OFF_KEYWORDS)
+    # --- BYPASS PARA OPINIÕES ---
+    opinion_triggers = ["o que achas", "o que te parece"]
+    is_opinion_query = any(p_low.startswith(t) for t in opinion_triggers)
 
-    # Ordenamos a lista: se houver intenção de "desligar", as skills com triggers 
-    # relacionados com desligar/parar ganham prioridade máxima.
-    def get_priority(skill):
-        if not is_off_intent: return 0
-        skill_trigs = [str(t).lower() for t in skill.get('triggers', [])]
-        if any(k in t for k in skill_trigs for k in OFF_KEYWORDS):
-            return 1
-        return 0
+    # --- 1. SKILLS ---
+    if not is_opinion_query:
+        OFF_KEYWORDS = ['desliga', 'para', 'apaga', 'fecha', 'recolhe', 'stop', 'cancelar']
+        is_off_intent = any(k in p_low for k in OFF_KEYWORDS)
 
-    sorted_skills = sorted(SKILLS_LIST, key=get_priority, reverse=True)
-    for s in sorted_skills:
-        trigs = [t.lower() for t in s['triggers']]
-        match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
-        
-        if match and s['handle']:
-            try:
-                resp = s['handle'](p_low, prompt)
-                if req_id != CURRENT_REQUEST_ID: return
-                if not resp: continue
-                
-                txt = resp.get("response", "") if isinstance(resp, dict) else resp
-                if not txt: continue
+        def get_priority(skill):
+            if not is_off_intent: return 0
+            skill_trigs = [str(t).lower() for t in skill.get('triggers', [])]
+            if any(k in t for k in skill_trigs for k in OFF_KEYWORDS):
+                return 1
+            return 0
 
-                print(f"🔧 Skill '{s['name']}' resolveu.")
-                
-                # --- ALTERAÇÃO AQUI ---
-                # Se a skill for a de TTS, forçamos o áudio independentemente do 'speak' original
-                must_speak = speak or (s['name'] == 'skill_tts')
-                safe_play_tts(txt, False, req_id, must_speak)
-                # -----------------------
-                
-                return txt
-            except Exception as e:
-                print(f"⚠️ Erro Skill {s['name']}: {e}")
-                pass 
+        sorted_skills = sorted(SKILLS_LIST, key=get_priority, reverse=True)
+        for s in sorted_skills:
+            trigs = [t.lower() for t in s['triggers']]
+            match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
+            
+            if match and s['handle']:
+                try:
+                    resp = s['handle'](p_low, prompt)
+                    if req_id != CURRENT_REQUEST_ID: return
+                    if not resp: continue
+                    
+                    txt = resp.get("response", "") if isinstance(resp, dict) else resp
+                    if not txt: continue
+
+                    print(f"🔧 Skill '{s['name']}' resolveu.")
+                    must_speak = speak or (s['name'] == 'skill_tts')
+                    safe_play_tts(txt, False, req_id, must_speak)
+                    return txt
+                except Exception as e:
+                    print(f"⚠️ Erro Skill {s['name']}: {e}")
+                    pass 
+    else:
+        print(f"🧠 Pedido de opinião detetado. Saltando skills...")
 
     # --- 2. CACHE ---
     cached = get_cached_response(prompt)
@@ -226,10 +232,12 @@ def route_and_respond(prompt, req_id, speak=True):
         safe_play_tts(cached, True, req_id, speak)
         return cached
 
-    # --- 3. LLM (Lógica de Failover com Modelos Dedicados) ---
+    # --- 3. LLM (Failover Host -> Local) ---
     safe_play_tts("Deixa ver...", True, req_id, speak)
-    rag = retrieve_from_rag(prompt)
-    web = search_with_searxng(prompt)
+    
+    # Sanitização do contexto injetado
+    rag = sanitize_context(retrieve_from_rag(prompt))
+    web = sanitize_context(search_with_searxng(prompt))
     
     inference_targets = [
         (getattr(config, 'OLLAMA_HOST_PRIMARY', None), getattr(config, 'OLLAMA_MODEL_PRIMARY', 'llama3')),
@@ -237,18 +245,31 @@ def route_and_respond(prompt, req_id, speak=True):
     ]
 
     ans = None
-    full_p = f"{getattr(config,'SYSTEM_PROMPT','')}\nContext:{rag}\n{web}\nUser:{prompt}"
+    # System Prompt reforçado para evitar o tom errático que vimos
+    sys_instruction = "Responde de forma curta e direta em Português de Portugal. Não cites metadados ou datas."
+    full_p = f"{getattr(config,'SYSTEM_PROMPT',sys_instruction)}\nContexto: {rag}\n{web}\nUtilizador: {prompt}"
 
     for host, model in inference_targets:
         if not host: continue
         try:
             print(f"🤖 Tentativa Ollama: {host} (Modelo: {model})")
             temp_client = ollama.Client(host=host)
-            resp = temp_client.chat(model=model, messages=[{'role':'user','content':full_p}])
+            resp = temp_client.chat(
+                model=model, 
+                messages=[{'role':'user','content':full_p}],
+                options={
+                    "repeat_penalty": 1.2,
+                    "temperature": 0.7,
+                    "num_ctx": getattr(config, 'OLLAMA_NUM_CTX', 8192), # Respeitando o parâmetro do repositório
+                    "stop": ["Utilizador:", "\n\n", "["]
+                }
+            )
             ans = resp['message']['content']
-            if ans: break 
+            if ans: 
+                ans = sanitize_context(ans)
+                break 
         except Exception as e:
-            print(f"⚠️ Falha no host {host}: {e}")
+            print(f"⚠️ Falha no host {host}: {e}. A tentar próximo...")
             continue 
 
     if ans:
@@ -257,7 +278,7 @@ def route_and_respond(prompt, req_id, speak=True):
         safe_play_tts(ans, False, req_id, speak)
         return ans
     
-    fallback_err = "As minhas sombras de processamento estão inalcançáveis de momento."
+    fallback_err = "As minhas sombras de processamento estão inalcançáveis."
     safe_play_tts(fallback_err, False, req_id, speak)
     return fallback_err
 

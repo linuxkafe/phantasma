@@ -3,7 +3,7 @@ import re, httpx, unicodedata, config, json, os, time, threading
 from datetime import datetime
 
 TRIGGER_TYPE = "contains"
-TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "frio", "calor", "vento", "ar", "uv", "qualidade", "lua"]
+TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "frio", "calor"]
 
 CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
 POLL_INTERVAL = 1800 
