@@ -138,6 +138,14 @@ TUYA_DEVICES = {
         "key": ""
     }
 }
+# TAPO
+TAPO_USER = "phantasma"
+TAPO_PASS = "---------"
+# Lista de câmaras (IPs)
+TAPO_CAMERAS = {
+    "sala": "10.0.0.x",
+    "quarto": "10.0.0.x"
+}
 
 
 WHISPER_INITIAL_PROMPT = "Português de Portugal. Como estás? Que horas são? Meteorologia. Quanto é? Toca música. Põe música. Memoriza isto. 1050 a dividir por 30. Google. Alfarroba. Viseu. Como está o gás? Como está o alarme do gás? Ligar o candeeiro. Liga o candeeiro. Desliga o candeeiro. Desliga a luz da sala. Recolhe o aspirador."
