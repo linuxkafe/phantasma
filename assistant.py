@@ -179,6 +179,8 @@ def sanitize_llm_context(context):
 
 def route_and_respond(prompt, req_id, speak=True):
     global CURRENT_REQUEST_ID
+    if not prompt or not str(prompt).strip(): 
+        return ""
     if req_id == "API_REQ": 
         CURRENT_REQUEST_ID = "API_REQ"
         stop_audio_output()
@@ -298,7 +300,15 @@ def process_command_thread(audio, req_id):
 # --- API ---
 @app.route("/comando", methods=['POST'])
 def api_cmd():
-    return jsonify({"status":"ok", "response": route_and_respond(request.json.get('prompt',''), "API_REQ", False)})
+    # Garante que 'data' é um dicionário mesmo que o JSON falhe
+    data = request.json or {}
+    prompt = data.get('prompt', '')
+    
+    if not prompt:
+        return jsonify({"status": "error", "message": "Prompt vazio"}), 400
+        
+    response = route_and_respond(prompt, "API_REQ", False)
+    return jsonify({"status": "ok", "response": response})
 
 @app.route("/get_devices")
 def api_devs():
