@@ -7,7 +7,7 @@ import config
 
 TRIGGER_TYPE = "contains"
 # Gatilhos de sistema
-TRIGGERS = ["sistema", "cpu", "ram", "memória", "disco", "armazenamento", "status do servidor"]
+TRIGGERS = ["estado do sistema", "cpu", "ram", "memória", "disco", "armazenamento", "status do servidor"]
 
 CACHE_FILE = "/opt/phantasma/cache/system_stats.json"
 POLL_INTERVAL = 60

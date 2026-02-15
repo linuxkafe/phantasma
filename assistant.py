@@ -169,77 +169,76 @@ def transcribe_audio(audio_data):
     except: return ""
 
 def sanitize_llm_context(context):
-    """ Limpa cabeçalhos e timestamps para não confundir o modelo externo. """
-    if not context: return ""
-    # Remove cabeçalho do data_utils
-    context = re.sub(r"MEMÓRIAS PESSOAIS DO UTILIZADOR.*verdadeira\.\n\n", "", context, flags=re.DOTALL)
-    # Remove timestamps [2026-02-14...]
+    if not context or not isinstance(context, str): return ""
+    
+    # 1. Remove ABSOLUTAMENTE tudo o que pareça uma instrução técnica do RAG
+    context = re.sub(r"MEMÓRIAS PESSOAIS.*?\n\n", "", context, flags=re.DOTALL | re.IGNORECASE)
+    context = re.sub(r"NOTA: Se houver contradições.*?\n", "", context, flags=re.IGNORECASE)
+    
+    # 2. Limpa os timestamps e ids técnicos
     context = re.sub(r'\[\d{4}-\d{2}-\d{2}.*?\]', '', context)
+    
+    # 3. Remove as muletas poéticas que o modelo andou a gravar no RAG
+    poison_terms = ["Sombra", "Aquietação", "Fim", "Silêncio", "Fúria da Memória"]
+    for term in poison_terms:
+        context = re.sub(rf"\*\*{term}\*\*", "", context, flags=re.IGNORECASE)
+        context = re.sub(rf"{term}:", "", context, flags=re.IGNORECASE)
+
     return context.strip()
 
 def route_and_respond(prompt, req_id, speak=True):
     global CURRENT_REQUEST_ID
-    if not prompt or not str(prompt).strip(): 
-        return ""
+    if not prompt or not str(prompt).strip(): return "" # Proteção contra vazio
+    
     if req_id == "API_REQ": 
         CURRENT_REQUEST_ID = "API_REQ"
         stop_audio_output()
-    elif req_id != CURRENT_REQUEST_ID: 
-        return
+    elif req_id != CURRENT_REQUEST_ID: return
 
     p_low = prompt.lower()
-    
-    # --- 1. DETEÇÃO DE INTENÇÃO ---
     opinion_triggers = ["o que achas", "o que te parece"]
     is_opinion_query = any(p_low.startswith(t) for t in opinion_triggers)
-    skill_context = "" # Armazena factos apurados por skills para passar ao LLM
+    skill_context = ""
 
-    # --- 2. PROCESSAMENTO DE SKILLS ---
-    # Mantemos a lógica de prioridade para comandos de 'desligar'
+    # --- 1. SKILLS ---
     OFF_KEYWORDS = ['desliga', 'para', 'apaga', 'fecha', 'recolhe', 'stop', 'cancelar']
     is_off_intent = any(k in p_low for k in OFF_KEYWORDS)
 
     def get_priority(skill):
         if not is_off_intent: return 0
-        skill_trigs = [str(t).lower() for t in skill.get('triggers', [])]
-        return 1 if any(k in t for k in skill_trigs for k in OFF_KEYWORDS) else 0
+        skill_trigs = [str(tr).lower() for tr in skill.get('triggers', [])]
+        # CORREÇÃO: k in tr (onde tr é o trigger da lista skill_trigs)
+        return 1 if any(k in tr for tr in skill_trigs for k in OFF_KEYWORDS) else 0
 
     sorted_skills = sorted(SKILLS_LIST, key=get_priority, reverse=True)
     
     for s in sorted_skills:
         trigs = [t.lower() for t in s['triggers']]
-        # Verifica se o prompt bate com os gatilhos da skill
         match = any(p_low.startswith(t) for t in trigs) if s['trigger_type'] == 'startswith' else any(t in p_low for t in trigs)
         
         if match and s['handle']:
             try:
                 resp = s['handle'](p_low, prompt)
                 if not resp: continue
-                
                 txt = resp.get("response", "") if isinstance(resp, dict) else resp
                 if not txt: continue
 
-                # NOVO: Se for uma pergunta de opinião, a skill fornece o contexto mas NÃO encerra o ciclo
                 if is_opinion_query:
-                    print(f"🔧 Skill '{s['name']}' proveu dados factuais para a opinião.")
+                    print(f"🔧 Skill '{s['name']}' proveu dados para a opinião.")
                     skill_context = f"Facto apurado localmente: {txt}"
                     break 
                 else:
-                    # Se for pergunta direta, responde e encerra
-                    print(f"🔧 Skill '{s['name']}' resolveu o pedido diretamente.")
+                    print(f"🔧 Skill '{s['name']}' resolveu diretamente.")
                     safe_play_tts(txt, False, req_id, (speak or s['name'] == 'skill_tts'))
                     return txt
-            except Exception as e:
-                print(f"⚠️ Erro na Skill {s['name']}: {e}")
-                pass 
-
-    # --- 3. CACHE ---
+            except: continue
+    # --- 2. CACHE ---
     cached = get_cached_response(prompt)
     if cached:
         safe_play_tts(cached, True, req_id, speak)
         return cached
 
-    # --- 4. INFERÊNCIA LLM (Failover Host -> Local) ---
+    # --- 3. INFERÊNCIA LLM (Failover Host -> Local) ---
     safe_play_tts("Deixa ver...", True, req_id, speak)
     
     # Recuperação e sanitização de dados
@@ -257,8 +256,15 @@ def route_and_respond(prompt, req_id, speak=True):
     sys_prompt = getattr(config, 'SYSTEM_PROMPT', '')
     
     # Construção do prompt final com injeção de factos das skills
-    full_p = f"{sys_prompt}\n\n### CONTEXTO FACTUAL:\n{rag}\n{web}\n{skill_context}\n\nUtilizador: {prompt}"
-
+    full_p = (
+            f"{sys_prompt}\n\n"
+            "### CONHECIMENTO DISPONÍVEL (Usa apenas para factos):\n"
+            f"{rag}\n{web}\n{skill_context}\n\n"
+            "### INSTRUÇÃO DE RESPOSTA:\n"
+            "Responde de forma fluida e melancólica. NÃO uses cabeçalhos como '**Sombra**' ou '**Fim**'. "
+            "NÃO digas que a pergunta é irrelevante. Sê um assistente, não um juiz.\n\n"
+            f"Utilizador: {prompt}"
+            )
     for host, model in inference_targets:
         if not host: continue
         try:
@@ -268,10 +274,11 @@ def route_and_respond(prompt, req_id, speak=True):
                 model=model, 
                 messages=[{'role':'user', 'content':full_p}],
                 options={
-                    "repeat_penalty": 1.3, # Evita loops poéticos
-                    "temperature": 0.7,
-                    "num_ctx": getattr(config, 'OLLAMA_NUM_CTX', 8192),
-                    "stop": ["Utilizador:", "###", "["]
+                    "repeat_penalty": 1.4,  # Aumentado para evitar repetições góticas
+                    "temperature": 0.6,     # Ligeiramente reduzido para ser mais factual
+                    "num_ctx": 8192,
+                    "top_p": 0.9,
+                    "stop": ["Utilizador:", "###", "Fim", "Sombra"] # Força a paragem se ele tentar usar os headers
                 }
             )
             ans = resp['message']['content']
@@ -300,15 +307,21 @@ def process_command_thread(audio, req_id):
 # --- API ---
 @app.route("/comando", methods=['POST'])
 def api_cmd():
-    # Garante que 'data' é um dicionário mesmo que o JSON falhe
-    data = request.json or {}
-    prompt = data.get('prompt', '')
-    
-    if not prompt:
-        return jsonify({"status": "error", "message": "Prompt vazio"}), 400
+    try:
+        # Garante que 'data' é um dicionário mesmo que o JSON falhe ou seja None
+        data = request.json or {}
+        prompt = data.get('prompt', '')
         
-    response = route_and_respond(prompt, "API_REQ", False)
-    return jsonify({"status": "ok", "response": response})
+        if not prompt:
+            print("⚠️ API: Recebido prompt vazio.")
+            return jsonify({"status": "error", "message": "Prompt vazio"}), 400
+            
+        # Executa a lógica de resposta
+        response = route_and_respond(prompt, "API_REQ", False)
+        return jsonify({"status": "ok", "response": response})
+    except Exception as e:
+        print(f"❌ Erro Crítico na API: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/get_devices")
 def api_devs():

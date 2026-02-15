@@ -16,7 +16,10 @@ TRIGGERS = [
 ]
 
 # Apenas estes prefixos serão removidos do início da string.
-PREFIXES_TO_CLEAN = ["quanto é", "quantos são", "calcula", "diz-me", "sabes"]
+PREFIXES_TO_CLEAN = [
+    "quanto é", "quantos são", "calcula", "diz-me", "sabes", 
+    "o que achas de", "o que achas", "o que te parece"
+]
 
 def handle(user_prompt_lower, user_prompt_full):
     """ Tenta calcular uma expressão matemática detetada em qualquer parte da frase. """
