@@ -59,15 +59,29 @@ def _get_moon_phase():
     return phases[day % 4]
 
 def _get_ipma_warnings(city_id):
+    """
+    Recolhe avisos ativos, aplicando a lógica de prioridade ao 'desliga'.
+    Ignora avisos de nível 'green' (situação normal).
+    """
     try:
         dist_key = str(city_id)[:3]
         area_code = DIST_TO_AREA.get(dist_key)
         url = "https://api.ipma.pt/open-data/forecast/warnings/warnings_www.json"
         resp = httpx.get(url, timeout=5.0)
         now = datetime.now().isoformat()
-        active = [w['awarenessTypeName'].lower() for w in resp.json() if w.get('idAreaAviso') == area_code and w['startTime'] <= now <= w['endTime']]
+        
+        # FIX: Filtramos apenas avisos que NÃO sejam 'green'
+        active = [
+            w['awarenessTypeName'].lower() 
+            for w in resp.json() 
+            if w.get('idAreaAviso') == area_code 
+            and w['startTime'] <= now <= w['endTime']
+            and w.get('awarenessLevelID') != 'green'
+        ]
+        
         return sorted(list(set(active)))[:2]
-    except: return []
+    except: 
+        return []
 
 # --- Core da Skill ---
 
@@ -99,13 +113,14 @@ def handle(user_prompt_lower, user_prompt_full):
             precip = int(float(forecast.get('precipitaProb', '0')))
             w_desc = _get_weather_type_desc(forecast.get('idWeatherType')).lower()
             
-            # Dados de Ar e UV
+            # Dados de Ar e UV (Soluções abertas/Open-Meteo)
             lat, lon = forecast['latitude'], forecast['longitude']
             url_om = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index,us_aqi"
             m = client.get(url_om).json().get('current', {})
             uv_desc, _ = _get_uv_advice(m.get('uv_index'))
             aqi_desc, _ = _get_iqair_advice(m.get('us_aqi'))
             
+            # Obtenção de avisos com o novo filtro de gravidade
             avisos = _get_ipma_warnings(target_id)
             resp_prefix = f"Atenção, temos aviso de { ' e '.join(avisos) }. " if avisos else ""
 
@@ -119,17 +134,18 @@ def handle(user_prompt_lower, user_prompt_full):
                     msg = f"Não. O céu em {target_city_norm.title()} permanecerá seco."
                 return f"{resp_prefix}{msg} Espera-se {w_desc}."
 
-            # 2. Resposta Geral Unificada (O que faltava)
+            # 2. Resposta Geral Unificada
             if day_index == 0 and is_night:
                 main = f"Nesta noite em {target_city_norm.title()}: {w_desc}, {t_min}°."
             else:
                 main = f"{day_name.capitalize()} em {target_city_norm.title()}: {w_desc}, entre {t_min}° e {t_max}°."
 
             # Unificação de Ar e UV na resposta geral
-            ar_uv = f" O ar está {aqi_desc} e o UV está {uv_desc} ({m.get('uv_index')})."
+            ar_uv = f" A qualidade do ar está {aqi_desc} e o UV está {uv_desc} ({m.get('uv_index')})."
             
             res = f"{resp_prefix}{main}{ar_uv}"
-            if is_night: res += f" A lua está {_get_moon_phase()}."
+            if is_night: 
+                res += f" A lua está {_get_moon_phase()}."
             
             return res
 
