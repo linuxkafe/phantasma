@@ -1,0 +1,21 @@
+Metadata-Version: 2.4
+Name: pHantasma
+Version: 0.1.0
+Summary: Local-first, offline, modular voice assistant in Python
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: sounddevice
+Requires-Dist: openai-whisper
+Requires-Dist: ollama
+Requires-Dist: torch
+Requires-Dist: httpx
+Requires-Dist: flask
+Requires-Dist: openwakeword
+Requires-Dist: tinytuya
+Requires-Dist: psutil
+Requires-Dist: python-miio
+Requires-Dist: webrtcvad
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"

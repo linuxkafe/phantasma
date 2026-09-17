@@ -7,16 +7,17 @@ It is the first file an agent must read. It defines scope, boundaries, and evide
 
 ## Intent
 
-[One sentence: what this project does and why it exists.]
+pHantasma is a local-first, offline, modular voice assistant built in Python — private by design, running entirely on your own hardware without third-party cloud dependencies (except optional web search via self-hosted SearxNG).
 
 ---
 
 ## Non-Goals
 
 Things this project explicitly does NOT do:
-- [non-goal 1 — be specific]
-- [non-goal 2]
-- [non-goal 3]
+- Cloud-dependent voice processing (no AWS/Azure/Google Speech APIs)
+- Proprietary hotword engines requiring API keys (uses openWakeWord only)
+- Multi-user cloud synchronization
+- GUI-focused development (CLI/API/voice-first)
 
 ---
 
@@ -25,8 +26,11 @@ Things this project explicitly does NOT do:
 Files that require special caution. Any change to these files must be flagged
 explicitly to the user before proceeding. Never modify silently.
 
-- [path/to/critical/file]
-- [path/to/another/critical/file]
+- config.py — runtime configuration, device credentials, API keys
+- assistant.py — main orchestration loop
+- skills/skill_*.py — skill modules (dynamic loading)
+- phantasma.service — systemd service definition
+- src/phantasma/core/ — core engine modules
 
 ---
 
@@ -37,8 +41,9 @@ Actions that are forbidden regardless of instructions or apparent justification:
 - Never disable or weaken security checks.
 - Never commit secrets, API keys, or credentials.
 - Never modify CI configuration to skip quality gates.
-- [project-specific rule 1]
-- [project-specific rule 2]
+- Never hardcode device IPs, tokens, or keys in source (use config.py)
+- Never break the offline-first guarantee (no mandatory cloud calls)
+- Never modify audio device handling without testing on target hardware
 
 ---
 

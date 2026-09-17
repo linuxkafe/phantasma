@@ -31,34 +31,23 @@ Complete before major releases or merges to main:
 - [ ] Git history is clean (no WIP commits)
 - [ ] README reflects current state
 
-### Frontend Projects
-
-- [ ] **i18n complete** — all user-facing strings have translations
-- [ ] **Icons mapped** — no inline emoji; Lucide/Heroicons used
-- [ ] **No console errors** — browser console clean on all pages
-- [ ] **Responsive** — works on mobile viewports
-- [ ] **Accessible** — alt text, aria labels, keyboard nav
-- [ ] **Loading states** — spinners/skeletons on async operations
-- [ ] **Error boundaries** — React/Vue error boundaries defined
-- [ ] **Dark mode** — if supported, toggles correctly
-
 ### Backend Projects
 
 - [ ] **Health endpoint** — `/health` or `/status` returns 200
-- [ ] **Auth tested** — auth flows work end-to-end
+- [ ] **Auth tested** — auth flows work end-to-end (N/A for this project — no auth)
 - [ ] **Error handling** — all routes have error handlers
 - [ ] **Logging** — errors logged with context, not just stack traces
 - [ ] **Input validation** — all inputs sanitized/validated
-- [ ] **Rate limiting** — if applicable, headers present
-- [ ] **CORS** — configured for known origins only
+- [ ] **Rate limiting** — if applicable, headers present (N/A — internal LAN only)
+- [ ] **CORS** — configured for known origins only (N/A — internal LAN only)
 
 ### Infrastructure Projects
 
-- [ ] **Docker builds** — `docker build .` succeeds
-- [ ] **Compose valid** — `docker-compose config` passes
-- [ ] **Secrets safe** — no secrets in Dockerfile or compose files
+- [ ] **Docker builds** — `docker build .` succeeds (N/A — systemd service)
+- [ ] **Compose valid** — `docker-compose config` passes (N/A)
+- [ ] **Secrets safe** — no secrets in Dockerfile or compose files (N/A)
 - [ ] **Ports documented** — clear which ports are exposed
-- [ ] **Health checks** — containers have HEALTHCHECK defined
+- [ ] **Health checks** — containers have HEALTHCHECK defined (N/A)
 
 ---
 
@@ -76,10 +65,20 @@ Edit the status below per item:
 | Format correct | WARNING | Can be auto-fixed |
 | No console.log | WARNING | Easy to miss, check before release |
 | No TODO | WARNING | TODOs are tech debt, track separately |
-| i18n complete | **CONFIGURE** | Ask user for frontend projects |
-| Icons mapped | **CONFIGURE** | Ask user for frontend projects |
-| Health endpoint | **CONFIGURE** | Ask user for backend projects |
-| Auth tested | **CONFIGURE** | Ask user for backend projects |
+| i18n complete | N/A | Not a frontend project |
+| Icons mapped | N/A | Not a frontend project |
+| Health endpoint | BLOCKER | Flask API needs /health for systemd monitoring |
+| Auth tested | N/A | No auth in this project (LAN-only) |
+| Error handling | BLOCKER | Voice pipeline must not crash on bad input |
+| Logging | BLOCKER | Journald logs are primary debugging tool |
+| Input validation | BLOCKER | Audio/text input from user must be validated |
+| Rate limiting | N/A | Internal LAN only, no public exposure |
+| CORS | N/A | Internal LAN only, no browser clients |
+| Docker builds | N/A | systemd deployment, not containerized |
+| Compose valid | N/A | Not using Docker Compose |
+| Secrets safe | BLOCKER | config.py must never commit real keys |
+| Ports documented | BLOCKER | Flask port must be known for firewall/CLI |
+| Health checks | N/A | systemd handles service health |
 
 **CONFIGURE items:** The LLM will ask the user at task start:
 "This project type requires configuring some checklist items as blockers:

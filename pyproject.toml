@@ -3,9 +3,25 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aes-project"
+name = "pHantasma"
 version = "0.1.0"
-description = "AES-managed Python project"
+description = "Local-first, offline, modular voice assistant in Python"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "sounddevice",
+    "openai-whisper",
+    "ollama",
+    "torch",
+    "httpx",
+    "flask",
+    "openwakeword",
+    "tinytuya",
+    "psutil",
+    "python-miio",
+    "webrtcvad",
+]
+optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff"]}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -14,4 +30,4 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 88
-select = ["E", "F", "W", "I"]
+lint.select = ["E", "F", "W", "I"]

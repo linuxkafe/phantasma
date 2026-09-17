@@ -1,0 +1,9 @@
+pyproject.toml
+src/__init__.py
+src/main.py
+src/pHantasma.egg-info/PKG-INFO
+src/pHantasma.egg-info/SOURCES.txt
+src/pHantasma.egg-info/dependency_links.txt
+src/pHantasma.egg-info/requires.txt
+src/pHantasma.egg-info/top_level.txt
+tests/test_main.py

@@ -1,0 +1,16 @@
+sounddevice
+openai-whisper
+ollama
+torch
+httpx
+flask
+openwakeword
+tinytuya
+psutil
+python-miio
+webrtcvad
+
+[dev]
+pytest
+pytest-cov
+ruff
