@@ -14,7 +14,7 @@ current_ticket: T001
 ## Sprint 01 — Core Voice Pipeline & Skills System
 | ID | Title | Status |
 |----|-------|--------|
-| T001 | Core voice pipeline integration (openWakeWord → Whisper → Ollama → Piper) | pending |
+| T001 | Core voice pipeline integration (openWakeWord → Whisper → Ollama → Piper) | in-progress |
 | T002 | Skills system implementation (dynamic loader, base classes) | pending |
 | T003 | Long-term memory skill (SQLite RAG) | pending |
 | T004 | SearxNG web search RAG skill | pending |

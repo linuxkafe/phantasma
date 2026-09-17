@@ -6,4 +6,12 @@ src/pHantasma.egg-info/SOURCES.txt
 src/pHantasma.egg-info/dependency_links.txt
 src/pHantasma.egg-info/requires.txt
 src/pHantasma.egg-info/top_level.txt
+src/pipeline/__init__.py
+src/pipeline/audio.py
+src/pipeline/llm.py
+src/pipeline/stt.py
+src/pipeline/tts.py
+src/pipeline/utils.py
+tests/test_config.py
 tests/test_main.py
+tests/test_utils.py

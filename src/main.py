@@ -1,8 +1,10 @@
 """Main application entry point."""
 
+from assistant import run
+
 
 def main():
-    print("Hello from AES project!")
+    run()
 
 
 if __name__ == "__main__":

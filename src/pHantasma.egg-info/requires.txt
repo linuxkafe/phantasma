@@ -9,6 +9,9 @@ tinytuya
 psutil
 python-miio
 webrtcvad
+piper-tts
+soundfile
+setuptools
 
 [dev]
 pytest

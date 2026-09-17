@@ -15,6 +15,9 @@ Requires-Dist: tinytuya
 Requires-Dist: psutil
 Requires-Dist: python-miio
 Requires-Dist: webrtcvad
+Requires-Dist: piper-tts
+Requires-Dist: soundfile
+Requires-Dist: setuptools
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pytest-cov; extra == "dev"
