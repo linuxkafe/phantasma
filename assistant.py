@@ -480,7 +480,18 @@ def run():
         logger.error(f"Failed to start pipeline: {result.error}")
         sys.exit(1)
 
-    logger.info("Phantasma is listening... Say 'Hey Jarvis' to activate")
+    # Report the wake words actually configured (PT custom .onnx basenames
+    # when present, else model names) — not a hardcoded English phrase.
+    hotword_words = [
+        os.path.splitext(os.path.basename(m))[0]
+        for m in config.hotword.models
+    ]
+    hotword_words = [w for w in hotword_words if w]
+    if hotword_words:
+        say_words = ", ".join(f"'{w}'" for w in hotword_words)
+        logger.info(f"Phantasma is listening... Say {say_words} to activate")
+    else:
+        logger.info("Phantasma is listening... wake word configured")
     logger.info("Press Ctrl+C to stop")
 
     # Keep main thread alive
