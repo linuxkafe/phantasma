@@ -468,3 +468,7 @@ def handle_request():
     </body>
     </html>
     """
+
+def handle(user_prompt_lower, user_prompt_full):
+    """UI skill doesn't handle voice commands - only registers web routes."""
+    return None

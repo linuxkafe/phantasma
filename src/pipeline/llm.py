@@ -57,9 +57,10 @@ class OllamaLLM:
             Result.ok(None) if healthy, Result.fail(error) if not.
         """
         errors = []
-        for label, client, model in (
-            ("primary", self.client, self.model),
-            ("fallback", self._fallback_client, self.fallback_model),
+        for label, client, model, host in (
+            ("primary", self.client, self.model, self.host),
+            ("fallback", self._fallback_client, self.fallback_model,
+             self.fallback_host),
         ):
             if self.fallback_host == self.host and label == "fallback":
                 break
@@ -67,15 +68,15 @@ class OllamaLLM:
                 models = client.list()
                 model_names = [m["name"] for m in models.get("models", [])]
                 if model not in model_names:
-                    errors.append(f"{model} not found on {client.host}")
+                    errors.append(f"{model} not found on {host}")
                     logger.warning(f"Ollama {label}: {errors[-1]}")
                     continue
                 if label == "fallback":
-                    logger.info(f"Ollama connected via fallback host: {client.host}")
+                    logger.info(f"Ollama connected via fallback host: {host}")
                 return Result.ok(None)
             except Exception as e:
                 errors.append(str(e))
-                logger.warning(f"Ollama {label} unreachable ({client.host}): {e}")
+                logger.warning(f"Ollama {label} unreachable ({host}): {e}")
         return Result.fail(
             "Ollama connection failed (primary " + self.host + ", fallback "
             + self.fallback_host + "): " + "; ".join(errors)
@@ -102,12 +103,15 @@ class OllamaLLM:
             {"role": "user", "content": prompt},
         ]
 
-        attempts = [("primary", self.client, self.model)]
+        attempts = [("primary", self.client, self.model, self.host)]
         if self.fallback_host != self.host:
-            attempts.append(("fallback", self._fallback_client, self.fallback_model))
+            attempts.append(
+                ("fallback", self._fallback_client, self.fallback_model,
+                 self.fallback_host)
+            )
 
         errors = []
-        for label, client, model in attempts:
+        for label, client, model, host in attempts:
             try:
                 response = client.chat(
                     model=model, messages=messages, options={"num_ctx": 8192}
@@ -116,7 +120,7 @@ class OllamaLLM:
                 duration_ms = (time.perf_counter() - start) * 1000
                 if label == "fallback":
                     logger.info(
-                        f"LLM served by fallback host {client.host} ({model}) "
+                        f"LLM served by fallback host {host} ({model}) "
                         f"duration_ms={duration_ms:.1f}"
                     )
                 logger.info(
@@ -125,7 +129,7 @@ class OllamaLLM:
                 return Result.ok(text, duration_ms=duration_ms)
             except Exception as e:
                 errors.append(str(e))
-                logger.warning(f"Ollama {label} chat failed ({client.host}): {e}")
+                logger.warning(f"Ollama {label} chat failed ({host}): {e}")
 
         duration_ms = (time.perf_counter() - start) * 1000
         last_error = "all Ollama hosts failed: " + "; ".join(errors)

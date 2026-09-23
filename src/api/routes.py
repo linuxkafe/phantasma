@@ -250,6 +250,17 @@ def create_app(pipeline=None) -> Flask:
             logger.error(f"/comando error: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
 
+    # Wire skill register_routes (UI, devices, etc.)
+    if pipeline and hasattr(pipeline, '_skill_loader'):
+        for skill in pipeline._skill_loader.skills:
+            module = getattr(skill, '_module', None)
+            if module and hasattr(module, 'register_routes'):
+                try:
+                    module.register_routes(app)
+                    logger.info(f"Registered routes for skill: {skill.NAME}")
+                except Exception as e:
+                    logger.warning(f"Failed to register routes for {skill.NAME}: {e}")
+
     # ============ Health & Info ============
 
     @app.route("/health", methods=["GET"])
