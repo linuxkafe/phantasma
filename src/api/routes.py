@@ -274,23 +274,30 @@ def create_app(pipeline=None) -> Flask:
                     list(getattr(config, attr).keys()) if hasattr(config, attr) else []
                 )
 
-            for n in keys("TUYA_DEVICES"):
+            # Config instance uses lowercase attribute names
+            for n in keys("tuya_devices"):
                 if any(x in n.lower() for x in ["sensor", "temp"]):
                     status.append(n)
                 else:
                     toggles.append(n)
-            for n in keys("MIIO_DEVICES") + keys("EWELINK_DEVICES"):
+            for n in keys("miio_devices") + keys("ewelink_devices"):
                 toggles.append(n)
-            for n in keys("CLOOGY_DEVICES"):
+            for n in keys("cloogy_devices"):
                 if "casa" in n.lower():
                     status.append(n)
                 else:
                     toggles.append(n)
-            if hasattr(config, "SHELLY_GAS_URL"):
+            if hasattr(config, "shelly_gas_url") and config.shelly_gas_url:
                 status.append("Sensor de Gás")
 
             return jsonify(
-                {"status": "ok", "devices": {"toggles": toggles, "status": status}}
+                {
+                    "status": "ok",
+                    "devices": {
+                        "toggles": toggles,
+                        "status": status,
+                    },
+                }
             )
         except Exception as e:
             logger.error(f"/get_devices error: {e}")

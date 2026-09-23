@@ -18,7 +18,7 @@ services:
       - ALSA_DEVICE_IN=hw:0,0
       - ALSA_DEVICE_OUT=hw:0,0
       - OLLAMA_HOST_PRIMARY=http://10.0.0.128:11434
-      - OLLAMA_HOST_FALLBACK=http://ollama:11434
+      - OLLAMA_HOST_FALLBACK=http://host.docker.internal:11434
       - SEARXNG_URL=http://searxng:8080
       - SKILLS_DIR=/app/skills
       - MEMORY_DB_PATH=/app/data/memory.db
@@ -42,7 +42,6 @@ services:
     ports:
       - "5000:5000"
     healthcheck:
-      # Image has no curl/wget; use python stdlib urllib instead.
       test:
         [
           "CMD",
@@ -63,33 +62,7 @@ services:
     networks:
       - phantasma-net
     depends_on:
-      - ollama
       - searxng
-
-  # Secondary Ollama (fallback) - small model for HP Mini PC 600
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama-secondary
-    restart: unless-stopped
-    volumes:
-      - ./ollama-data:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    ports:
-      - "11434:11434"
-    networks:
-      - phantasma-net
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-    command: serve
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
 
   # SearXNG search engine
   searxng:
