@@ -74,7 +74,7 @@ current_ticket: T002
 ## Backlog (follow-ups)
 | ID | Title | Status |
 |----|-------|--------|
-| T035 | Discord live bot: assistant-mode Flask API + `/comando` payload alignment (gap found in T034) | pending |
+| T035 | Discord live bot: assistant-mode Flask API + `/comando` payload alignment (gap found in T034) | done |
 | T036 | Checkpoint: migrate `Skill` subclass contract incrementally (legacy adapter currently bridges) | pending |
 
 ## Learning History

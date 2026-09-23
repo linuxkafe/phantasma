@@ -6,7 +6,8 @@ import subprocess
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
-TRIGGERS = ["vês", "ver", "câmara", "vigia", "olha", "sala", "quarto"]
+# Only explicit vision verbs - room names alone (sala, quarto) are not vision commands
+TRIGGERS = ["vês", "ver", "câmara", "vigia", "olha"]
 
 TRANSLATION_MAP = {
     "laptop": "portátil",
