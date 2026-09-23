@@ -42,7 +42,14 @@ services:
     ports:
       - "5000:5000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      # Image has no curl/wget; use python stdlib urllib instead.
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request,urllib.error; resp=urllib.request.urlopen('http://localhost:5000/health',timeout=3); import sys; sys.exit(0 if resp.status==200 else 1)",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -221,6 +221,35 @@ def create_app(pipeline=None) -> Flask:
         )
         return response
 
+    # ============ Legacy Discord/UI contract ============
+
+    @app.route("/comando", methods=["POST"])
+    def comando():
+        """Legacy endpoint used by the vendored Discord skill and UI.
+
+        Contract: POST {"prompt": "<text>"} -> {"status": "ok", "response": "..."}.
+        Routes through the same skill->LLM logic as the voice path, so a
+        Discord/UI command behaves identically to a spoken command.
+
+        Returns:
+            JSON with "status" and "response" keys, mirroring the remote
+            assistant.py contract.
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            prompt = (data.get("prompt") or "").strip()
+            if not prompt:
+                return jsonify({"status": "error", "message": "Prompt vazio"}), 400
+
+            response = pipeline.respond_to_text(prompt) if pipeline else None
+            if response is None:
+                return jsonify({"status": "error", "message": "Sem resposta"}), 502
+
+            return jsonify({"status": "ok", "response": response})
+        except Exception as e:
+            logger.error(f"/comando error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
     # ============ Health & Info ============
 
     @app.route("/health", methods=["GET"])

@@ -291,6 +291,56 @@ class PhantasmaPipeline:
                     self._collecting_speech = False
                     self._hotword_detected = False
 
+    def respond_to_text(self, text: str) -> Optional[str]:
+        """Route text through skills then FlyBrain + LLM.
+
+        Shared by the voice path (_process_speech) and the REST API
+        (/comando). Skips TTS/playback/feedback-window concerns; those
+        belong to the caller.
+
+        Args:
+            text: User text (e.g. "como está o tempo?").
+
+        Returns:
+            Response text, or None if no skill handled it and LLM failed.
+        """
+        # Check skills first (intercept ++/-- and weather/tuya before LLM)
+        skill_response = self._skill_loader.execute_skill(text)
+        if skill_response is not None:
+            logger.info(f"Skill '{text}' handled: {skill_response}")
+            return skill_response
+
+        return self._respond_with_llm(text)
+
+    def _respond_with_llm(self, text: str) -> Optional[str]:
+        """LLM fallback for text that no skill handled.
+
+        Steps FlyBrain for the conversation turn (reward=0 normal turn,
+        simple hash-based topic angle) and queries the LLM.
+
+        Args:
+            text: User text.
+
+        Returns:
+            LLM response text, or None on failure/empty response.
+        """
+        topic_angle = (hash(text) % 3600) / 10.0
+        self._fly_brain.step(topic_angle_deg=topic_angle, novelty=0.5, reward=0.0)
+
+        llm_result = llm_chat(text)
+        log_stage(logger, "llm", llm_result)
+        if not llm_result.success:
+            logger.error(f"LLM failed: {llm_result.error}")
+            return None
+
+        response = llm_result.data
+        if not response:
+            logger.info("LLM returned empty response")
+            return None
+
+        logger.info(f"Phantasma responds: {response}")
+        return response
+
     def _process_speech(self):
         """Process collected speech through STT -> LLM -> TTS -> Playback.
 
@@ -340,7 +390,9 @@ class PhantasmaPipeline:
 
         logger.info(f"User said: {text}")
 
-        # Check skills first (intercept ++/-- before LLM)
+        # Check skills first (intercept ++/-- before LLM). Skill responses
+        # are spoken and returned early — no feedback window is opened so a
+        # rapid follow-up command isn't swallowed as feedback.
         skill_response = self._skill_loader.execute_skill(text)
         if skill_response is not None:
             logger.info(f"Skill '{text}' handled: {skill_response}")
@@ -351,24 +403,11 @@ class PhantasmaPipeline:
                 self.audio_playback.play(audio_data)
             return
 
-        # Step FlyBrain for conversation turn (reward=0 for normal turn)
-        # Use simple hash-based topic angle for now
-        topic_angle = (hash(text) % 3600) / 10.0
-        self._fly_brain.step(topic_angle_deg=topic_angle, novelty=0.5, reward=0.0)
-
-        # LLM
-        llm_result = llm_chat(text)
-        log_stage(logger, "llm", llm_result)
-        if not llm_result.success:
-            logger.error(f"LLM failed: {llm_result.error}")
+        # LLM fallback shares the response. If None (LLM failure), _process_speech
+        # should not open a feedback window either.
+        response = self._respond_with_llm(text)
+        if response is None:
             return
-
-        response = llm_result.data
-        if not response:
-            logger.info("LLM returned empty response")
-            return
-
-        logger.info(f"Phantasma responds: {response}")
 
         # TTS
         tts_result = tts_synthesize(response)
@@ -457,6 +496,38 @@ class PhantasmaPipeline:
         return Result.ok(None)
 
 
+def _start_api_server(pipeline: PhantasmaPipeline) -> None:
+    """Start the Flask REST API in a background daemon thread.
+
+    Exposes the legacy Discord/UI contract (POST /comando) on port 5000,
+    plus the /api/* endpoints from src.api.routes. Failure is non-fatal:
+    the voice assistant keeps running, only the HTTP bridge is absent.
+
+    Args:
+        pipeline: Running PhantasmaPipeline to route commands through.
+    """
+    try:
+        from src.api.routes import create_app
+
+        app = create_app(pipeline=pipeline)
+        thread = threading.Thread(
+            target=app.run,
+            kwargs={
+                "host": "0.0.0.0",
+                "port": int(os.getenv("PHANTASMA_API_PORT", "5000")),
+                "debug": False,
+                "use_reloader": False,
+                "threaded": True,
+            },
+            daemon=True,
+            name="api-server",
+        )
+        thread.start()
+        logger.info("REST API started on 0.0.0.0:5000 (Discord/UI bridge)")
+    except Exception as e:
+        logger.warning(f"REST API failed to start (non-fatal): {e}")
+
+
 def run():
     """Main entry point for running the assistant.
 
@@ -479,6 +550,10 @@ def run():
     if not result.success:
         logger.error(f"Failed to start pipeline: {result.error}")
         sys.exit(1)
+
+    # Start REST API in background thread (Discord/UI bridge on port 5000).
+    # Non-fatal: assistant keeps running if the API cannot start.
+    _start_api_server(pipeline)
 
     # Report the wake words actually configured (PT custom .onnx basenames
     # when present, else model names) — not a hardcoded English phrase.
