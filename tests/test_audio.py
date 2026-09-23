@@ -141,6 +141,32 @@ class TestHotwordDetector:
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
     @patch("src.pipeline.audio.openwakeword.model.Model")
     @patch("src.pipeline.audio.os.path.isfile")
+    def test_process_on_custom_paths_initializes_cooldown(
+        self, mock_isfile, mock_model_class, mock_get_paths
+    ):
+        """T034 regression: custom-paths branch must set cooldown attrs.
+
+        The early `return` after loading custom .onnx paths skipped
+        _last_detection/_cooldown, so the first process() call in the
+        assistant worker crashed with AttributeError.
+        """
+        custom = ["/app/models/hey_fantasma.onnx"]
+        mock_isfile.return_value = True
+        mock_model_instance = MagicMock()
+        mock_model_instance.predict.return_value = {"hey_fantasma": 0.0}
+        mock_model_class.return_value = mock_model_instance
+
+        detector = HotwordDetector(models=custom, threshold=0.5)
+        audio_chunk = np.zeros(1600, dtype=np.int16)
+
+        # Must not raise AttributeError; _last_detection/_cooldown exist.
+        detected, model = detector.process(audio_chunk)
+        assert detected is False
+        assert model is None
+
+    @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
+    @patch("src.pipeline.audio.openwakeword.model.Model")
+    @patch("src.pipeline.audio.os.path.isfile")
     def test_init_falls_back_to_pretrained_when_paths_missing(
         self, mock_isfile, mock_model_class, mock_get_paths
     ):

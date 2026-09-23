@@ -164,6 +164,11 @@ class HotwordDetector:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
 
+        # Track last detection for cooldown (initialized on every load path,
+        # including the custom-paths branch below)
+        self._last_detection = 0.0
+        self._cooldown = config.hotword.cooldown_seconds
+
         # Custom model paths resolve to existing files -> load them directly.
         # This is how the PT wake words (models/ola_fantasma.onnx etc.) are used;
         # the old code only filtered pretrained model NAMES, so custom .onnx paths
@@ -202,10 +207,6 @@ class HotwordDetector:
             wakeword_model_paths=filtered_paths if filtered_paths else model_paths,
             **audio_features_kwargs,
         )
-
-        # Track last detection for cooldown
-        self._last_detection = 0.0
-        self._cooldown = config.hotword.cooldown_seconds
 
     def process(self, audio_chunk: np.ndarray) -> tuple[bool, Optional[str]]:
         """Process audio chunk for hotword detection.
