@@ -10,7 +10,7 @@ Base gates run via `make check`. Extend this file with domain-specific gates.
 | Code check | `make code-check` | BLOCKER — TODOs or structure issues |
 | Test check | `make test-check` | WARNING — coverage below threshold |
 | Lint check | `make lint-check` | BLOCKER — lint errors |
-| Premise check | `make premise-check` | BLOCKER — premise propagation failure |
+| Type check | `make typecheck` | BLOCKER — type errors |
 
 ## Backend / Voice Assistant Gates
 
@@ -18,6 +18,7 @@ Base gates run via `make check`. Extend this file with domain-specific gates.
 | Gate | Command | Failure Action |
 |------|---------|----------------|
 | Hotword detection loads | `python -c "import openwakeword; openwakeword.Model()"` | BLOCKER — core dependency broken |
+| PT wake words load + infer | `scripts/check-wakewords.sh check` | BLOCKER — run BEFORE `docker compose up`; model missing/corrupt stops boot |
 | Whisper model loads | `python -c "import whisper; whisper.load_model('medium')"` | BLOCKER — STT broken |
 | Ollama connectivity | `python -c "import ollama; ollama.list()"` | BLOCKER — LLM unreachable |
 | Piper TTS synthesizes | `python -c "from piper import PiperVoice; PiperVoice.load('voice.onnx')"` | BLOCKER — TTS broken |
@@ -52,6 +53,7 @@ Base gates run via `make check`. Extend this file with domain-specific gates.
 |------|---------|----------------|
 | Ollama model exists | `ollama list | grep -q "llama3:8b-instruct-8k"` | WARNING — model missing |
 | SearxNG reachable | `curl -sf http://127.0.0.1:8081 >/dev/null` | WARNING — web search unavailable |
+| Container audio access | `scripts/docker-audio-setup.sh check` | WARNING — voice pipeline cannot reach sound hardware |
 
 ## Adding Custom Gates
 

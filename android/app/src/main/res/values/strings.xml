@@ -1,0 +1,59 @@
+<resources>
+    <string name="app_name">pHantasma</string>
+    <string name="app_tagline">Local Voice Assistant</string>
+
+    <!-- Home Screen -->
+    <string name="home_title">pHantasma</string>
+    <string name="home_subtitle">Local Voice Assistant</string>
+    <string name="server_status_connected">Conectado</string>
+    <string name="server_status_disconnected">Desconectado</string>
+    <string name="server_status_searching">Procurando…</string>
+    <string name="voice_button_tap">Toque para falar</string>
+    <string name="voice_button_listening">Ouvindo…</string>
+    <string name="voice_button_processing">Processando…</string>
+
+    <!-- Devices Screen -->
+    <string name="devices_title">Dispositivos</string>
+    <string name="devices_empty">Nenhum dispositivo configurado</string>
+    <string name="device_on">Ligado</string>
+    <string name="device_off">Desligado</string>
+    <string name="device_unknown">Desconhecido</string>
+    <string name="action_toggle">Alternar</string>
+    <string name="action_brightness">Brilho</string>
+    <string name="action_color">Cor</string>
+
+    <!-- Memory Screen -->
+    <string name="memory_title">Memória</string>
+    <string name="memory_empty">Nenhuma memória guardada</string>
+    <string name="memory_add_hint">O que memorizar?</string>
+    <string name="memory_add_button">Memorizar</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Configurações</string>
+    <string name="settings_server_section">Servidor</string>
+    <string name="settings_server_ip">Endereço IP</string>
+    <string name="settings_server_port">Porta</string>
+    <string name="settings_auto_discover">Descoberta automática (mDNS)</string>
+    <string name="settings_theme_section">Aparência</string>
+    <string name="settings_theme_system">Sistema</string>
+    <string name="settings_theme_light">Claro</string>
+    <string name="settings_theme_dark">Escuro</string>
+    <string name="settings_voice_section">Voz</string>
+    <string name="settings_voice_language">Idioma</string>
+    <string name="settings_voice_language_pt">Português (PT)</string>
+    <string name="settings_voice_language_en">Inglês (EN)</string>
+    <string name="settings_about_section">Sobre</string>
+    <string name="settings_version">Versão 1.0.0</string>
+
+    <!-- Permissions -->
+    <string name="permission_audio_rationale">Precisamos de acesso ao microfone para comandos de voz.</string>
+    <string name="permission_location_rationale">Precisamos de localização para descoberta mDNS.</string>
+
+    <!-- Errors -->
+    <string name="error_server_not_found">Servidor não encontrado</string>
+    <string name="error_connection_failed">Falha na conexão</string>
+    <string name="error_audio_record">Erro ao gravar áudio</string>
+    <string name="error_audio_play">Erro ao reproduzir áudio</string>
+    <string name="error_permission_denied">Permissão negada</string>
+    <string name="error_unknown">Erro desconhecido</string>
+</resources>

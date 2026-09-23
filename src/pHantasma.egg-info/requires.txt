@@ -12,8 +12,14 @@ webrtcvad
 piper-tts
 soundfile
 setuptools
+zeroconf
+librosa
 
 [dev]
 pytest
 pytest-cov
 ruff
+mypy
+
+[dotenv]
+python-dotenv

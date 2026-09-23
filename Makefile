@@ -1,4 +1,4 @@
-.PHONY: setup run test lint format build check doctor help venv
+.PHONY: setup run test lint format build check doctor help venv typecheck check-wakewords
 
 AES_LANGUAGE ?= python
 AES_LINT ?= ruff check
@@ -23,14 +23,21 @@ setup: venv
 run: venv
 	@$(VENV_PYTHON) -m src.main 2>/dev/null || $(VENV_PYTHON) src/main.py
 
+# Verify PT wake word models exist and load in the image BEFORE compose up (T034)
+check-wakewords:
+	@scripts/check-wakewords.sh check
+
 test: venv
 	@$(VENV_PYTHON) -m pytest
 
 lint: venv
-	@$(VENV_PYTHON) -m ruff check src tests
+	@$(VENV_PYTHON) -m ruff check src tests assistant.py config.py src/main.py
 
 format: venv
-	@$(VENV_PYTHON) -m ruff format src tests
+	@$(VENV_PYTHON) -m ruff format src tests assistant.py config.py src/main.py
+
+typecheck: venv
+	@$(VENV_PYTHON) -m mypy src tests assistant.py config.py --ignore-missing-imports --exclude src/main.py
 
 build: venv
 	@$(VENV_PYTHON) -m build
@@ -51,7 +58,10 @@ test-check: venv
 	@$(VENV_PYTHON) -m pytest --cov=src --cov-fail-under=30 || echo "Coverage below 30%"
 
 lint-check: venv
-	@$(VENV_PYTHON) -m ruff check src tests
+	@$(VENV_PYTHON) -m ruff check src tests assistant.py config.py src/main.py
+
+typecheck-check: venv
+	@$(VENV_PYTHON) -m mypy src tests assistant.py config.py src/main.py --ignore-missing-imports
 
 validate: venv
 	@$(VENV_PYTHON) -m ruff check . || true
@@ -62,4 +72,4 @@ doctor:
 	@echo "Venv: $(VENV_DIR)"
 
 help:
-	@echo "AES Commands: make setup run test lint format build check doctor"
+	@echo "AES Commands: make setup run test lint format build check doctor typecheck"

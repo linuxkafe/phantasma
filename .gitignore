@@ -18,3 +18,12 @@ env/
 .tmp/
 aes/verification/
 .llm_venv/
+.aes
+aes
+models/
+config.py
+memory.db
+.env
+# runtime data + model caches (memory DBs, Whisper/Piper weights registered at deploy time)
+data/
+*.orig

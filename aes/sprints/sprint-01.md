@@ -12,7 +12,7 @@ Implement the core voice pipeline (hotword → STT → LLM → TTS) and the modu
 ## Tickets
 | ID | Title | Status |
 |----|-------|--------|
-| T001 | Core voice pipeline integration (openWakeWord → Whisper → Ollama → Piper) | pending |
+| T001 | Core voice pipeline integration (openWakeWord → Whisper → Ollama → Piper) | done |
 | T002 | Skills system implementation (dynamic loader, base classes) | pending |
 | T003 | Long-term memory skill (SQLite RAG) | pending |
 | T004 | SearxNG web search RAG skill | pending |

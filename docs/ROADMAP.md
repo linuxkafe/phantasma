@@ -8,8 +8,9 @@
 ## [HIGH] Core Voice Pipeline Integration
 - Impact: High
 - Effort: High
-- Status: todo
+- Status: done
 - Description: Integrate openWakeWord → Whisper → Ollama → Piper pipeline in assistant.py with VAD gating
+- Completed: 2026-09-17 (commit eb41968)
 
 ## [HIGH] Skills System Implementation
 - Impact: High
@@ -44,8 +45,9 @@
 ## [MEDIUM] REST API & CLI
 - Impact: Medium
 - Effort: Low
-- Status: todo
+- Status: done
 - Description: Flask /api/command endpoint; phantasma-cli.sh wrapper
+- Completed: 2026-09-17 (src/api/ implemented)
 
 ## [MEDIUM] Audio Feedback System
 - Impact: Medium
@@ -82,3 +84,15 @@
 - Effort: Medium
 - Status: backlog
 - Description: pytest suite; GitHub Actions CI; make check quality gates
+
+## [MEDIUM] Migrate off webrtcvad (drop setuptools<81 pin)
+- Impact: Medium
+- Effort: Medium
+- Status: backlog
+- Description: [DISCOVERED mid-task T031] Replace webrtcvad 2.0.10 (imports pkg_resources; setuptools>=81 removed it) with a pkg_resources-free VAD binding, then lift the `setuptools>=61,<81` pin in pyproject.toml and Dockerfile. setuptools<81 is EOL — this is a stopgap.
+
+## [MEDIUM] Compose healthcheck mismatch in assistant mode
+- Impact: Medium
+- Effort: Low
+- Status: backlog
+- Description: [DISCOVERED mid-task T031] docker-compose.yml healthcheck curls :5000/health, which is only served in `api` mode; assistant mode container shows `unhealthy` while the pipeline runs fine. Fix: make assistant mode expose health, or change healthcheck.

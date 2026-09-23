@@ -1,0 +1,61 @@
+services:
+  # Main pHantasma voice assistant
+  phantasma:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phantasma
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - "audio"
+    env_file:
+      - .env
+    environment:
+      - ALSA_DEVICE_IN=hw:0,0
+      - ALSA_DEVICE_OUT=hw:0,0
+      - OLLAMA_HOST_PRIMARY=http://host.docker.internal:11434
+      - OLLAMA_HOST_FALLBACK=http://host.docker.internal:11434
+      - SEARXNG_URL=http://host.docker.internal:8081
+      - SKILLS_DIR=/app/skills
+      - MEMORY_DB_PATH=/app/data/memory.db
+      - BRAIN_DB_PATH=/app/data/flybrain.db
+      - TTS_MODEL_PATH=/app/models/tts/pt_PT-dii-high.onnx
+      - MUSIC_DIR=/app/audio/music
+      - GREETING_PATH=/app/audio/greeting.wav
+    volumes:
+      - ./data:/app/data
+      - ./data/whisper:/root/.cache/whisper
+      - ./models:/app/models
+      - ./audio:/app/audio
+      - ./config.py:/app/config.py:ro
+      - ./assistant.py:/app/assistant.py:ro
+      - ./audio_utils.py:/app/audio_utils.py:ro
+      - ./data_utils.py:/app/data_utils.py:ro
+      - ./tools.py:/app/tools.py:ro
+      - ./src:/app/src:ro
+      - ./skills:/app/skills:ro
+      - .env:/app/.env:ro
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    networks:
+      - phantasma-net
+
+networks:
+  phantasma-net:
+    driver: bridge

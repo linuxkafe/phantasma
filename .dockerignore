@@ -1,0 +1,68 @@
+# pHantasma Docker Ignore
+# Files/directories excluded from Docker build context
+
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.coverage
+coverage.xml
+coverage.out
+*.egg-info/
+dist/
+build/
+venv/
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Data (use volumes instead)
+data/
+models/
+audio/
+
+# Tests
+tests/
+htmlcov/
+
+# Documentation (optional - keep if needed for runtime)
+docs/
+# README.md
+
+# Android
+android/
+
+# AES
+aes/
+
+# Prompts
+prompts/
+
+# Config templates
+# .env.example
+config.py.orig
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
