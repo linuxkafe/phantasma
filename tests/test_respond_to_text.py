@@ -53,13 +53,14 @@ def test_respond_to_text_skill_handled():
     pipeline._fly_brain.step.assert_not_called()
 
 
-@patch("assistant.llm_chat")
-@patch("assistant.log_stage")
-def test_respond_to_text_llm_fallback(mock_log_stage, mock_llm_chat):
+@patch("ollama.Client")
+def test_respond_to_text_llm_fallback(mock_ollama_client):
     """respond_to_text falls back to LLM when no skill matches."""
     pipeline = _make_pipeline()
     pipeline._skill_loader.execute_skill.return_value = None
-    mock_llm_chat.return_value = MagicMock(success=True, data="Resposta do LLM")
+    mock_client = MagicMock()
+    mock_client.chat.return_value = {"message": {"content": "Resposta do LLM"}}
+    mock_ollama_client.return_value = mock_client
 
     result = pipeline.respond_to_text("explica-te melhor")
 
@@ -67,13 +68,14 @@ def test_respond_to_text_llm_fallback(mock_log_stage, mock_llm_chat):
     pipeline._fly_brain.step.assert_called_once()
 
 
-@patch("assistant.llm_chat")
-@patch("assistant.log_stage")
-def test_respond_to_text_llm_failure_returns_none(mock_log_stage, mock_llm_chat):
+@patch("ollama.Client")
+def test_respond_to_text_llm_failure_returns_none(mock_ollama_client):
     """respond_to_text returns None when no skill matches and LLM fails."""
     pipeline = _make_pipeline()
     pipeline._skill_loader.execute_skill.return_value = None
-    mock_llm_chat.return_value = MagicMock(success=False, error="Ollama down")
+    mock_client = MagicMock()
+    mock_client.chat.side_effect = Exception("Ollama down")
+    mock_ollama_client.return_value = mock_client
 
     result = pipeline.respond_to_text("olá")
 

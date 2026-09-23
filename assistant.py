@@ -11,6 +11,7 @@ VAD-gated silence detection.
 
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import numpy as np
 
 import config as config_module
 from config import config
+from data_utils import get_cached_response, retrieve_from_rag
 from skills import SkillContext, SkillLoader
 from src.brain.fly_brain import FlyBrain
 from src.brain.persistence import FlyBrainStore
@@ -31,10 +33,39 @@ from src.pipeline.audio import (
     HotwordDetector,
     VADProcessor,
 )
-from src.pipeline.llm import chat as llm_chat
 from src.pipeline.stt import transcribe as stt_transcribe
 from src.pipeline.tts import synthesize as tts_synthesize
 from src.pipeline.utils import Result, log_stage, logger
+from tools import search_with_searxng
+
+
+def sanitize_llm_context(context: str) -> str:
+    """Sanitize RAG/web context for LLM injection.
+
+    Removes technical markers, timestamps, and poetic artifacts
+    that pollute the context.
+    """
+    if not context or not isinstance(context, str):
+        return ""
+
+    # Remove technical RAG instructions
+    context = re.sub(
+        r"MEMÓRIAS PESSOAIS.*?\n\n", "", context, flags=re.DOTALL | re.IGNORECASE
+    )
+    context = re.sub(
+        r"NOTA: Se houver contradições.*?\n", "", context, flags=re.IGNORECASE
+    )
+
+    # Remove timestamps and technical IDs
+    context = re.sub(r"\[\d{4}-\d{2}-\d{2}.*?\]", "", context)
+
+    # Remove poetic artifacts from RAG
+    poison_terms = ["Sombra", "Aquietação", "Fim", "Silêncio", "Fúria da Memória"]
+    for term in poison_terms:
+        context = re.sub(rf"\*\*{term}\*\*", "", context, flags=re.IGNORECASE)
+        context = re.sub(rf"{term}:", "", context, flags=re.IGNORECASE)
+
+    return context.strip()
 
 
 class PhantasmaPipeline:
@@ -315,31 +346,113 @@ class PhantasmaPipeline:
     def _respond_with_llm(self, text: str) -> Optional[str]:
         """LLM fallback for text that no skill handled.
 
-        Steps FlyBrain for the conversation turn (reward=0 normal turn,
-        simple hash-based topic angle) and queries the LLM.
+        Full fallback chain: Cache -> RAG + SearXNG -> Ollama with multiple hosts.
+        Mirrors the upstream route_and_respond logic.
 
         Args:
             text: User text.
 
         Returns:
-            LLM response text, or None on failure/empty response.
+            Response text, or None on failure/empty response.
         """
+        # Check cache first
+        cached = get_cached_response(text)
+        if cached:
+            logger.info("Cache hit for prompt")
+            return cached
+
+        # Step FlyBrain for conversation turn
         topic_angle = (hash(text) % 3600) / 10.0
         self._fly_brain.step(topic_angle_deg=topic_angle, novelty=0.5, reward=0.0)
 
-        llm_result = llm_chat(text)
-        log_stage(logger, "llm", llm_result)
-        if not llm_result.success:
-            logger.error(f"LLM failed: {llm_result.error}")
+        # Retrieve RAG memories
+        rag = sanitize_llm_context(retrieve_from_rag(text))
+        logger.debug(f"RAG context length: {len(rag)}")
+
+        # Web search via SearXNG (only if no skill context yet)
+        web = sanitize_llm_context(search_with_searxng(text))
+        logger.debug(f"Web context length: {len(web)}")
+
+        # Build full prompt with context injection
+        sys_prompt = getattr(config, "llm", None) and getattr(
+            config.llm, "system_prompt", ""
+        )
+        if not sys_prompt:
+            sys_prompt = getattr(config, "SYSTEM_PROMPT", "")
+
+        full_prompt = (
+            f"{sys_prompt}\n\n"
+            "### CONHECIMENTO DISPONÍVEL (Usa apenas para factos):\n"
+            f"{rag}\n{web}\n\n"
+            "### INSTRUÇÃO DE RESPOSTA:\n"
+            "Responde de forma fluida e natural em português. "
+            "NÃO uses cabeçalhos ou marcações. Sê um assistente útil.\n\n"
+            f"Utilizador: {text}"
+        )
+
+        # Try Ollama with primary and fallback hosts
+        primary_host = getattr(config, "llm", None) and getattr(
+            config.llm, "host", None
+        )
+        primary_model = getattr(config, "llm", None) and getattr(
+            config.llm, "model", None
+        )
+        fallback_host = getattr(config, "llm", None) and getattr(
+            config.llm, "host_fallback", None
+        )
+        fallback_model = getattr(config, "llm", None) and getattr(
+            config.llm, "model_fallback", None
+        )
+
+        if not primary_host:
+            primary_host = getattr(config, "OLLAMA_HOST_PRIMARY", None)
+            primary_model = primary_model or getattr(
+                config, "OLLAMA_MODEL_PRIMARY", "llama3.1:8b"
+            )
+        if not fallback_host:
+            fallback_host = getattr(
+                config, "OLLAMA_HOST_FALLBACK", "http://localhost:11434"
+            )
+            fallback_model = fallback_model or getattr(
+                config, "OLLAMA_MODEL_FALLBACK", "llama3"
+            )
+
+        inference_targets = []
+        if primary_host:
+            inference_targets.append((primary_host, primary_model or "llama3.1:8b"))
+        if fallback_host and fallback_host != primary_host:
+            inference_targets.append((fallback_host, fallback_model or "llama3"))
+
+        if not inference_targets:
+            logger.error("No Ollama hosts configured")
             return None
 
-        response = llm_result.data
-        if not response:
-            logger.info("LLM returned empty response")
-            return None
+        import ollama
 
-        logger.info(f"Phantasma responds: {response}")
-        return response
+        for host, model in inference_targets:
+            try:
+                logger.info(f"Trying Ollama: {host} (model: {model})")
+                client = ollama.Client(host=host)
+                response = client.chat(
+                    model=model,
+                    messages=[{"role": "user", "content": full_prompt}],
+                    options={
+                        "repeat_penalty": 1.4,
+                        "temperature": 0.6,
+                        "num_ctx": 8192,
+                        "top_p": 0.9,
+                    },
+                )
+                response_text = response.get("message", {}).get("content", "").strip()
+                if response_text:
+                    logger.info(f"Ollama responded via {host} ({model})")
+                    return response_text
+            except Exception as e:
+                logger.warning(f"Ollama {host} failed: {e}")
+                continue
+
+        logger.error("All Ollama hosts failed")
+        return None
 
     def _process_speech(self):
         """Process collected speech through STT -> LLM -> TTS -> Playback.
@@ -558,8 +671,7 @@ def run():
     # Report the wake words actually configured (PT custom .onnx basenames
     # when present, else model names) — not a hardcoded English phrase.
     hotword_words = [
-        os.path.splitext(os.path.basename(m))[0]
-        for m in config.hotword.models
+        os.path.splitext(os.path.basename(m))[0] for m in config.hotword.models
     ]
     hotword_words = [w for w in hotword_words if w]
     if hotword_words:

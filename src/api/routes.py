@@ -251,15 +251,112 @@ def create_app(pipeline=None) -> Flask:
             return jsonify({"status": "error", "message": str(e)}), 500
 
     # Wire skill register_routes (UI, devices, etc.)
-    if pipeline and hasattr(pipeline, '_skill_loader'):
+    if pipeline and hasattr(pipeline, "_skill_loader"):
         for skill in pipeline._skill_loader.skills:
-            module = getattr(skill, '_module', None)
-            if module and hasattr(module, 'register_routes'):
+            module = getattr(skill, "_module", None)
+            if module and hasattr(module, "register_routes"):
                 try:
                     module.register_routes(app)
                     logger.info(f"Registered routes for skill: {skill.NAME}")
                 except Exception as e:
                     logger.warning(f"Failed to register routes for {skill.NAME}: {e}")
+
+    # ============ Legacy device/skill endpoints (UI) ============
+
+    @app.route("/get_devices", methods=["GET"])
+    def get_devices():
+        """List all configured devices from config for UI toggles/status."""
+        try:
+            toggles, status = [], []
+
+            def keys(attr: str):
+                return (
+                    list(getattr(config, attr).keys()) if hasattr(config, attr) else []
+                )
+
+            for n in keys("TUYA_DEVICES"):
+                if any(x in n.lower() for x in ["sensor", "temp"]):
+                    status.append(n)
+                else:
+                    toggles.append(n)
+            for n in keys("MIIO_DEVICES") + keys("EWELINK_DEVICES"):
+                toggles.append(n)
+            for n in keys("CLOOGY_DEVICES"):
+                if "casa" in n.lower():
+                    status.append(n)
+                else:
+                    toggles.append(n)
+            if hasattr(config, "SHELLY_GAS_URL"):
+                status.append("Sensor de Gás")
+
+            return jsonify(
+                {"status": "ok", "devices": {"toggles": toggles, "status": status}}
+            )
+        except Exception as e:
+            logger.error(f"/get_devices error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    @app.route("/device_status", methods=["GET"])
+    def device_status():
+        """Get status of a specific device by nickname."""
+        try:
+            nickname = request.args.get("nickname", "")
+            if not nickname:
+                return jsonify({"state": "unreachable"}), 400
+
+            # Check skills that have get_status function
+            for skill in pipeline._skill_loader.skills:
+                module = getattr(skill, "_module", None)
+                if module and hasattr(module, "get_status_for_device"):
+                    try:
+                        res = module.get_status_for_device(nickname)
+                        if res and res.get("state") != "unreachable":
+                            return jsonify(res)
+                    except Exception:
+                        continue
+
+            return jsonify({"state": "unreachable"})
+        except Exception as e:
+            logger.error(f"/device_status error: {e}")
+            return jsonify({"state": "unreachable"}), 500
+
+    @app.route("/device_action", methods=["POST"])
+    def device_action():
+        """Execute action on a device via route_and_respond equivalent."""
+        try:
+            data = request.get_json(silent=True) or {}
+            device = data.get("device", "")
+            action = data.get("action", "")
+            if not device or not action:
+                return jsonify(
+                    {"status": "error", "message": "device e action obrigatórios"}
+                ), 400
+
+            prompt = f"{action} o {device}"
+            response = pipeline.respond_to_text(prompt) if pipeline else None
+            if response is None:
+                return jsonify({"status": "error", "message": "Sem resposta"}), 502
+
+            return jsonify({"status": "ok", "response": response})
+        except Exception as e:
+            logger.error(f"/device_action error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    @app.route("/help", methods=["GET"])
+    def get_help():
+        """List all skills and their triggers for UI help."""
+        try:
+            cmds = {"diz": "TTS"}
+            if pipeline and hasattr(pipeline, "_skill_loader"):
+                for skill in pipeline._skill_loader.skills:
+                    triggers = getattr(skill, "TRIGGERS", [])
+                    cmds[skill.NAME] = (
+                        ", ".join(triggers[:3]) + "..." if triggers else "Ativo"
+                    )
+            return jsonify({"status": "ok", "commands": cmds})
+        except Exception as e:
+            logger.error(f"/help error: {e}")
+            return jsonify({"status": "error", "message": str(e)}), 500
 
     # ============ Health & Info ============
 
