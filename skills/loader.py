@@ -249,21 +249,27 @@ class SkillLoader:
     def execute_skill(self, text: str) -> Optional[str]:
         """Find and execute matching skill.
 
-        Calls skill.handle(text) and returns the response. If the skill
-        raises an exception, logs the error and returns an error message
-        instead of crashing the pipeline.
+        Iterates skills in priority order and returns the FIRST non-empty
+        response. Matches upstream assistant.py semantics: a skill may
+        match a trigger but return an empty result (e.g. tuya's "como
+        está" catches "como está o tempo" but has no device) — those are
+        skipped so the next matching skill (e.g. weather) is consulted.
+        If a matched skill raises, logs and continues (does not crash).
 
         Args:
             text: User input text.
 
         Returns:
-            Skill response text, or None if no skill matched.
+            First non-empty skill response, or None if nothing matched.
         """
-        skill = self.find_matching_skill(text)
-        if skill:
+        for skill in self.skills:
+            if not skill.matches(text):
+                continue
             try:
-                return skill.handle(text)
+                response = skill.handle(text)
             except Exception as e:
                 logger.error(f"Skill {skill.NAME} failed: {e}")
-                return f"Erro na skill {skill.NAME}"
+                continue
+            if response:
+                return response
         return None

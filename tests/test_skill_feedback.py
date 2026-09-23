@@ -105,5 +105,35 @@ def test_skill_loader_execute_feedback_skill():
     assert loader.execute_skill("olá") is None
 
 
+def test_execute_skill_falls_through_empty_handlers():
+    """T034 regression: matching skills that return empty are skipped.
+
+    skill_tuya matches "como está o tempo" via "como está" but returns
+    empty when no device is targeted. execute_skill must skip it and
+    return the first non-empty response (weather), matching upstream
+    assistant.py semantics.
+    """
+    from skills.loader import SkillLoader
+    from src.brain.fly_brain import FlyBrain
+
+    brain = FlyBrain()
+    skills_dir = str(Path(__file__).parent.parent / "skills")
+    loader = SkillLoader(skills_dir, SkillContext(fly_brain=brain))
+    loader.load_all()
+
+    tuya = next((s for s in loader.skills if s.NAME == "skill_tuya"), None)
+    assert tuya is not None
+    assert tuya.matches("como está o tempo") is True
+    assert tuya.handle("como está o tempo") in (None, "")
+
+    weather = next((s for s in loader.skills if s.NAME == "skill_weather"), None)
+    assert weather is not None
+
+    # Ordering: tuya precedes weather, yet its empty output is skipped.
+    assert loader.skills.index(tuya) < loader.skills.index(weather)
+    response = loader.execute_skill("como está o tempo")
+    assert response == weather.handle("como está o tempo")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
