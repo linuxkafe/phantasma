@@ -138,7 +138,8 @@ def handle(user_prompt_lower, user_prompt_full):
     Função síncrona que o Phantasma chama.
     """
     if DioChaconApi is None:
-        return "A skill Chacon falhou a carregar. Vê os logs para o erro exato."
+        # Import failed - return None so other skills (Tuya) can handle it
+        return None
 
     # 1. Verifica se o dispositivo foi mencionado
     prompt_norm = _normalize_string(user_prompt_lower)

@@ -26,6 +26,7 @@ dependencies = [
     "zeroconf",
     "librosa",
     "discord",
+    "dio-chacon-wifi-api",
 ]
 optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff", "mypy"], dotenv = ["python-dotenv"]}
 
