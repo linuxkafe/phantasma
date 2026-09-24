@@ -18,14 +18,16 @@ Endpoints:
 import base64
 import io
 import logging
+import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import soundfile as sf
 from flask import Flask, Response, jsonify, request
 
 from config import config
+from src.api.admin import admin_bp
 from src.api.models import (
     CommandRequest,
     CommandResponse,
@@ -205,9 +207,16 @@ def create_app(pipeline=None) -> Flask:
     """
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
+    # Secret key for sessions (set via env var SECRET_KEY in production)
+    app.secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
+    # Session lifetime 30 days
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
     # Store pipeline reference for route handlers
     app.pipeline = pipeline
+
+    # Register admin blueprint
+    app.register_blueprint(admin_bp)
 
     # CORS for Android app
     @app.after_request
