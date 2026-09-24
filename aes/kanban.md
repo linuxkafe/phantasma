@@ -81,6 +81,7 @@ current_ticket: T002
 | T039 | Design: base de dados única com grafos (memory.db + flybrain.db + claims) | pending |
 | T040 | Feedback por texto (Discord/REST) via helper partilhado `_apply_feedback_reward` (janela voz intacta) | done |
 | T041 | Persistência configurável `PHANTASMA_DATA_DIR` no docker-compose (default `./data`) | done |
+| T042 | Discord thumbs-down (👎) silenciosamente ignorado: sem reward FlyBrain nem ack (2 guards: emoji não mapeado + author != bot) | done |
 
 ## Learning History
 | Date | Ticket | Insight |

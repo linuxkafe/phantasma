@@ -2,6 +2,7 @@ import asyncio
 import logging
 import threading
 from datetime import datetime
+from typing import Optional
 
 import discord
 import httpx
@@ -180,11 +181,17 @@ async def on_message(message):
 
 _REACTION_REWARD = {
     "👍":  +1.0,
+    "👎":  -1.0,
     "❤️":  +1.0,
     "🔥":  +1.0,
     "😡":  -1.0,
     "😢":  -0.5,
 }
+
+
+def _reward_for_emoji(emoji) -> Optional[float]:
+    """Return the FlyBrain reward for a Discord reaction emoji, or None."""
+    return _REACTION_REWARD.get(str(emoji))
 
 
 @client.event
@@ -220,14 +227,24 @@ async def on_raw_reaction_add(payload):
 
 
 async def _handle_reaction(reaction, user):
-    """Core reaction handling logic."""
+    """Core reaction handling logic.
+
+    Accepts reactions on the bot's own messages AND on the reacting user's
+    own messages (personal assistant DM context: a thumbs-down on your own
+    message is valid feedback about the last exchange). Reactions on third-
+    party messages are ignored to keep the reward signal clean.
+    """
     if user == client.user:
         return
-    if reaction.message.author != client.user:
+    author = reaction.message.author
+    if author != client.user and author != user:
+        print(f"[Discord Skill] Ignorada reação de {user} em mensagem de terceiros")
         return
 
-    reward = _REACTION_REWARD.get(str(reaction.emoji))
+    reward = _reward_for_emoji(reaction.emoji)
     if reward is None or _fly_brain is None:
+        if reward is None:
+            print(f"[Discord Skill] Emoji sem reward mapeado: {reaction.emoji}")
         return
 
     print(f"[Discord Skill] Reaction {reaction.emoji} from {user} -> reward={reward}")
