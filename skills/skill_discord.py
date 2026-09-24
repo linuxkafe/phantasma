@@ -7,6 +7,9 @@ import discord
 import httpx
 
 import config
+import config as config_module
+from src.brain.fly_brain import FlyBrain
+from src.brain.persistence import FlyBrainStore
 
 # --- Configuração da Skill ---
 # Esta skill não é ativada por voz local, serve apenas para carregar o daemon.
@@ -40,6 +43,9 @@ ALLOWED_SKILL_KEYWORDS = [
 # Cache de Quotas: { user_id: { "date": "YYYY-MM-DD", "count": 0 } }
 _USER_QUOTAS = {}
 
+# FlyBrain instance for reaction feedback
+_fly_brain = None
+
 # --- Setup do Logging ---
 logger = logging.getLogger("DiscordSkill")
 
@@ -47,6 +53,7 @@ logger = logging.getLogger("DiscordSkill")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.reactions = True
 client = discord.Client(intents=intents)
 
 # URL da API local do Phantasma (comunica com o assistant.py via HTTP para thread safety)
@@ -171,6 +178,37 @@ async def on_message(message):
         await message.channel.send(response_text)
 
 
+_REACTION_REWARD = {
+    "👍":  +1.0,
+    "❤️":  +1.0,
+    "🔥":  +1.0,
+    "😡":  -1.0,
+    "😢":  -0.5,
+}
+
+
+@client.event
+async def on_reaction_add(reaction, user):
+    """Map Discord reactions to FlyBrain rewards."""
+    if user == client.user:
+        return
+    # Only react to reactions on bot's own messages
+    if reaction.message.author != client.user:
+        return
+
+    reward = _REACTION_REWARD.get(str(reaction.emoji))
+    if reward is None or _fly_brain is None:
+        return
+
+    # Use current ring orientation as topic, low novelty for feedback
+    _fly_brain.step(
+        topic_angle_deg=_fly_brain.ring.orientation_deg,
+        novelty=0.1,
+        reward=reward,
+    )
+    print(f"[Discord Skill] FlyBrain updated: reward={reward}")
+
+
 # --- Daemon Setup ---
 
 
@@ -197,8 +235,13 @@ def _run_discord_loop():
 
 def init_skill_daemon():
     """Inicia o bot do Discord em background quando o assistente arranca."""
+    global _fly_brain
     if not hasattr(config, "DISCORD_BOT_TOKEN"):
         return
+
+    # Initialize FlyBrain for reaction feedback
+    store = FlyBrainStore(config_module.BRAIN_DB_PATH)
+    _fly_brain = FlyBrain(store=store)
 
     print("[Discord Skill] A iniciar daemon do Discord...")
     t = threading.Thread(target=_run_discord_loop, daemon=True)
