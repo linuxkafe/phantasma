@@ -189,7 +189,7 @@ _REACTION_REWARD = {
 
 @client.event
 async def on_reaction_add(reaction, user):
-    """Map Discord reactions to FlyBrain rewards."""
+    """Map Discord reactions to FlyBrain rewards and acknowledge."""
     if user == client.user:
         return
     # Only react to reactions on bot's own messages
@@ -207,6 +207,18 @@ async def on_reaction_add(reaction, user):
         reward=reward,
     )
     print(f"[Discord Skill] FlyBrain updated: reward={reward}")
+
+    # Acknowledge in Discord
+    try:
+        if reward > 0:
+            ack = "👍 Registado como reforço positivo."
+        elif reward < -0.5:
+            ack = "😡 Registado como punição forte."
+        else:
+            ack = "😢 Registado como punição leve."
+        await reaction.message.channel.send(ack, delete_after=10)
+    except Exception as e:
+        print(f"[Discord Skill] Falha ao enviar ack: {e}")
 
 
 # --- Daemon Setup ---
