@@ -398,13 +398,25 @@ def create_app(pipeline=None) -> Flask:
         }
 
         # Check Ollama connectivity — try primary then fallback, mirroring the
-        # runtime LLM chain (so the health check matches what chat() uses).
+        # runtime LLM chain in assistant.py (which probes reachability and
+        # fails over to the fallback host). Uses list() for reachability only,
+        # not check_connection(), which assumes a dict-based models API.
         try:
-            from src.pipeline.llm import OllamaLLM
+            import ollama
 
-            components["ollama"] = (
-                "healthy" if OllamaLLM().check_connection().success else "unhealthy"
-            )
+            llm_cfg = config.llm
+            hosts = [llm_cfg.host, llm_cfg.host_fallback]
+            if hosts[1] == hosts[0]:
+                hosts = hosts[:1]
+            alive = False
+            for host in hosts:
+                try:
+                    ollama.Client(host=host, timeout=2).list()
+                    alive = True
+                    break
+                except Exception:
+                    continue
+            components["ollama"] = "healthy" if alive else "unhealthy"
         except Exception:
             components["ollama"] = "unhealthy"
 
