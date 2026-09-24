@@ -486,7 +486,7 @@ class PhantasmaPipeline:
         for host, model in inference_targets:
             try:
                 logger.info(f"Trying Ollama: {host} (model: {model})")
-                client = ollama.Client(host=host)
+                client = ollama.Client(host=host, timeout=300.0)
                 response = client.chat(
                     model=model,
                     messages=[{"role": "user", "content": full_prompt}],

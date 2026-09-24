@@ -19,7 +19,7 @@ services:
       - ALSA_DEVICE_OUT=hw:0,0
       - OLLAMA_HOST_PRIMARY=http://10.0.0.128:11434
       - OLLAMA_HOST_FALLBACK=http://ollama:11434
-      - OLLAMA_MODEL_FALLBACK=phi3:mini
+      - OLLAMA_MODEL_FALLBACK=qwen3:8b
       - SEARXNG_URL=http://searxng:8080
       - SKILLS_DIR=/app/skills
       - MEMORY_DB_PATH=/app/data/memory.db
@@ -80,7 +80,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 10G
     command: serve
     healthcheck:
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/11434 && echo OK'"]
