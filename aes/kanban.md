@@ -76,6 +76,7 @@ current_ticket: T002
 |----|-------|--------|
 | T035 | Discord live bot: assistant-mode Flask API + `/comando` payload alignment (gap found in T034) | done |
 | T036 | Checkpoint: migrate `Skill` subclass contract incrementally (legacy adapter currently bridges) | pending |
+| T037 | Skill "o que ouves" (what_you_hear): microfone → Whisper → transcrição, resposta via TTS quando invocada por voz | done |
 
 ## Learning History
 | Date | Ticket | Insight |
