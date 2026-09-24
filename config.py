@@ -452,6 +452,9 @@ class Config:
 
         # Weather
         cfg.iqair_key = os.getenv("IQAIR_KEY", "")
+
+        # SearXNG
+        cfg.searxng_url = os.getenv("SEARXNG_URL", cfg.searxng_url)
         home_coords = os.getenv("HOME_COORDS")
         if home_coords:
             lat, lon = home_coords.split(",")

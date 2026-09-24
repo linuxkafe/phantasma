@@ -224,14 +224,20 @@ class PhantasmaPipeline:
 
         return None
 
-    def _process_feedback(self, text: str):
-        """Process feedback text and update FlyBrain neuromodulatory state.
+    def _apply_feedback_reward(self, text: str) -> Optional[float]:
+        """Apply FlyBrain reward/punishment if text holds feedback keywords.
 
-        Called during the feedback collection window after a response.
-        Checks for keywords and applies reward/punishment to FlyBrain.
+        Single shared reward path used by BOTH the voice feedback window
+        (_process_feedback) AND direct text/Discord conversations
+        (respond_to_text). Window-free on purpose: text/Discord input never
+        touches the voice feedback collection window state, so a direct
+        message can't interrupt or extend voice feedback collection.
 
         Args:
-            text: Transcribed user text during feedback window.
+            text: User text (e.g. "obrigado", "não percebi").
+
+        Returns:
+            The applied reward (+1/-1), or None if no feedback keyword.
         """
         reward = self._check_feedback_keywords(text)
         if reward is not None:
@@ -247,6 +253,18 @@ class PhantasmaPipeline:
             )
         else:
             logger.debug(f"No feedback keyword in: '{text}'")
+        return reward
+
+    def _process_feedback(self, text: str):
+        """Process feedback text and update FlyBrain neuromodulatory state.
+
+        Called during the feedback collection window after a response.
+        Checks for keywords and applies reward/punishment to FlyBrain.
+
+        Args:
+            text: Transcribed user text during feedback window.
+        """
+        self._apply_feedback_reward(text)
 
         # Exit feedback collection mode
         self._collecting_feedback = False
@@ -335,13 +353,49 @@ class PhantasmaPipeline:
         Returns:
             Response text, or None if no skill handled it and LLM failed.
         """
+        # Mirror voice feedback path: direct text/Discord conversations
+        # also reward FlyBrain ("obrigado" / "não percebi"). Window-free:
+        # never touches the voice feedback window state.
+        self._apply_feedback_reward(text)
+
         # Check skills first (intercept ++/-- and weather/tuya before LLM)
-        skill_response = self._skill_loader.execute_skill(text)
+        skill_response = self._execute_with_shared_audio_paused(text)
         if skill_response is not None:
             logger.info(f"Skill '{text}' handled: {skill_response}")
             return skill_response
 
         return self._respond_with_llm(text)
+
+    def _execute_with_shared_audio_paused(self, text: str) -> Optional[str]:
+        """Run a skill while the shared hotword capture is paused.
+
+        The skill (ex. skill_what_you_hear) needs exclusive access to the
+        USB capture PCM (pcmC0D0c) held by the shared AudioCapture that
+        powers the hotword/VAD listener. Opening a second capture stream
+        on the same device fails with PortAudio -9998
+        ("Invalid number of channels"). Pausing the shared capture around
+        the skill execution releases the PCM so the skill's own
+        AudioCapture can open it; the stream is resumed in a `finally`
+        so the hotword always comes back even if the skill raises.
+
+        Args:
+            text: User text (skill trigger, e.g. "o que ouves?").
+
+        Returns:
+            Skill response string, or None if no skill handled it.
+        """
+        if self.audio_capture:
+            pause = self.audio_capture.stop()
+            if not pause.success:
+                logger.warning(f"Could not pause hotword capture: {pause.error}")
+
+        try:
+            return self._skill_loader.execute_skill(text)
+        finally:
+            if self.audio_capture:
+                resume = self.audio_capture.start()
+                if not resume.success:
+                    logger.error(f"Could not resume hotword capture: {resume.error}")
 
     def _respond_with_llm(self, text: str) -> Optional[str]:
         """LLM fallback for text that no skill handled.
@@ -506,7 +560,7 @@ class PhantasmaPipeline:
         # Check skills first (intercept ++/-- before LLM). Skill responses
         # are spoken and returned early — no feedback window is opened so a
         # rapid follow-up command isn't swallowed as feedback.
-        skill_response = self._skill_loader.execute_skill(text)
+        skill_response = self._execute_with_shared_audio_paused(text)
         if skill_response is not None:
             logger.info(f"Skill '{text}' handled: {skill_response}")
             # Speak skill response via TTS

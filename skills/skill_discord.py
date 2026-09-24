@@ -189,10 +189,40 @@ _REACTION_REWARD = {
 
 @client.event
 async def on_reaction_add(reaction, user):
-    """Map Discord reactions to FlyBrain rewards and acknowledge."""
+    """Map Discord reactions to FlyBrain rewards and acknowledge (cached message)."""
+    await _handle_reaction(reaction, user)
+
+
+@client.event
+async def on_raw_reaction_add(payload):
+    """Handle reactions even when the message is not cached."""
+    # Ignore own reactions
+    if payload.user_id == client.user.id:
+        return
+    # Fetch channel, message, user
+    channel = client.get_channel(payload.channel_id)
+    if channel is None:
+        return
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except Exception:
+        return
+    user = client.get_user(payload.user_id)
+    if user is None:
+        return
+    # Build a fake reaction object compatible with handler
+    class _RawReaction:
+        def __init__(self, message, emoji):
+            self.message = message
+            self.emoji = emoji
+    reaction_obj = _RawReaction(message, payload.emoji)
+    await _handle_reaction(reaction_obj, user)
+
+
+async def _handle_reaction(reaction, user):
+    """Core reaction handling logic."""
     if user == client.user:
         return
-    # Only react to reactions on bot's own messages
     if reaction.message.author != client.user:
         return
 
@@ -200,7 +230,9 @@ async def on_reaction_add(reaction, user):
     if reward is None or _fly_brain is None:
         return
 
-    # Use current ring orientation as topic, low novelty for feedback
+    print(f"[Discord Skill] Reaction {reaction.emoji} from {user} -> reward={reward}")
+
+    # Apply to FlyBrain
     _fly_brain.step(
         topic_angle_deg=_fly_brain.ring.orientation_deg,
         novelty=0.1,
@@ -217,6 +249,7 @@ async def on_reaction_add(reaction, user):
         else:
             ack = "😢 Registado como punição leve."
         await reaction.message.channel.send(ack, delete_after=10)
+        print("[Discord Skill] Ack sent")
     except Exception as e:
         print(f"[Discord Skill] Falha ao enviar ack: {e}")
 
@@ -254,6 +287,7 @@ def init_skill_daemon():
     # Initialize FlyBrain for reaction feedback
     store = FlyBrainStore(config_module.BRAIN_DB_PATH)
     _fly_brain = FlyBrain(store=store)
+    print(f"[Discord Skill] FlyBrain inicializado: {_fly_brain is not None}")
 
     print("[Discord Skill] A iniciar daemon do Discord...")
     t = threading.Thread(target=_run_discord_loop, daemon=True)

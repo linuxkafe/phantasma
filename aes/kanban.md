@@ -77,6 +77,10 @@ current_ticket: T002
 | T035 | Discord live bot: assistant-mode Flask API + `/comando` payload alignment (gap found in T034) | done |
 | T036 | Checkpoint: migrate `Skill` subclass contract incrementally (legacy adapter currently bridges) | pending |
 | T037 | Skill "o que ouves" (what_you_hear): microfone → Whisper → transcrição, resposta via TTS quando invocada por voz | done |
+| T038 | Live-daemon PortAudio input blindness: throwaway image captures rms=47 but live app input stream fails -9998 (query_devices in live shows max_input_channels=0 on all devices) | done |
+| T039 | Design: base de dados única com grafos (memory.db + flybrain.db + claims) | pending |
+| T040 | Feedback por texto (Discord/REST) via helper partilhado `_apply_feedback_reward` (janela voz intacta) | done |
+| T041 | Persistência configurável `PHANTASMA_DATA_DIR` no docker-compose (default `./data`) | done |
 
 ## Learning History
 | Date | Ticket | Insight |

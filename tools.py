@@ -5,7 +5,7 @@ def search_with_searxng(prompt, max_results=3):
     """
     Pesquisa na web usando SearxNG e retorna snippets de contexto.
     """
-    if not config.SEARXNG_URL:
+    if not config.config.searxng_url:
         return ""  # Ignora se a URL não estiver definida
 
     print(f"A pesquisar na web (SearxNG): '{prompt}'")
@@ -17,7 +17,7 @@ def search_with_searxng(prompt, max_results=3):
 
         client = httpx.Client(timeout=10.0, headers=headers)
         response = client.get(
-            f"{config.SEARXNG_URL}/search",
+            f"{config.config.searxng_url}/search",
             params={"q": prompt, "format": "json"},
         )
         response.raise_for_status()
@@ -39,7 +39,7 @@ def search_with_searxng(prompt, max_results=3):
         return context_str
 
     except httpx.ConnectError:
-        print(f"ERRO (Web RAG): Não foi possível ligar ao SearxNG em {config.SEARXNG_URL}")
+        print(f"ERRO (Web RAG): Não foi possível ligar ao SearxNG em {config.config.searxng_url}")
         return ""
     except Exception as e:
         print(f"ERRO (Web RAG): Falha ao pesquisar no SearxNG: {e}")

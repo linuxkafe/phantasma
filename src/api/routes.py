@@ -397,13 +397,14 @@ def create_app(pipeline=None) -> Flask:
             "audio": "healthy",
         }
 
-        # Check Ollama connectivity
+        # Check Ollama connectivity — try primary then fallback, mirroring the
+        # runtime LLM chain (so the health check matches what chat() uses).
         try:
-            import ollama
+            from src.pipeline.llm import OllamaLLM
 
-            client = ollama.Client(host=config.llm.host)
-            client.list()
-            components["ollama"] = "healthy"
+            components["ollama"] = (
+                "healthy" if OllamaLLM().check_connection().success else "unhealthy"
+            )
         except Exception:
             components["ollama"] = "unhealthy"
 

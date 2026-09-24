@@ -15,7 +15,7 @@ services:
     env_file:
       - .env
     environment:
-      - ALSA_DEVICE_IN=hw:0,0
+      - ALSA_DEVICE_IN=0
       - ALSA_DEVICE_OUT=hw:0,0
       - OLLAMA_HOST_PRIMARY=http://10.0.0.128:11434
       - OLLAMA_HOST_FALLBACK=http://ollama:11434
@@ -28,8 +28,8 @@ services:
       - MUSIC_DIR=/app/audio/music
       - GREETING_PATH=/app/audio/greeting.wav
     volumes:
-      - ./data:/app/data
-      - ./data/whisper:/root/.cache/whisper
+      - ${PHANTASMA_DATA_DIR:-./data}:/app/data
+      - ${PHANTASMA_DATA_DIR:-./data}/whisper:/root/.cache/whisper
       - ./models:/app/models
       - ./audio:/app/audio
       - ./config.py:/app/config.py:ro
