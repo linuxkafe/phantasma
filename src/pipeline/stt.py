@@ -115,9 +115,7 @@ class WhisperSTT:
                     if wrong in lower_text:
                         lower_text = lower_text.replace(wrong, right)
                 if lower_text != text.lower():
-                    logger.info(
-                        f"STT phonetic fix applied: '{text}' -> '{lower_text}'"
-                    )
+                    logger.info(f"STT phonetic fix applied: '{text}' -> '{lower_text}'")
                     text = lower_text
 
             duration_ms = (time.perf_counter() - start) * 1000

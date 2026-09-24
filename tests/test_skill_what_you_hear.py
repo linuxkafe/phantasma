@@ -1,6 +1,6 @@
 """Tests for skill_what_you_hear (T036)."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 
@@ -22,32 +22,17 @@ def _make_skill():
 
 
 @patch("skills.skill_what_you_hear.config")
-@patch("skills.skill_what_you_hear.AudioCapture")
+@patch("skills.skill_what_you_hear.sd")
 @patch("skills.skill_what_you_hear.stt_transcribe")
-def test_what_you_hear_returns_transcription(
-    mock_stt, mock_audio_capture_class, mock_config
-):
+def test_what_you_hear_returns_transcription(mock_stt, mock_sd, mock_config):
     """Skill should capture audio, transcribe and return formatted text."""
-    # Arrange config values to make blocks_needed = 3
     mock_config.audio.sample_rate = 16000
-    mock_config.audio.block_size = 16000
-    mock_config.audio.channels = 1
-    mock_config.audio.dtype = "int16"
     mock_config.audio.device_in = 0
-    mock_config.pipeline.queue_maxsize = 10
 
-    mock_capture = MagicMock()
-    mock_audio_capture_class.return_value = mock_capture
-    mock_capture.start.return_value = Result.ok(None)
-
-    # Simulate 3 frames
-    frame = np.zeros(16000, dtype=np.int16)
-    mock_capture.get_frame.side_effect = [
-        Result.ok(frame),
-        Result.ok(frame),
-        Result.ok(frame),
-    ]
-    mock_capture.stop.return_value = None
+    # Mock sounddevice rec
+    audio_data = np.zeros(48000, dtype=np.int16)
+    mock_sd.rec.return_value = (audio_data, None)
+    mock_sd.wait.return_value = None
 
     # STT returns a transcription
     mock_stt.return_value = Result.ok("olá mundo")
@@ -59,31 +44,21 @@ def test_what_you_hear_returns_transcription(
 
     # Assert
     assert result == "Ouço: olá mundo"
-    mock_capture.start.assert_called_once()
-    assert mock_capture.get_frame.call_count >= 3
+    mock_sd.rec.assert_called_once()
     mock_stt.assert_called_once()
 
 
 @patch("skills.skill_what_you_hear.config")
-@patch("skills.skill_what_you_hear.AudioCapture")
+@patch("skills.skill_what_you_hear.sd")
 @patch("skills.skill_what_you_hear.stt_transcribe")
-def test_what_you_hear_handles_stt_failure(
-    mock_stt, mock_audio_capture_class, mock_config
-):
+def test_what_you_hear_handles_stt_failure(mock_stt, mock_sd, mock_config):
     """If STT fails, skill returns error message."""
     mock_config.audio.sample_rate = 16000
-    mock_config.audio.block_size = 16000
-    mock_config.audio.channels = 1
-    mock_config.audio.dtype = "int16"
     mock_config.audio.device_in = 0
-    mock_config.pipeline.queue_maxsize = 10
 
-    mock_capture = MagicMock()
-    mock_audio_capture_class.return_value = mock_capture
-    mock_capture.start.return_value = Result.ok(None)
-    frame = np.zeros(16000, dtype=np.int16)
-    mock_capture.get_frame.return_value = Result.ok(frame)
-    mock_capture.stop.return_value = None
+    audio_data = np.zeros(48000, dtype=np.int16)
+    mock_sd.rec.return_value = (audio_data, None)
+    mock_sd.wait.return_value = None
 
     mock_stt.return_value = Result.fail("STT error")
 
@@ -94,21 +69,15 @@ def test_what_you_hear_handles_stt_failure(
 
 
 @patch("skills.skill_what_you_hear.config")
-@patch("skills.skill_what_you_hear.AudioCapture")
-def test_what_you_hear_handles_capture_failure(mock_audio_capture_class, mock_config):
+@patch("skills.skill_what_you_hear.sd")
+def test_what_you_hear_handles_capture_failure(mock_sd, mock_config):
     """If audio capture fails to start, skill returns error."""
     mock_config.audio.sample_rate = 16000
-    mock_config.audio.block_size = 16000
-    mock_config.audio.channels = 1
-    mock_config.audio.dtype = "int16"
     mock_config.audio.device_in = 0
-    mock_config.pipeline.queue_maxsize = 10
 
-    mock_capture = MagicMock()
-    mock_audio_capture_class.return_value = mock_capture
-    mock_capture.start.return_value = Result.fail("device busy")
+    mock_sd.rec.side_effect = Exception("device busy")
 
     handle = _make_skill()
     result = handle("o que ouves", "o que ouves")
 
-    assert "Não consegui iniciar a captura" in result
+    assert "Não consegui processar o áudio" in result

@@ -27,6 +27,7 @@ dependencies = [
     "librosa",
     "discord",
     "dio-chacon-wifi-api",
+    "pyalsaaudio",
 ]
 optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff", "mypy"], dotenv = ["python-dotenv"]}
 
@@ -63,5 +64,6 @@ module = [
     "python_miio.*",
     "zeroconf.*",
     "librosa.*",
+    "alsaaudio.*",
 ]
 ignore_missing_imports = true

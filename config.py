@@ -27,13 +27,16 @@ from typing import Union
 class AudioConfig:
     """Audio hardware configuration."""
 
-    device_in: Union[int, str] = 0
+    device_in: Union[int, str] = "auto"
     device_out: str = "plughw:0,0"
     sample_rate: int = 16000
     channels: int = 1
     block_size: int = 1600
     dtype: str = "int16"
     volume_percent: int = 85
+    auto_detect: bool = True
+    disable_agc: bool = True
+    capture_volume: int = 85
 
 
 @dataclass
@@ -327,6 +330,13 @@ class Config:
         )
         cfg.audio.volume_percent = int(
             os.getenv("ALSA_VOLUME_PERCENT", str(cfg.audio.volume_percent))
+        )
+        cfg.audio.auto_detect = (
+            os.getenv("AUDIO_DEVICE_AUTO_DETECT", "true").lower() == "true"
+        )
+        cfg.audio.disable_agc = os.getenv("AUDIO_AGC_DISABLE", "true").lower() == "true"
+        cfg.audio.capture_volume = int(
+            os.getenv("AUDIO_CAPTURE_VOLUME", str(cfg.audio.capture_volume))
         )
 
         # VAD

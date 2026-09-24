@@ -59,8 +59,12 @@ class OllamaLLM:
         errors = []
         for label, client, model, host in (
             ("primary", self.client, self.model, self.host),
-            ("fallback", self._fallback_client, self.fallback_model,
-             self.fallback_host),
+            (
+                "fallback",
+                self._fallback_client,
+                self.fallback_model,
+                self.fallback_host,
+            ),
         ):
             if self.fallback_host == self.host and label == "fallback":
                 break
@@ -78,8 +82,12 @@ class OllamaLLM:
                 errors.append(str(e))
                 logger.warning(f"Ollama {label} unreachable ({host}): {e}")
         return Result.fail(
-            "Ollama connection failed (primary " + self.host + ", fallback "
-            + self.fallback_host + "): " + "; ".join(errors)
+            "Ollama connection failed (primary "
+            + self.host
+            + ", fallback "
+            + self.fallback_host
+            + "): "
+            + "; ".join(errors)
         )
 
     def chat(self, prompt: str, system_prompt: Optional[str] = None) -> Result:
@@ -106,8 +114,12 @@ class OllamaLLM:
         attempts = [("primary", self.client, self.model, self.host)]
         if self.fallback_host != self.host:
             attempts.append(
-                ("fallback", self._fallback_client, self.fallback_model,
-                 self.fallback_host)
+                (
+                    "fallback",
+                    self._fallback_client,
+                    self.fallback_model,
+                    self.fallback_host,
+                )
             )
 
         errors = []
