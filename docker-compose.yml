@@ -18,7 +18,8 @@ services:
       - ALSA_DEVICE_IN=hw:0,0
       - ALSA_DEVICE_OUT=hw:0,0
       - OLLAMA_HOST_PRIMARY=http://10.0.0.128:11434
-      - OLLAMA_HOST_FALLBACK=http://host.docker.internal:11434
+      - OLLAMA_HOST_FALLBACK=http://ollama:11434
+      - OLLAMA_MODEL_FALLBACK=phi3:mini
       - SEARXNG_URL=http://searxng:8080
       - SKILLS_DIR=/app/skills
       - MEMORY_DB_PATH=/app/data/memory.db
@@ -63,6 +64,44 @@ services:
       - phantasma-net
     depends_on:
       - searxng
+      - ollama
+
+  # Ollama fallback - small Portuguese-capable model for HP Mini PC 600
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ./ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - phantasma-net
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+    command: serve
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/11434 && echo OK'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Ollama model pull (runs once after ollama is healthy)
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["/bin/sh","-c","ollama pull phi3:mini && echo 'model pulled'"]
+    networks:
+      - phantasma-net
+    restart: "no"
 
   # SearXNG search engine
   searxng:
