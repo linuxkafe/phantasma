@@ -639,7 +639,7 @@ def create_app(pipeline=None) -> Flask:
             devices = []
 
             # Tuya devices
-            for name, cfg in config.TUYA_DEVICES.items():
+            for name, cfg in config.tuya_devices.items():
                 dtype = "tuya_light" if "luz" in name.lower() else "tuya_switch"
                 devices.append(
                     DeviceInfo(
@@ -648,7 +648,7 @@ def create_app(pipeline=None) -> Flask:
                 )
 
             # Xiaomi devices
-            for name, cfg in config.MIIO_DEVICES.items():
+            for name, cfg in config.miio_devices.items():
                 dtype = "xiaomi_vacuum" if "robot" in name.lower() else "xiaomi_light"
                 devices.append(
                     DeviceInfo(
@@ -681,11 +681,11 @@ def create_app(pipeline=None) -> Flask:
             ctrl_req = DeviceControlRequest(**data)
 
             # Find device in config
-            if name in config.TUYA_DEVICES:
-                _ = config.TUYA_DEVICES[name]  # device_cfg
+            if name in config.tuya_devices:
+                _ = config.tuya_devices[name]  # device_cfg
                 _ = "tuya"  # device_type
-            elif name in config.MIIO_DEVICES:
-                _ = config.MIIO_DEVICES[name]  # device_cfg
+            elif name in config.miio_devices:
+                _ = config.miio_devices[name]  # device_cfg
                 _ = "xiaomi"  # device_type
             else:
                 return jsonify(

@@ -107,11 +107,13 @@ class Skill(ABC):
             True if any trigger matches according to TRIGGER_TYPE.
         """
         if self.TRIGGER_TYPE == TriggerType.EXACT:
-            return text.strip() in self.TRIGGERS
+            return text.strip().lower() in [t.lower() for t in self.TRIGGERS]
         elif self.TRIGGER_TYPE == TriggerType.STARTSWITH:
-            return any(text.strip().startswith(t) for t in self.TRIGGERS)
+            return any(
+                text.strip().lower().startswith(t.lower()) for t in self.TRIGGERS
+            )
         elif self.TRIGGER_TYPE == TriggerType.CONTAINS:
-            return any(t in text.strip() for t in self.TRIGGERS)
+            return any(t.lower() in text.strip().lower() for t in self.TRIGGERS)
         elif self.TRIGGER_TYPE == TriggerType.REGEX:
             import re
 

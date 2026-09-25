@@ -180,7 +180,8 @@ class HotwordDetector:
             )
             audio_features_kwargs = {"sr": sample_rate, "ncpu": 1}
             self.oww_model = openwakeword.model.Model(
-                wakeword_model_paths=custom_paths,
+                wakeword_models=custom_paths,
+                inference_framework="onnx",
                 **audio_features_kwargs,
             )
             return
@@ -204,7 +205,8 @@ class HotwordDetector:
         audio_features_kwargs = {"sr": sample_rate, "ncpu": 1}
 
         self.oww_model = openwakeword.model.Model(
-            wakeword_model_paths=filtered_paths if filtered_paths else model_paths,
+            wakeword_models=filtered_paths if filtered_paths else model_paths,
+            inference_framework="onnx",
             **audio_features_kwargs,
         )
 

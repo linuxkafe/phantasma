@@ -5,10 +5,9 @@ transcrevendo via Whisper e devolvendo a transcrição.
 Se invocado via voz, o assistente fará o TTS da resposta automaticamente.
 """
 
-import numpy as np
+import sounddevice as sd
 
 from config import config
-from src.pipeline.audio import AudioCapture
 from src.pipeline.stt import transcribe as stt_transcribe
 from src.pipeline.utils import logger
 
@@ -31,44 +30,25 @@ def handle(user_prompt_lower: str, user_prompt_full: str) -> str:
     """
     logger.info("Skill 'what_you_hear' ativada: a capturar áudio...")
 
-    # Configuração de captura a partir do config
-    capture = AudioCapture(
-        device=config.audio.device_in,
-        sample_rate=config.audio.sample_rate,
-        channels=config.audio.channels,
-        block_size=config.audio.block_size,
-        dtype=config.audio.dtype,
-        queue_maxsize=config.pipeline.queue_maxsize,
-    )
-
-    start_res = capture.start()
-    if not start_res.success:
-        logger.error(f"Falha ao iniciar captura de áudio: {start_res.error}")
-        return "Não consegui iniciar a captura de áudio."
-
     try:
-        # Calcula número de blocos necessários
-        blocks_needed = int(
-            CAPTURE_SECONDS * config.audio.sample_rate / config.audio.block_size
-        )
-        frames = []
-        for _ in range(blocks_needed):
-            res = capture.get_frame(timeout=1.0)
-            if not res.success:
-                continue
-            frames.append(res.data)
-            if len(frames) >= blocks_needed:
-                break
+        sample_rate = config.audio.sample_rate
+        device = config.audio.device_in
+        duration = CAPTURE_SECONDS
 
-        if not frames:
+        logger.info(f"Capturando {duration}s de áudio...")
+        audio_data = sd.rec(
+            int(duration * sample_rate),
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            device=device,
+        )
+        sd.wait()
+
+        if audio_data.size == 0:
             return "Não consegui capturar áudio."
 
-        audio_data = np.concatenate(frames)
-
-        # Limita duração máxima
-        max_samples = int(CAPTURE_SECONDS * config.audio.sample_rate)
-        if len(audio_data) > max_samples:
-            audio_data = audio_data[:max_samples]
+        audio_data = audio_data.flatten()
 
         # Transcrição
         stt_result = stt_transcribe(audio_data)
@@ -83,5 +63,6 @@ def handle(user_prompt_lower: str, user_prompt_full: str) -> str:
         logger.info(f"Transcrição: {text}")
         return f"Ouço: {text}"
 
-    finally:
-        capture.stop()
+    except Exception as e:
+        logger.error(f"Erro na captura/ transcrição: {e}")
+        return "Não consegui processar o áudio."

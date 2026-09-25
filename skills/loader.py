@@ -72,13 +72,14 @@ class LegacySkillAdapter(Skill):
         if not triggers:
             return False
         t = self.TRIGGER_TYPE
-        stripped = text.strip()
+        stripped = text.strip().lower()
+        triggers_lower = [x.lower() for x in triggers]
         if t == TriggerType.EXACT:
-            return stripped in triggers
+            return stripped in triggers_lower
         if t == TriggerType.STARTSWITH:
-            return any(stripped.startswith(x) for x in triggers)
+            return any(stripped.startswith(x) for x in triggers_lower)
         if t == TriggerType.CONTAINS:
-            return any(x in stripped for x in triggers)
+            return any(x in stripped for x in triggers_lower)
         if t == TriggerType.REGEX:
             import re
 

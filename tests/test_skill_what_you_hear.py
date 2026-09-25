@@ -31,7 +31,7 @@ def test_what_you_hear_returns_transcription(mock_stt, mock_sd, mock_config):
 
     # Mock sounddevice rec
     audio_data = np.zeros(48000, dtype=np.int16)
-    mock_sd.rec.return_value = (audio_data, None)
+    mock_sd.rec.return_value = audio_data
     mock_sd.wait.return_value = None
 
     # STT returns a transcription
@@ -57,7 +57,7 @@ def test_what_you_hear_handles_stt_failure(mock_stt, mock_sd, mock_config):
     mock_config.audio.device_in = 0
 
     audio_data = np.zeros(48000, dtype=np.int16)
-    mock_sd.rec.return_value = (audio_data, None)
+    mock_sd.rec.return_value = audio_data
     mock_sd.wait.return_value = None
 
     mock_stt.return_value = Result.fail("STT error")

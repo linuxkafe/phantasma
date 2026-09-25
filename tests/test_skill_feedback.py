@@ -61,6 +61,30 @@ def test_feedback_skill_uses_current_orientation():
     assert abs(brain.ring.orientation_deg - 45.0) < 20.0
 
 
+def test_skill_matching_is_case_insensitive():
+    """Triggers match regardless of user capitalization (Discord/UI text).
+
+    Legacy CONTAINS triggers e.g. "o que ouves" must match "O que ouves?".
+    """
+    from skills.base import SkillContext
+    from skills.loader import SkillLoader
+
+    skills_dir = str(Path(__file__).parent.parent / "skills")
+    loader = SkillLoader(skills_dir, SkillContext())
+    skills = loader.load_all()
+
+    wyth = next((s for s in skills if s.NAME == "skill_what_you_hear"), None)
+    assert wyth is not None
+    assert wyth.matches("O que ouves?") is True
+    assert wyth.matches("O que escutas?") is True
+    assert wyth.matches("O QUE ESTÁS A OUVIR") is True
+
+    weather = next((s for s in skills if s.NAME == "skill_weather"), None)
+    assert weather is not None
+    assert weather.matches("Como está o tempo?") is True
+    assert weather.matches("COMO ESTÁ O TEMPO?") is True
+
+
 def test_skill_loader_loads_feedback_skill():
     """SkillLoader discovers and loads skill_feedback.py from actual skills dir.
 
