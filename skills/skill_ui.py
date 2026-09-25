@@ -23,7 +23,7 @@ def handle_request():
     <html lang="pt">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Phantasma UI</title>
         <style>
             :root { --bg-color: #121212; --chat-bg: #1e1e1e; --user-msg: #2d2d2d; --ia-msg: #005a9e; --text: #e0e0e0; }
@@ -188,6 +188,34 @@ def handle_request():
             #cli-help { background: #111; border-top: 1px solid #333; max-height: 0; overflow: hidden; transition: max-height 0.3s; }
             #cli-help.open { max-height: 200px; overflow-y: auto; padding: 10px; }
             #help-toggle { text-align: center; font-size: 0.8rem; color: #666; padding: 5px; cursor: pointer; }
+
+            /* --- MOBILE (≤ 768px) --- */
+            @media (max-width: 768px) {
+                #header-strip { flex-direction: column; height: auto; min-height: 0; }
+                #brand {
+                    width: 100%; height: auto; flex-direction: row; align-items: center;
+                    justify-content: space-between; border-right: none; padding: 8px 12px;
+                }
+                #sky-stage { margin-bottom: 0; gap: 8px; }
+                #ghost-stage { margin-bottom: 0; }
+                #brand-logo { font-size: 2.2rem; }
+                #aqi-indicator { right: -8px; bottom: 2px; font-size: 1rem; }
+                #brand-name { font-size: 0.75rem; }
+                #power-display { font-size: 1.1rem; }
+                #topbar {
+                    width: 100%; padding: 10px; box-sizing: border-box;
+                    height: auto; align-content: flex-start;
+                    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+                }
+                .device-room { margin-right: 10px; margin-bottom: 0; padding-right: 10px; flex-shrink: 0; }
+                .device-toggle, .device-sensor { min-width: 60px; height: 52px; }
+                .device-icon { font-size: 1.2rem; }
+                .sensor-data, .device-label, .sensor-label, .room-header { font-size: 0.75rem; line-height: 1.15; }
+                .room-content { width: max-content; max-width: none; }
+                #chat-input { font-size: 16px; }
+                .msg { max-width: 92%; font-size: 1.05rem; }
+                #cli-help.open { max-height: 150px; }
+            }
         </style>
     </head>
     <body>

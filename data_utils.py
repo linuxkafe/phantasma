@@ -38,16 +38,15 @@ def setup_database():
 
 # --- RAG (MEMÓRIA DE LONGO PRAZO) ---
 def save_to_rag(text):
-    """
-    Guarda o texto na base de dados RAG (memória de longo prazo) com a
-    limpeza minima para nao indexar respostas vazias ou a persona.
+    """Guarda texto simples ou JSON estruturado pelas skills no RAG.
+
+    Ignora entradas vazias ou demasiado curtas para não indexar ruído.
     """
     if not text or not text.strip():
         return
     clean_text = text.strip()
     if len(clean_text) > 5:
         try:
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
             conn = sqlite3.connect(config.DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
@@ -67,8 +66,10 @@ def save_fact_to_rag(text):
 
 
 def retrieve_from_rag(prompt, max_results=5):
-    """
-    Recupera memórias relevantes com TIMESTAMPS para dar contexto temporal.
+    """Recupera factos por relevância léxica, ordenados cronologicamente (DESC).
+
+    Devolve apenas conteúdo bruto, sem cabeçalho descritivo, para não
+    confundir o LLM externo. O assistant.py trata da sanitização final.
     """
     try:
         # Filtro de palavras curtas para evitar ruído
@@ -79,49 +80,48 @@ def retrieve_from_rag(prompt, max_results=5):
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
 
-        query_parts = []
-        params = []
-        for word in keywords:
-            query_parts.append("text LIKE ?")
-            params.append(f"%{word}%")
+        query_parts = ["text LIKE ?"] * len(keywords)
+        params = [f"%{word}%" for word in keywords]
 
-        sql_query = (
-            f"SELECT timestamp, text FROM memories "
-            f"WHERE {' OR '.join(query_parts)} "
-            f"ORDER BY timestamp DESC LIMIT {max_results}"
+        # Ordenação DESC garante que os factos mais recentes (Bimby)
+        # aparecem antes dos antigos (Ophiuchus) no contexto do LLM.
+        sql = (
+            "SELECT text FROM memories WHERE "
+            f"{' OR '.join(query_parts)} ORDER BY timestamp DESC LIMIT {max_results}"
         )
 
-        cursor.execute(sql_query, params)
+        cursor.execute(sql, params)
         results = cursor.fetchall()
         conn.close()
 
         if results:
-            context_str = "MEMÓRIAS PESSOAIS DO UTILIZADOR (Ordenadas da mais recente para a antiga):\n"
-            context_str += "NOTA: Se houver contradições, a informação com a DATA MAIS RECENTE é a verdadeira.\n\n"
-
-            for row in results:
-                ts = row[0]
-                try:
-                    if isinstance(ts, str):
-                        ts = ts.split(".")[0]  # Limpa milissegundos
-                except Exception:
-                    pass
-
-                context_str += f"- [{ts}] {row[1]}\n"
-
             print("RAG: Contexto recuperado.")
-            return context_str
-        else:
-            return ""
+            return "\n".join([row[0] for row in results])
+        return ""
 
     except Exception as e:
         print(f"ERRO: Falha ao recuperar da BD RAG: {e}")
         return ""
 
 
+# --- MANUTENÇÃO (PURGA DE RUÍDO) ---
+def purge_poisoned_memories():
+    """Remove entradas com alucinações poéticas recorrentes do RAG."""
+    bad_patterns = ["Sombra", "Fúria da Memória", "Silêncio", "Eco das sombras"]
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        for pattern in bad_patterns:
+            cursor.execute("DELETE FROM memories WHERE text LIKE ?", (f"%{pattern}%",))
+        conn.commit()
+        count = conn.total_changes
+        conn.close()
+        return f"Limpeza concluída: {count} memórias envenenadas removidas."
+    except Exception as e:
+        return f"Erro na limpeza: {e}"
+
+
 # --- CACHE (RESPOSTAS RÁPIDAS) ---
-
-
 def get_cached_response(prompt):
     """Tenta recuperar uma resposta exata da cache (válida por 24h)."""
     try:
@@ -134,13 +134,12 @@ def get_cached_response(prompt):
         conn.close()
 
         if row:
-            response, timestamp_str = row
+            response, ts = row
+            # Validade de 24 horas para evitar respostas obsoletas
             try:
-                cached_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
-                if datetime.now() - cached_time < timedelta(hours=24):
-                    print("CACHE: Resposta recuperada da base de dados.")
+                if datetime.now() - datetime.fromisoformat(ts) < timedelta(hours=24):
                     return response
-            except Exception:
+            except ValueError:
                 return response
         return None
     except Exception as e:
@@ -156,8 +155,9 @@ def save_cached_response(prompt, response):
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO cache (prompt, response, timestamp) VALUES (?, ?, ?)",
-            (prompt, response, datetime.now()),
+            "INSERT OR REPLACE INTO cache (prompt, response, timestamp) "
+            "VALUES (?, ?, ?)",
+            (prompt, response, datetime.now().isoformat()),
         )
         conn.commit()
         conn.close()
