@@ -28,6 +28,9 @@ memory.db
 data/
 *.orig
 
+# Ollama local models (bind-mounted ./ollama-data:/root/.ollama) — 9.3G weights, never versioned
+ollama-data/
+
 # Deployment scripts and logs (generated at deploy time)
 deployment-log-*.txt
 .deployment-backup-*/
