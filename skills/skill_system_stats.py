@@ -1,9 +1,9 @@
-import psutil
-import time
-import threading
 import json
 import os
-import config
+import threading
+import time
+
+import psutil
 
 TRIGGER_TYPE = "contains"
 # Gatilhos de sistema

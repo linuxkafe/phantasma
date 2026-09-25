@@ -111,10 +111,11 @@ class TestHotwordDetector:
         # Should filter to only requested models
         call_args = mock_model_class.call_args
         assert call_args is not None
-        model_paths = call_args.kwargs["wakeword_model_paths"]
+        model_paths = call_args.kwargs["wakeword_models"]
         assert len(model_paths) == 2
         assert any("hey_jarvis" in p for p in model_paths)
         assert any("alexa" in p for p in model_paths)
+        assert call_args.kwargs["inference_framework"] == "onnx"
 
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
     @patch("src.pipeline.audio.openwakeword.model.Model")
@@ -134,8 +135,9 @@ class TestHotwordDetector:
         # the pretrained fallback is NOT consulted.
         call_args = mock_model_class.call_args
         assert call_args is not None
-        model_paths = call_args.kwargs["wakeword_model_paths"]
+        model_paths = call_args.kwargs["wakeword_models"]
         assert model_paths == custom
+        assert call_args.kwargs["inference_framework"] == "onnx"
         mock_get_paths.assert_not_called()
 
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
@@ -179,7 +181,8 @@ class TestHotwordDetector:
         HotwordDetector(models=["/app/models/missing.onnx"])
 
         call_args = mock_model_class.call_args
-        model_paths = call_args.kwargs["wakeword_model_paths"]
+        model_paths = call_args.kwargs["wakeword_models"]
+        assert call_args.kwargs["inference_framework"] == "onnx"
         assert model_paths == ["/models/hey_jarvis.onnx"]
 
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")

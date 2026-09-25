@@ -1,5 +1,7 @@
 import httpx
+
 import config
+
 
 def search_with_searxng(prompt, max_results=3):
     """

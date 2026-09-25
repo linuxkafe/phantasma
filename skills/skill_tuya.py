@@ -1,15 +1,15 @@
-import config
-import time
 import json
 import os
 import socket
-import sys
-import threading
 import tempfile
+import threading
+import time
+
+import config
 
 try:
     import tinytuya
-    from tinytuya import OutletDevice, Device 
+    from tinytuya import Device, OutletDevice
 except ImportError:
     print("AVISO: Biblioteca 'tinytuya' não encontrada.")
     class Device: pass
@@ -19,9 +19,9 @@ except ImportError:
 TRIGGER_TYPE = "contains"
 CACHE_FILE = "/opt/phantasma/cache/tuya_cache.json"
 PORTS_TO_LISTEN = [6666, 6667]
-POLL_COOLDOWN = 10 
+POLL_COOLDOWN = 10
 LAST_POLL = {}
-VERBOSE_LOGGING = False 
+VERBOSE_LOGGING = False
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
@@ -71,7 +71,7 @@ def _get_device_name_by_ip(ip):
 
 def _poll_device_task(name, details, force=False):
     ip = details.get('ip')
-    if not ip or ip.endswith('x'): return 
+    if not ip or ip.endswith('x'): return
     global LAST_POLL
     if not force and (time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN): return
     LAST_POLL[name] = time.time()
@@ -139,13 +139,13 @@ def handle(user_prompt_lower, user_prompt_full):
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
             targets.append((nick, conf))
-    
+
     # 2. Lógica inteligente para Sensores e Locais
     if not targets:
         locations = ["sala", "quarto", "wc", "cozinha", "entrada"]
         mentioned_loc = next((loc for loc in locations if loc in user_prompt_lower), None)
         is_sensor_query = any(x in user_prompt_lower for x in ["temperatura", "humidade"])
-        
+
         for nick, conf in config.TUYA_DEVICES.items():
             nick_l = nick.lower()
             if mentioned_loc and mentioned_loc in nick_l:
@@ -182,19 +182,19 @@ def handle(user_prompt_lower, user_prompt_full):
             d = OutletDevice(conf['id'], conf['ip'], conf['key'])
             d.set_version(3.3); d.set_socketTimeout(2)
             idx = 20 if any(x in nick.lower() for x in ["luz", "lâmpada", "candeeiro"]) else 1
-            
+
             # Executa sem esperar retorno (nowait=True não retorna bool útil)
             d.set_value(idx, action == "on", nowait=True)
-            
+
             # Se não houve exceção, contamos como sucesso
             success += 1
             print(f"[Tuya] {nick} -> {action}")
-        except Exception as e: 
+        except Exception as e:
             print(f"[Tuya] Erro ao controlar {nick}: {e}")
             continue
 
     action_pt = "ligado" if action == "on" else "desligado"
-    
+
     if len(targets) > 1:
         return f"{success} dispositivos {action_pt}s."
     elif len(targets) == 1:

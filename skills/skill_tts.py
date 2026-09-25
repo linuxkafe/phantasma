@@ -15,7 +15,7 @@ def handle(p_low, prompt):
         message = prompt[4:].strip()
         if message:
             return message
-            
+
     return "Não me disseste o que é para dizer."
 
 def get_status_for_device(nickname):

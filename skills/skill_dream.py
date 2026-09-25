@@ -1,28 +1,30 @@
 # vim skill_dream.py
 
+import ast  # Essencial para lidar com aspas simples do LLM
+import datetime
+import json
+import os
+import random
+import re
+import sqlite3
 import threading
 import time
-import datetime
-import random
-import sqlite3
-import json
-import re
-import os
-import ast  # Essencial para lidar com aspas simples do LLM
+
 import ollama
+
 import config
-from tools import search_with_searxng
 from data_utils import save_to_rag
+from tools import search_with_searxng
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
 TRIGGERS = ["vai sonhar", "aprende algo", "desenvolve a persona", "sonho lúcido", "notícias", "novidades"]
 
-DREAM_TIME = "02:30" 
+DREAM_TIME = "02:30"
 LUCID_DREAM_CHANCE = 0
 
 # Variável de controlo global (Prioridade ao OFF)
-DREAM_ENABLED = True 
+DREAM_ENABLED = True
 
 # --- Helper de Inferência com Failover ---
 
@@ -32,7 +34,7 @@ def _safe_ollama_chat(prompt, system_instruction=""):
         (getattr(config, 'OLLAMA_HOST_PRIMARY', None), getattr(config, 'OLLAMA_MODEL_PRIMARY', 'llama3:8b-instruct-8k')),
         (getattr(config, 'OLLAMA_HOST_FALLBACK', 'http://localhost:11434'), getattr(config, 'OLLAMA_MODEL_FALLBACK', 'llama3:8b-instruct-8k'))
     ]
-    
+
     for host, model in targets:
         try:
             client = ollama.Client(host=host, timeout=config.OLLAMA_TIMEOUT)
@@ -40,7 +42,7 @@ def _safe_ollama_chat(prompt, system_instruction=""):
             if system_instruction:
                 messages.append({'role': 'system', 'content': system_instruction})
             messages.append({'role': 'user', 'content': prompt})
-            
+
             resp = client.chat(model=model, messages=messages)
             return resp['message']['content']
         except Exception as e:
@@ -87,10 +89,10 @@ def _consolidate_memories():
             f"3. Retorna APENAS um objeto JSON com o campo 'memoria_consolidada'.\n"
             f"Input: {json.dumps(memory_bundle)}"
         )
-        
+
         ans = _safe_ollama_chat(prompt, "És o Arquiteto de Memória do Phantasma. Sê melancólico e preciso.")
         merged = _extract_json(ans)
-        
+
         if merged and 'memoria_consolidada' in merged:
             cursor.execute(f"DELETE FROM memories WHERE id IN ({','.join(['?']*len(ids_to_purge))})", ids_to_purge)
             save_to_rag(merged['memoria_consolidada'])
@@ -102,7 +104,7 @@ def _consolidate_memories():
 def _perform_news_dream():
     """ Procura notícias reais, ignorando metadados de sites. """
     print("📰 [Dream] A sintonizar frequências do mundo exterior...")
-    
+
     # Criamos uma query mais agressiva para evitar resultados genéricos
     query_prompt = (
         "Gera uma única query de pesquisa focada em acontecimentos reais e recentes "
@@ -110,9 +112,9 @@ def _perform_news_dream():
         "Evita nomes de sites. Apenas a query, sem aspas."
     )
     query = _safe_ollama_chat(query_prompt, "Especialista em Pesquisa.")
-    
+
     if not query: return
-    
+
     results = search_with_searxng(query.strip(), max_results=5)
     if not results: return
 
@@ -126,10 +128,10 @@ def _perform_news_dream():
         f"4. Formato JSON: {{'noticias': ['facto 1', 'facto 2'], 'tags': ['lista']}}\n"
         f"Contexto: {results}"
     )
-    
+
     ans = _safe_ollama_chat(extract_prompt, "Analista de Atualidade Melancólico.")
     data = _extract_json(ans)
-    
+
     if data and 'noticias' in data:
         for noticia in data['noticias']:
             # Guardamos cada notícia como uma memória individual para o RAG
@@ -145,12 +147,12 @@ def _perform_web_dream():
         cursor.execute("SELECT text FROM memories WHERE text NOT LIKE '%{%%' ORDER BY RANDOM() LIMIT 1")
         row = cursor.fetchone()
         conn.close()
-        
+
         if not row: return
-        
+
         deep_prompt = f"Com base nesta memória: '{row[0]}', gera uma query para pesquisar detalhes técnicos ou históricos profundos sobre o tema. Apenas a query."
         query = _safe_ollama_chat(deep_prompt, "Investigador Obscuro.")
-        
+
         if query:
             results = search_with_searxng(query.strip(), max_results=3)
             internal_prompt = f"Resume 2 factos avançados sobre este tema em Português. JSON: {{'conhecimento': '...', 'tags': []}}. Contexto: {results}"
@@ -171,16 +173,16 @@ def perform_dreaming(mode="auto"):
 
     # A consolidação corre sempre para manter a sanidade da DB
     _consolidate_memories()
-    
-    if mode == "news": 
+
+    if mode == "news":
         _perform_news_dream()
-    elif mode == "web": 
+    elif mode == "web":
         _perform_web_dream()
     else:
         # No modo automático, decide entre notícias ou pesquisa profunda
-        if random.random() < 0.6: 
+        if random.random() < 0.6:
             _perform_news_dream()
-        else: 
+        else:
             _perform_web_dream()
 
 def _daemon_loop():
@@ -207,7 +209,7 @@ def init_skill_daemon():
 
 def handle(user_prompt_lower, user_prompt_full):
     """ Interface de comando manual. """
-    
+
     # Lógica Prioritária: DESLIGAR
     if any(x in user_prompt_lower for x in ["desliga", "para", "para de sonhar", "cancela"]):
         globals()['DREAM_ENABLED'] = False
@@ -220,10 +222,10 @@ def handle(user_prompt_lower, user_prompt_full):
 
     # Comando imediato
     mode = "auto"
-    if any(x in user_prompt_lower for x in ["notícias", "novidades", "mundo"]): 
+    if any(x in user_prompt_lower for x in ["notícias", "novidades", "mundo"]):
         mode = "news"
-    elif any(x in user_prompt_lower for x in ["aprende", "pesquisa", "estuda"]): 
+    elif any(x in user_prompt_lower for x in ["aprende", "pesquisa", "estuda"]):
         mode = "web"
-    
+
     threading.Thread(target=perform_dreaming, args=(mode,)).start()
     return "Iniciando introspecção imediata. Vou fechar os olhos para ver melhor o mundo."

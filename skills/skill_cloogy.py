@@ -1,9 +1,10 @@
-import logging
-import httpx
-import time
-import threading
 import json
 import os
+import threading
+import time
+
+import httpx
+
 import config
 
 # --- Configuração ---
@@ -105,11 +106,11 @@ def get_status_for_device(nickname):
     cache = _load_cache()
     if target_id in cache:
         watts = cache[target_id]["val"]
-        
+
         # ALTERAÇÃO: Removida a lógica especial do forno.
         # Agora devolve sempre power_w se houver leitura.
         return {"state": "on", "power_w": round(watts, 1)}
-            
+
     return {"state": "unreachable"}
 
 # --- Interface Voz ---
@@ -153,8 +154,8 @@ def handle(user_prompt_lower, user_prompt_full):
 
     # FIX: Prioridade ao DESLIGAR para evitar conflito de string ("desliga" contém "liga")
     if is_off:
-        return f"Ok." if _set_state(target_id, False) else "Erro."
+        return "Ok." if _set_state(target_id, False) else "Erro."
     elif is_on:
-        return f"Ok." if _set_state(target_id, True) else "Erro."
+        return "Ok." if _set_state(target_id, True) else "Erro."
 
     return None

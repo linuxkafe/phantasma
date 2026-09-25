@@ -1,11 +1,10 @@
+import threading  # NOVO: Necessário para o daemon
+import time  # NOVO: Necessário para o polling e timestamps
+
 import config
-import time # NOVO: Necessário para o polling e timestamps
-import threading # NOVO: Necessário para o daemon
 
 try:
-    from miio import DeviceException
-    from miio import ViomiVacuum
-    from miio import Yeelight
+    from miio import DeviceException, ViomiVacuum, Yeelight
 except ImportError:
     print("AVISO: Biblioteca 'python-miio' não encontrada. A skill_xiaomi será desativada.")
     class Yeelight: pass
@@ -13,7 +12,7 @@ except ImportError:
     pass
 
 # --- CACHE GLOBAL (Em Memória) ---
-MIIO_CACHE = {} 
+MIIO_CACHE = {}
 POLL_INTERVAL = 60 # Poll a cada 60 segundos
 # -----------------------------------
 
@@ -37,7 +36,7 @@ def _get_triggers():
     device_names = []
     if hasattr(config, 'MIIO_DEVICES') and isinstance(config.MIIO_DEVICES, dict):
         device_names = list(config.MIIO_DEVICES.keys())
-    
+
     return device_names + LAMP_ON + LAMP_OFF + VACUUM_START + VACUUM_STOP + VACUUM_HOME
 
 TRIGGERS = _get_triggers()
@@ -67,7 +66,7 @@ def _poll_xiaomi_status():
     for nickname, details in config.MIIO_DEVICES.items():
         ip = details.get('ip'); token = details.get('token'); dev_type = _detect_device_type(nickname)
         if not ip or not token or not dev_type: continue
-        
+
         try:
             if dev_type == 'lamp':
                 # Ligação direta para obter o estado
@@ -81,16 +80,16 @@ def _poll_xiaomi_status():
                 dev = ViomiVacuum(ip, token)
                 status = dev.status()
                 # Se estiver a limpar ou a carregar (assumimos "on")
-                is_on = status.is_on 
+                is_on = status.is_on
                 _update_cache(nickname, 'on' if is_on else 'off')
-            
+
             print(f"[Xiaomi Daemon] Cache atualizada para {nickname}: {MIIO_CACHE[nickname]['state']}")
 
         except Exception as e:
-            # Em caso de falha (timeout), a cache não é atualizada. 
+            # Em caso de falha (timeout), a cache não é atualizada.
             # O estado antigo persiste, evitando o flicker.
             print(f"[Xiaomi Daemon] ERRO polling {nickname}: {e}")
-            pass 
+            pass
 
 def _poll_loop():
     """ Loop principal do Daemon Xiaomi (Roda no background). """
@@ -123,20 +122,20 @@ def handle(user_prompt_lower, user_prompt_full):
         if name.lower() in user_prompt_lower:
             matched_name = name
             matched_device = details
-            break 
-    
+            break
+
     if not matched_device:
-        return None 
+        return None
 
     dev_type = _detect_device_type(matched_name)
-    
+
     if not dev_type:
         print(f"Skill Xiaomi: Dispositivo '{matched_name}' encontrado, mas não sei se é luz ou aspirador.")
         return None
 
     ip = matched_device.get('ip')
     token = matched_device.get('token')
-    
+
     if not ip or not token:
         return f"O dispositivo {matched_name} não tem IP ou Token configurado."
 
@@ -153,13 +152,13 @@ def handle(user_prompt_lower, user_prompt_full):
 def _handle_lamp(name, ip, token, prompt):
     try:
         dev = Yeelight(ip, token)
-        
+
         if any(action in prompt for action in LAMP_OFF):
             dev.off()
             # Tenta atualizar cache imediatamente após a ação bem-sucedida
-            _update_cache(name, 'off') 
+            _update_cache(name, 'off')
             return f"{name.capitalize()} desligado."
-        
+
         if any(action in prompt for action in LAMP_ON):
             dev.on()
             _update_cache(name, 'on')
@@ -171,23 +170,23 @@ def _handle_lamp(name, ip, token, prompt):
     except Exception as e:
         print(f"ERRO Crítico Xiaomi ({name}): {e}")
         return f"Ocorreu um erro ao controlar o {name}."
-    
+
     return None
 
 def _handle_vacuum(name, ip, token, prompt):
     try:
         dev = ViomiVacuum(ip, token)
-        
+
         if any(action in prompt for action in VACUUM_HOME):
             dev.home()
             # O estado será "off" (na base) ou "on" (a voltar)
             return f"{name.capitalize()} a voltar à base."
-        
+
         if any(action in prompt for action in VACUUM_STOP):
             dev.stop()
             # O estado deve ser "off" (parado)
             return f"{name.capitalize()} parado."
-        
+
         if any(action in prompt for action in VACUUM_START):
             dev.start()
             # O estado deve ser "on" (a limpar)

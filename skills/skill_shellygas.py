@@ -1,14 +1,15 @@
 import httpx
+
 import config
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
 TRIGGERS = [
-    "alarme de gás", 
-    "alarme do gás", 
-    "sensor de gás", 
-    "sensor do gás", 
-    "nível do gás", 
+    "alarme de gás",
+    "alarme do gás",
+    "sensor de gás",
+    "sensor do gás",
+    "nível do gás",
     "está o gás",
     "estado do gás",
     "monóxido"
@@ -17,19 +18,19 @@ TRIGGERS = [
 # --- Lógica Principal (Voz) ---
 def handle(user_prompt_lower, user_prompt_full):
     """ Contacta o Shelly Gas para obter o estado via voz. """
-    
+
     if not hasattr(config, 'SHELLY_GAS_URL') or not config.SHELLY_GAS_URL:
         return "A skill do gás não está configurada."
-    
+
     try:
         client = httpx.Client(timeout=5.0)
         response = client.get(config.SHELLY_GAS_URL)
-        response.raise_for_status() 
+        response.raise_for_status()
         data = response.json()
-        
+
         gas_sensor = data.get('gas_sensor', {})
         concentration = data.get('concentration', {})
-        
+
         ppm = concentration.get('ppm')
         status = gas_sensor.get('sensor_state')
 
@@ -59,20 +60,20 @@ def get_status_for_device(nickname):
         response = client.get(config.SHELLY_GAS_URL)
         if response.status_code != 200:
             return {"state": "unreachable"}
-            
+
         data = response.json()
-        
+
         # Extração segura
         ppm = data.get('concentration', {}).get('ppm', 0)
         status_str = data.get('gas_sensor', {}).get('sensor_state', 'unknown')
-        
+
         # Mapeia para o formato que o frontend espera
         return {
             "state": "on",      # "on" para aparecer ativo (não cinzento)
             "ppm": ppm,         # Valor específico para mostrarmos no JS
             "status": status_str
         }
-        
+
     except Exception as e:
         print(f"ERRO Gas Status: {e}")
         return {"state": "unreachable"}

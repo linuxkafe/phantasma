@@ -10,7 +10,6 @@ to encode user utterances before feeding to FlyBrain.
 
 import hashlib
 import re
-import time
 from collections import deque
 
 import numpy as np

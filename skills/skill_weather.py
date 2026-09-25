@@ -1,12 +1,17 @@
 # skill_weather.py
-import re, httpx, unicodedata, config, json, os, time, threading
+import re
+import unicodedata
 from datetime import datetime
+
+import httpx
+
+import config
 
 TRIGGER_TYPE = "contains"
 TRIGGERS = ["tempo", "clima", "meteorologia", "previsão", "vai chover", "vai estar", "frio", "calor", "qualidade do ar"]
 
 CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
-POLL_INTERVAL = 1800 
+POLL_INTERVAL = 1800
 
 DEFAULT_CITY_ID = getattr(config, 'IPMA_GLOBAL_ID', 1131200)
 DEFAULT_CITY_NAME = getattr(config, 'CITY_NAME', "Porto")
@@ -69,18 +74,18 @@ def _get_ipma_warnings(city_id):
         url = "https://api.ipma.pt/open-data/forecast/warnings/warnings_www.json"
         resp = httpx.get(url, timeout=5.0)
         now = datetime.now().isoformat()
-        
+
         # FIX: Filtramos apenas avisos que NÃO sejam 'green'
         active = [
-            w['awarenessTypeName'].lower() 
-            for w in resp.json() 
-            if w.get('idAreaAviso') == area_code 
+            w['awarenessTypeName'].lower()
+            for w in resp.json()
+            if w.get('idAreaAviso') == area_code
             and w['startTime'] <= now <= w['endTime']
             and w.get('awarenessLevelID') != 'green'
         ]
-        
+
         return sorted(list(set(active)))[:2]
-    except: 
+    except:
         return []
 
 # --- Core da Skill ---
@@ -88,7 +93,7 @@ def _get_ipma_warnings(city_id):
 def handle(user_prompt_lower, user_prompt_full):
     target_city_norm = DEFAULT_CITY_NAME.lower()
     target_id = DEFAULT_CITY_ID
-    
+
     match = re.search(r'\b(no|na|em|para)\s+(?!(?:hoje|amanhã)\b)([A-Za-zÀ-ú\s]+)', user_prompt_lower)
     if match:
         city_extracted = _normalize(match.group(2))
@@ -108,18 +113,18 @@ def handle(user_prompt_lower, user_prompt_full):
             url_ipma = f"https://api.ipma.pt/open-data/forecast/meteorology/cities/daily/{target_id}.json"
             data_ipma = client.get(url_ipma).json()
             forecast = data_ipma['data'][day_index]
-            
+
             t_min, t_max = round(float(forecast['tMin'])), round(float(forecast['tMax']))
             precip = int(float(forecast.get('precipitaProb', '0')))
             w_desc = _get_weather_type_desc(forecast.get('idWeatherType')).lower()
-            
+
             # Dados de Ar e UV (Soluções abertas/Open-Meteo)
             lat, lon = forecast['latitude'], forecast['longitude']
             url_om = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=uv_index,us_aqi"
             m = client.get(url_om).json().get('current', {})
             uv_desc, _ = _get_uv_advice(m.get('uv_index'))
             aqi_desc, _ = _get_iqair_advice(m.get('us_aqi'))
-            
+
             # Obtenção de avisos com o novo filtro de gravidade
             avisos = _get_ipma_warnings(target_id)
             resp_prefix = f"Atenção, temos aviso de { ' e '.join(avisos) }. " if avisos else ""
@@ -142,11 +147,11 @@ def handle(user_prompt_lower, user_prompt_full):
 
             # Unificação de Ar e UV na resposta geral
             ar_uv = f" A qualidade do ar está {aqi_desc} e o UV está {uv_desc} ({m.get('uv_index')})."
-            
+
             res = f"{resp_prefix}{main}{ar_uv}"
-            if is_night: 
+            if is_night:
                 res += f" A lua está {_get_moon_phase()}."
-            
+
             return res
 
     except Exception as e:

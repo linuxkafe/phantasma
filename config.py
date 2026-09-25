@@ -320,10 +320,13 @@ class Config:
 
         # Audio
         device_in = os.getenv("ALSA_DEVICE_IN", str(cfg.audio.device_in))
-        try:
-            cfg.audio.device_in = int(device_in)
-        except ValueError:
-            cfg.audio.device_in = device_in  # Keep as string (device name)
+        if device_in == "":
+            cfg.audio.device_in = None
+        else:
+            try:
+                cfg.audio.device_in = int(device_in)
+            except ValueError:
+                cfg.audio.device_in = device_in  # Keep as string (device name)
         cfg.audio.device_out = os.getenv("ALSA_DEVICE_OUT", cfg.audio.device_out)
         cfg.audio.sample_rate = int(
             os.getenv("MIC_SAMPLERATE", str(cfg.audio.sample_rate))

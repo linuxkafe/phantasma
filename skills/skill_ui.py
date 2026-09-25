@@ -1,5 +1,6 @@
-import os
 import json
+import os
+
 from flask import jsonify
 
 TRIGGER_TYPE = "none"

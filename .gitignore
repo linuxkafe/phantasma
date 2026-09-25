@@ -27,3 +27,11 @@ memory.db
 # runtime data + model caches (memory DBs, Whisper/Piper weights registered at deploy time)
 data/
 *.orig
+
+# Deployment scripts and logs (generated at deploy time)
+deployment-log-*.txt
+.deployment-backup-*/
+audit-log-*.txt
+
+# Per-run artifacts (already covered by existing entries, but explicit)
+*.log

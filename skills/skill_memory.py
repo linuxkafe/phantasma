@@ -1,10 +1,12 @@
 # vim skill_memory.py
-import config
-import ollama
+import ast  # Para lidar com dicionários mal formatados
 import json
 import re
-import ast  # Para lidar com dicionários mal formatados
 from datetime import datetime
+
+import ollama
+
+import config
 from data_utils import save_to_rag
 
 TRIGGER_TYPE = "startswith"
@@ -27,12 +29,12 @@ def _safe_ollama_chat(prompt):
 def handle(user_prompt_lower, user_prompt_full):
     trigger_found = next((t for t in TRIGGERS if user_prompt_lower.startswith(t)), None)
     text_to_save = user_prompt_full[len(trigger_found):].strip()
-    
+
     if not text_to_save:
         return "O vazio não pode ser memorizado."
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    
+
     structure_prompt = f"""
     SYSTEM: Knowledge Architect. Output JSON only. 
     TASK: Convert to Mermaid graph. Use ONLY double quotes for keys and strings.
@@ -42,14 +44,14 @@ def handle(user_prompt_lower, user_prompt_full):
     """
 
     ans = _safe_ollama_chat(structure_prompt)
-    
+
     if ans:
         try:
             # 1. Extração cirúrgica do bloco entre chavetas
             match = re.search(r'(\{.*\})', ans, re.DOTALL)
             if match:
                 json_str = match.group(1)
-                
+
                 # Debug: Descomenta a linha abaixo para ver o que o Ollama envia nos logs
                 # print(f"🔍 DEBUG RAW: {repr(json_str)}")
 
@@ -60,7 +62,7 @@ def handle(user_prompt_lower, user_prompt_full):
                     # Tentativa 2: Fallback para ast (aceita aspas simples e lixo técnico)
                     # O ast.literal_eval é mais seguro que o eval()
                     data = ast.literal_eval(json_str)
-                
+
                 if isinstance(data, dict):
                     save_to_rag(json.dumps(data, ensure_ascii=False))
                     return "As sombras foram mapeadas e datadas no meu grafo."
