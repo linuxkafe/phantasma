@@ -195,35 +195,49 @@ def _reward_for_emoji(emoji) -> Optional[float]:
 
 
 @client.event
-async def on_reaction_add(reaction, user):
-    """Map Discord reactions to FlyBrain rewards and acknowledge (cached message)."""
-    await _handle_reaction(reaction, user)
-
-
-@client.event
 async def on_raw_reaction_add(payload):
-    """Handle reactions even when the message is not cached."""
-    # Ignore own reactions
-    if payload.user_id == client.user.id:
-        return
-    # Fetch channel, message, user
-    channel = client.get_channel(payload.channel_id)
-    if channel is None:
-        return
+    """Handle reactions via raw payload — works for DMs and uncached messages.
+
+    Uses only network fetches (fetch_channel/fetch_message/fetch_user), never
+    the internal cache, so reactions after a bot restart or in DM still apply
+    the FlyBrain reward. Each failure path is logged instead of returning
+    silently.
+    """
     try:
-        message = await channel.fetch_message(payload.message_id)
-    except Exception:
-        return
-    user = client.get_user(payload.user_id)
-    if user is None:
-        return
-    # Build a fake reaction object compatible with handler
-    class _RawReaction:
-        def __init__(self, message, emoji):
-            self.message = message
-            self.emoji = emoji
-    reaction_obj = _RawReaction(message, payload.emoji)
-    await _handle_reaction(reaction_obj, user)
+        if client.user is not None and payload.user_id == client.user.id:
+            return
+
+        # Channel and message always network-fetched (cache may be empty).
+        try:
+            channel = await client.fetch_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+        except Exception as e:
+            print(f"[Discord Skill] Falha ao obter canal/mensagem: {e}")
+            return
+
+        # Resolve reacting user (Member in guilds, fetch_user for DM).
+        if getattr(payload, "member", None) is not None:
+            user = payload.member
+            if isinstance(user, discord.Member):
+                user = user._user if hasattr(user, "_user") else user
+            user_obj = user if isinstance(user, discord.User) else await client.fetch_user(payload.user_id)
+        else:
+            try:
+                user_obj = await client.fetch_user(payload.user_id)
+            except Exception as e:
+                print(f"[Discord Skill] Falha ao obter user {payload.user_id}: {e}")
+                return
+
+        # Build a fake reaction object compatible with the handler.
+        class _RawReaction:
+            def __init__(self, message, emoji):
+                self.message = message
+                self.emoji = emoji
+
+        reaction_obj = _RawReaction(message, payload.emoji)
+        await _handle_reaction(reaction_obj, user_obj)
+    except Exception as e:
+        print(f"[Discord Skill] Erro inesperado em on_raw_reaction_add: {e}")
 
 
 async def _handle_reaction(reaction, user):
@@ -256,6 +270,19 @@ async def _handle_reaction(reaction, user):
         reward=reward,
     )
     print(f"[Discord Skill] FlyBrain updated: reward={reward}")
+
+    # Bridge to memory graph: reward the current topic node.
+    try:
+        from src.brain.memory_graph import apply_reward, get_current_topic, init_db
+
+        init_db()
+        current = get_current_topic()
+        if current:
+            apply_reward(reward, current)
+        else:
+            print("[Discord Skill] Sem tópico atual para recompensar no grafo")
+    except Exception as e:
+        print(f"[Discord Skill] Falha ao ligar reward ao memory graph: {e}")
 
     # Acknowledge in Discord
     try:

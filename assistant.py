@@ -400,6 +400,17 @@ class PhantasmaPipeline:
         rag = sanitize_llm_context(retrieve_from_rag(text))
         logger.debug(f"RAG context length: {len(rag)}")
 
+        # Retrieve memory-graph context (FlyBrain affinity-weighted topics)
+        graph_ctx = ""
+        try:
+            from src.brain.memory_graph import graph_context_text, init_db
+
+            init_db()
+            graph_ctx = sanitize_llm_context(graph_context_text(text))
+        except Exception as e:
+            logger.warning(f"Memory-graph context failed: {e}")
+        logger.debug(f"Graph context length: {len(graph_ctx)}")
+
         # Web search via SearXNG (only if no skill context yet)
         web = sanitize_llm_context(search_with_searxng(text))
         logger.debug(f"Web context length: {len(web)}")
@@ -414,7 +425,9 @@ class PhantasmaPipeline:
         full_prompt = (
             f"{sys_prompt}\n\n"
             "### CONHECIMENTO DISPONÍVEL (Usa apenas para factos):\n"
-            f"{rag}\n{web}\n\n"
+            f"{rag}\n"
+            f"{graph_ctx}\n"
+            f"{web}\n\n"
             "### INSTRUÇÃO DE RESPOSTA:\n"
             "Responde de forma fluida e natural em português. "
             "NÃO uses cabeçalhos ou marcações. Sê um assistente útil.\n\n"

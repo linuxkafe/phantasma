@@ -65,6 +65,10 @@ def handle(user_prompt_lower, user_prompt_full):
 
                 if isinstance(data, dict):
                     save_to_rag(json.dumps(data, ensure_ascii=False))
+                    from src.brain.memory_graph import index_memory, init_db
+
+                    init_db()
+                    index_memory(data)
                     return "As sombras foram mapeadas e datadas no meu grafo."
         except Exception as e:
             print(f"⚠️ [Memory Skill] Falha terminal no parse: {e}")
