@@ -51,8 +51,8 @@ make run
 3. **HotwordDetector** — openWakeWord detects "Hey Jarvis"/"Alexa"/etc.
 4. **WhisperSTT** — Transcribes speech to text (cached model)
 5. **OllamaLLM** — Generates response via local LLM
-6. **PiperTTS** — Synthesizes speech with sox effects
-7. **AudioPlayback** — Plays response via sounddevice
+5. **PiperTTS** — Synthesizes speech with sox effects
+6. **AudioPlayback** — Plays response via sounddevice
 
 ## Configuration
 
@@ -70,43 +70,92 @@ All runtime configuration in `config.py` with environment variable overrides:
 | `PHANTASMA_PIPER_VOICE` | `tts.voice_model_path` | Path to .onnx voice model |
 | `PHANTASMA_QUEUE_SIZE` | `pipeline.queue_maxsize` | Audio queue size |
 
+## Features Implemented (branch `testing`)
+
+### Admin Interface (`/admin/brain`)
+- **Unified brain view** — Memory, RAG, FlyBrain, 3D explorer on one screen (`/admin/brain`)
+- **GMIF Graph Classification** — M1–M5 epistemic levels (M3 = logical implication)
+- **Sleep/Dream Button** — One-click sleep/dream cycle (`/admin/brain/sleep`)
+  - Analyzes GMIF-classified graph for gaps (weak edges M1/M2, disconnected pairs, missing requirements, causal gaps)
+  - Performs targeted SearxNG research per gap type
+  - Stores synthesized insights via `save_to_rag()`
+- **Admin Burger** — 6 links (Cérebro, Dashboard, Configuração, Utilizadores, .env, Sair)
+- **Hamburger 44×44 px** responsive < 900px
+
+### Voice UI (`/`)
+- **Skill-based UI** served at `/` with design system shared from admin
+- **Hamburger menu** with admin links (Cérebro, Dashboard, Config, Users, .env, Logout)
+- **Device sensors** — real temperature/humidity/power, no fake "ON" fallback
+- **Weather widget** — live IPMA/Open-Meteo via `skill_weather` daemon
+
+### Wake Words
+- `olá fantasma` (TTS trigger, score ~0.81)
+- `hey fantasma` (score ~0.63, below persistence threshold)
+- Config: `WAKEWORD_CONFIDENCE=0.50`, `WAKEWORD_PERSISTENCE=2`
+
+### Sensors & Devices
+- **Tuya sensors** — declared DPS mapping (`SENSOR_TEMP_MAP`), validity 5–45°C
+- **Real readings**: `24.5° · 30m`, `25.3° · 1h`, `0 ppm`, `sem leitura · 17h`
+- No fake "ON" fallback; shows `age_s`, `stale` flag
+
+### Weather
+- `skill_weather` daemon populates `weather_cache.json` every 30 min
+- IPMA forecast + Open-Meteo AQI + moon phase
+- UI shows stale indicator in tooltip
+
+### GMIF Graph Memory
+- **Schema**: `memory_graph` extended with GMIF columns (`logical_form`, `validation_type`, `extraction_confidence`, `validation_confidence`, `source_chunks`, `gmif_level`, `node_gmif_type`, `node_gmif_confidence`, `node_gmif_evidence`)
+- **Classifier** (`src/pipeline/gmif_classifier.py`): M1–M5 levels, logical/external/human validation
+- **GMIF Dream** (`skills/skill_gmif_dream.py`) — runs after standard dream (03:00)
+  - Analyzes weak edges (M1/M2 promotable to M3/M4)
+  - Finds disconnected semantic pairs
+  - Detects missing requirements and causal gaps
+  - Targeted SearxNG research per gap type, LLM synthesis → `save_to_rag()`
+
+### Wake Word Feedback
+- `++` / `--` exact triggers → DAN+/DAN- in FlyBrain
+- Immediate FlyBrain `persist()` flush
+
+### Admin Features
+- **Dashboard** — stats, memory graph, FlyBrain state
+- **Memory** — live `brain.db` sample with graph
+- **RAG** — retrievable chunks with tags/facts
+- **FlyBrain Manager** — reinforcement parameters (α, γ, ε, steps)
+- **Users** — role-based (admin/user), bcrypt passwords
+- **Config/Env** — YAML/ENV editor with validation
+
+### Quality Gates
+- **Python**: 80/80 tests passing
+- **Node (mermaid)**: 26/26 tests passing
+- **Chromium (explorer)**: 36/36 tests passing
+- **0 tracebacks** in service
+- Ruff lint + format, MyPy typecheck, pytest with mutation tests
+
 ## Skills System
 
 Skills are dynamic Python modules in `skills/` directory. Each skill defines:
 - `TRIGGERS`: list of keyword patterns
+- `TRIGGER_TYPE`: "contains" | "exact" | "regex"
 - `handle(text, context)`: function returning response text
-
-Example `skills/skill_time.py`:
-```python
-TRIGGERS = ["hora", "que horas", "what time"]
-
-def handle(text, context):
-    from datetime import datetime
-    return f"São {datetime.now().strftime('%H:%M')}"
-```
+- Optional: `init_skill_daemon()` for background tasks
 
 ## REST API
 
-Flask server for Android app and CLI:
-```bash
-# Start API server
-python -m src.api.routes
+Flask server at port 5000:
 
-# Send command
-curl -X POST http://localhost:5000/api/command \
-  -H "Content-Type: application/json" \
-  -d '{"text": "que horas são", "type": "text"}'
-```
-
-Endpoints:
-- `GET /health` — Health check
-- `GET /api/info` — Server capabilities
-- `POST /api/command` — Execute voice/text command
-- `POST /api/stt` — Speech-to-text
-- `POST /api/tts` — Text-to-speech
-- `GET /api/devices` — List configured devices
-- `POST /api/devices/<name>/control` — Control device
-- `GET/POST /api/memory` — Long-term memory
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /api/info` | Server capabilities |
+| `POST /api/command` | Execute voice/text command |
+| `POST /api/stt` | Speech-to-text |
+| `POST /api/tts` | Text-to-speech |
+| `GET /api/devices` | List configured devices |
+| `POST /api/devices/<name>/control` | Control device |
+| `GET/POST /api/memory` | Long-term memory |
+| `GET /api/weather` | Weather widget data |
+| `GET /api/memory/graph` | Explorer payload |
+| `POST /admin/brain/sleep` | Trigger sleep/dream cycle |
 
 ## Systemd Service
 
@@ -136,15 +185,24 @@ pHantasma/
 ├── config.py             # Configuration (validated on startup)
 ├── src/
 │   ├── main.py           # Entry point
-│   ├── api/              # Flask REST API
+│   ├── api/              # Flask REST API (admin, routes)
+│   │   ├── admin.py      # Admin routes (brain, memory, rag, flybrain, users, config)
+│   │   ├── routes.py     # Public API routes (command, stt, tts, devices, weather)
+│   │   └── design.py     # Design system CSS/JS
 │   └── pipeline/         # Voice pipeline stages
-│       ├── audio.py      # Audio I/O, VAD, hotword
+│       ├── audio.py      # Audio I/O, VAD, hotword, GMIF classifier
 │       ├── stt.py        # Whisper STT
 │       ├── llm.py        # Ollama LLM
 │       ├── tts.py        # Piper TTS
 │       └── utils.py      # Result, logging, timing
-├── tests/                # Unit tests (mocked)
+├── tests/                # Unit + integration tests (mocked + real)
 ├── skills/               # Skill modules (dynamic loading)
+│   ├── skill_ui.py       # Voice UI at /
+│   ├── skill_dream.py    # Standard dream (02:30)
+│   ├── skill_gmif_dream.py # GMIF dream (03:00)
+│   ├── skill_feedback.py # ++/-- feedback
+│   ├── skill_weather.py  # Weather daemon
+│   └── skill_*.py        # Device/skill modules
 ├── android/              # Android companion app (Kotlin/Compose)
 ├── aes/                  # AES project tracking
 ├── docs/                 # Project documentation
@@ -164,27 +222,11 @@ The `android/` directory contains a complete Kotlin/Jetpack Compose app implemen
 
 **Build & Test (requires Android SDK):**
 ```bash
-# Install Android SDK (Android Studio or command line tools)
-# Accept licenses: sdkmanager --licenses
-
 cd android
 ./gradlew assembleDebug          # Build debug APK
 ./gradlew test                   # Run unit tests
 # APK at: app/build/outputs/apk/debug/app-debug.apk
 ```
-
-**Integration Test:**
-```bash
-# Terminal 1: Start pHantasma server with mDNS advertisement
-make run
-
-# Terminal 2: Install APK on emulator/device
-adb install android/app/build/outputs/apk/debug/app-debug.apk
-
-# Verify: discovery → voice command → device control → memory flow
-```
-
-See `aes/tickets/T011-android-build-test.md` for detailed acceptance criteria and known risks.
 
 ## Privacy
 
@@ -192,6 +234,13 @@ See `aes/tickets/T011-android-build-test.md` for detailed acceptance criteria an
 - **All processing local**: hotword, STT, LLM, TTS
 - **Optional**: SearxNG web search (self-hosted)
 - **No telemetry**, no accounts, no API keys required
+
+## Branch Status
+
+| Branch | Status |
+|--------|--------|
+| `master` | Stable production |
+| `testing` | Latest features (GMIF dream, unified brain, sleep button, GMIF classifier, sleep endpoint) |
 
 ## License
 
