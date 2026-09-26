@@ -769,6 +769,40 @@ def create_app(pipeline=None) -> Flask:
                 MemoryResponse(success=False, error=str(e)).model_dump()
             ), 500
 
+    @app.route("/api/memory/graph", methods=["GET"])
+    def api_memory_graph():
+        """Real 3D-explorer payload built from brain.db records.
+
+        Every node/edge traces back to a stored row. Stored references whose
+        target does not exist are flagged ``unresolved`` and counted in
+        ``stats`` instead of being faked. See src/api/memory_graph.py.
+        """
+        from src.api.memory_graph import build_graph_from_db
+
+        try:
+            return jsonify(build_graph_from_db())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(f"memory graph failed: {exc}")
+            return jsonify(
+                {"nodes": [], "links": [], "stats": {"error": str(exc)}}
+            ), 500
+
+    @app.route("/memory/3d", methods=["GET"])
+    def view_3d_memory():
+        """Serves the HTML5 3D Memory & Connectome Explorer."""
+        from flask import send_from_directory
+        return send_from_directory("/opt/phantasma/public", "memory_3d.html")
+
+    @app.route("/public/<path:filename>")
+    def public_files(filename: str):
+        """Serve the explorer's vendored libraries and ES modules.
+
+        ``send_from_directory`` refuses path traversal, so requests cannot
+        escape /opt/phantasma/public.
+        """
+        from flask import send_from_directory
+        return send_from_directory("/opt/phantasma/public", filename)
+
     @app.route("/api/memory/<key>", methods=["DELETE"])
     def delete_memory(key: str):
         """Delete a memory entry by key.

@@ -151,7 +151,7 @@ def handle_request():
             input:checked + .slider { background-color: var(--ia-msg); }
             input:checked + .slider:before { transform: translateX(12px); }
 
-            .sensor-data { font-size: 0.7rem; color: #4db6ac; font-weight: bold; }
+            .sensor-data, .sensor-temp, .sensor-hum { font-size: 0.7rem; color: #4db6ac; font-weight: bold; }
             .sensor-label { font-size: 0.6rem; color: #888; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
             /* CHAT */
@@ -362,9 +362,11 @@ def handle_request():
                 const div = document.createElement('div'); div.className = 'device-sensor'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'sensor';
                 const dataSpan = document.createElement('span'); dataSpan.className = 'sensor-data'; dataSpan.innerText = '...';
+                const tempSpan = document.createElement('span'); tempSpan.className = 'sensor-temp'; tempSpan.innerText = '';
+                const humSpan = document.createElement('span'); humSpan.className = 'sensor-hum'; humSpan.innerText = '';
                 const label = document.createElement('span'); label.className = 'sensor-label'; 
                 label.innerText = device.replace(/sensor|alarme/gi, '').trim().substring(0,12);
-                div.append(dataSpan, label); container.appendChild(div);
+                div.append(dataSpan, tempSpan, humSpan, label); container.appendChild(div);
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', element: div, dataSpan: dataSpan, label: label });
             }
 
@@ -390,31 +392,33 @@ def handle_request():
             }
             
             async function fetchSensorStatus(item) {
-                const { name, element, dataSpan } = item;
+                const { name, element, dataSpan, tempSpan, humSpan } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
                     element.style.opacity = data.state === 'unreachable' ? 0.5 : 1;
                     if (data.state === 'unreachable') return;
-
-                    // CORREÇÃO: Lógica para Humidade + Temperatura
-                    let textParts = [];
-                    let color = '#4db6ac';
-
-                    if (data.power_w !== undefined) { 
-                        textParts.push(Math.round(data.power_w) + ' W'); 
-                        color = "#ffb74d"; 
+                    
+                    // Power
+                    if (data.power_w !== undefined) {
+                        dataSpan.innerText = Math.round(data.power_w) + ' W';
+                        dataSpan.style.color = "#ffb74d";
                     } else {
-                        if (data.temperature !== undefined) textParts.push(Math.round(data.temperature) + '°');
-                        if (data.humidity !== undefined) textParts.push(data.humidity + '%');
-                        if (data.ppm !== undefined) { 
-                            textParts.push(data.ppm + ' ppm'); 
-                            if (data.status!=='normal') color='#ff5252'; 
-                        }
+                        dataSpan.innerText = '';
+                        dataSpan.style.color = "#4db6ac";
                     }
-
-                    dataSpan.innerText = textParts.length > 0 ? textParts.join(' ') : 'ON';
-                    dataSpan.style.color = color;
+                    // Temperature
+                    if (data.temperature !== undefined) {
+                        tempSpan.innerText = Math.round(data.temperature) + '°';
+                    } else {
+                        tempSpan.innerText = '';
+                    }
+                    // Humidity
+                    if (data.humidity !== undefined) {
+                        humSpan.innerText = data.humidity + '%';
+                    } else {
+                        humSpan.innerText = '';
+                    }
                 } catch (e) {}
             }
 

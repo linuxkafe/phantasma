@@ -36,7 +36,7 @@ from flask import (
     abort,
 )
 
-from .design import design_css, design_js
+from .design import design_css
 from .i18n import (
     COOKIE_NAME as LANG_COOKIE,
     DEFAULT_LANGUAGE,
@@ -250,24 +250,17 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         ('admin.env_editor', 'nav.env', '.env', '/admin/env'),
     ]
     brain_endpoints = {
-        'admin.brain_hub', 'admin.memory_viewer', 'rag_viewer',
-        'admin.flybrain_manager', 'admin.explorer_3d',
+        'admin.memory_viewer', 'rag_viewer', 'admin.flybrain_manager',
+        'admin.explorer_3d',
     }
     brain_active = current_endpoint in brain_endpoints
 
     parts = [
-        # The bar and the toggle must be siblings: the toggle is a fixed-size
-        # button that stays visible while .nav-menu becomes a full-screen
-        # overlay below 900px, so it cannot live *inside* the collapsing menu.
-        '<div class="nav-bar">',
-        '<button type="button" class="nav-toggle" aria-controls="nav-menu" '
-        'aria-expanded="false" aria-label="Open menu">'
-        '<span></span><span></span><span></span></button>',
-        '<nav class="nav-menu" id="nav-menu">',
+        '<nav class="nav-menu">',
         '  <a class="nav-brand" href="/admin/dashboard">'
         '<span class="mark">P</span><span>Phantasma</span></a>',
         '  <div class="nav-group">',
-        f'    <a href="/admin/brain" class="nav-link{" active" if brain_active else ""}">'
+        f'    <a href="/admin/memory" class="nav-link{" active" if brain_active else ""}">'
         f'🧠 {t("nav.brain", lang)}</a>',
     ]
     for endpoint, key, fallback, url in links:
@@ -284,7 +277,6 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         f'style="color:var(--destructive)">{t("nav.logout", lang)}</a>'
     )
     parts.append('</nav>')
-    parts.append('</div>')
     return "\n".join(parts)
 
 
@@ -304,12 +296,22 @@ def _build_language_switch(lang: str) -> str:
 
 
 def _build_subnav(current_endpoint: str) -> str:
-    """Tab bar shared by every Cérebro page.
-
-    As requested, the single "Tudo" / "All" tab has been retired since the hub
-    consolidates all subsystems on a single screen. Returns an empty string.
-    """
-    return ""
+    """Tab bar shared by every Cérebro page."""
+    lang = get_language()
+    tabs = [
+        ('admin.memory_viewer', 'brain.memory', '/admin/memory'),
+        ('rag_viewer', 'brain.rag', '/admin/rag'),
+        ('admin.flybrain_manager', 'brain.flybrain', '/admin/flybrain'),
+        ('admin.explorer_3d', 'brain.explorer', '/memory/3d'),
+    ]
+    parts = ['<nav class="subnav">']
+    for endpoint, key, url in tabs:
+        active = ' active' if endpoint == current_endpoint else ''
+        parts.append(
+            f'  <a href="{url}" class="subnav-link{active}">{t(key, lang)}</a>'
+        )
+    parts.append('</nav>')
+    return "\n".join(parts)
 
 
 @admin_bp.context_processor
@@ -465,8 +467,7 @@ BASE_STYLE = "<style>" + design_css() + """
 .form-group { margin-bottom:var(--sp-4); }
 label { display:block; font-size:var(--fs-small); font-weight:600;
        margin-bottom:var(--sp-1); color:var(--text-secondary); }
-</style>
-<script>""" + design_js() + """</script>"""
+</style>"""
 LOGIN_TEMPLATE = BASE_STYLE + """
 <!doctype html>
 <title>Admin Login | pHantasma</title>
@@ -598,17 +599,18 @@ DASHBOARD_TEMPLATE = BASE_STYLE + """
         <p style="color: var(--muted); font-size: 0.875rem;">Última atualização: {{ flybrain_state.updated_at if flybrain_state else 'Sem registo' }}</p>
         {% if flybrain_state %}
         <pre style="background: var(--bg-color); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; color: var(--text); overflow-x: auto; font-family: monospace;">{{ flybrain_state.data }}</pre>
-        {% else %}
+        {% else: %}
         <p style="color: var(--text); font-style: italic;">Sem estado de reforço do FlyBrain registado.</p>
         {% endif %}
     </div>
 
     <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem;">
-        <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0;">Serviço</h2>
+        <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0;">Capuchinho Verde - Food delivery WordPress theme</h2>
+        <p style="color: var(--muted); font-size: 0.875rem;">Referências técnicas para integração e deploy automático:</p>
         <ul style="color: var(--text); font-size: 0.875rem; padding-left: 1.5rem; line-height: 1.6;">
-            <li><strong>API:</strong> <code style="background: var(--bg-color); padding: 0.2rem 0.4rem; border-radius: 4px;">/api/health</code></li>
-            <li><strong>Interface de voz:</strong> <a href="/" style="color: var(--accent);">/</a></li>
-            <li><strong>Explorador 3D:</strong> <a href="/memory/3d" style="color: var(--accent);">/memory/3d</a></li>
+            <li><strong>Tecnologia:</strong> WordPress, PHP 8.1+, WooCommerce</li>
+            <li><strong>Repositório:</strong> <code style="background: var(--bg-color); padding: 0.2rem 0.4rem; border-radius: 4px;">https://github.com/linuxkafe/phantasma</code></li>
+            <li><strong>Script de Despliegue:</strong> Bash autocompilado</li>
         </ul>
     </div>
 </div>
@@ -747,216 +749,6 @@ USERS_TEMPLATE = BASE_STYLE + """
 </div>
 """
 
-BRAIN_TEMPLATE = BASE_STYLE + """
-<!doctype html>
-<html lang="{{ lang if lang is defined else 'pt' }}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% if lang == 'en' %}Brain{% else %}Cérebro{% endif %} | pHantasma</title>
-</head>
-<body>
-{{ nav_menu|safe }}
-<main class="page">
-  <div class="page-head">
-    <h1 class="page-title">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</h1>
-    <p class="page-sub">{% if lang == 'en' %}Memory, RAG, reinforcement and 3D graph on one screen.{% else %}Memória, RAG, reforço e grafo 3D num só ecrã.{% endif %}</p>
-  </div>
-  {{ subnav|safe }}
-
-  <div class="grid grid-stats" style="margin-bottom:1.5rem;">
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Memories{% else %}Memórias{% endif %}</span>
-      <span class="stat-value">{{ stats.memories or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
-      <span class="stat-value">{{ stats.concepts or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Links{% else %}Ligações{% endif %}</span>
-      <span class="stat-value">{{ stats.links or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}With Mermaid{% else %}Com Mermaid{% endif %}</span>
-      <span class="stat-value">{{ stats.memories_with_mermaid or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">FlyBrain</span>
-      <span class="stat-value">{% if flybrain and flybrain.steps is defined %}{{ flybrain.steps }}{% else %}–{% endif %}</span>
-      <span class="stat-hint">{% if flybrain and flybrain.steps is defined %}{% if lang == 'en' %}steps{% else %}passos{% endif %}{% else %}{% if lang == 'en' %}no reinforcement yet{% else %}sem reforço{% endif %}{% endif %}</span>
-    </div>
-    {% if stats.unresolved_edges %}
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span>
-      <span class="stat-value" style="color:var(--warning);">{{ stats.unresolved_edges }}</span>
-    </div>
-    {% endif %}
-  </div>
-
-  <div class="brain-grid">
-    <!-- 3D explorer: same real payload the standalone page renders -->
-    <section class="card brain-3d">
-      <div class="brain-head">
-        <h2 class="brain-title">{% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}</h2>
-        <a class="brain-link" href="/memory/3d" target="_blank" rel="noopener">
-          {% if lang == 'en' %}Open full screen{% else %}Abrir em ecrã inteiro{% endif %} ↗
-        </a>
-      </div>
-      <iframe class="brain-frame" src="/memory/3d?embed=1" title="{% if lang == 'en' %}3D memory graph{% else %}Grafo 3D da memória{% endif %}"></iframe>
-    </section>
-
-    <div class="brain-side">
-      <section class="card">
-        <div class="brain-head">
-          <h2 class="brain-title">RAG</h2>
-          <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todas{% endif %} →</a>
-        </div>
-        <p class="brain-note">{% if lang == 'en' %}{{ chunks|length }} most recent retrievable chunks{% else %}{{ chunks|length }} chunks recuperáveis mais recentes{% endif %}</p>
-        <ul class="brain-list">
-          {% for c in chunks[:6] %}
-          <li class="brain-item">
-            <span class="brain-item-id">#{{ c.id }}</span>
-            <span class="brain-item-text">{{ (c.summary or '')[:160] }}</span>
-            {% if c.tags %}<span class="badge">{% for tg in c.tags[:3] %}{{ tg }}{% if not loop.last %} {% endif %}{% endfor %}</span>{% endif %}
-          </li>
-          {% else %}
-          <li class="brain-empty">{% if lang == 'en' %}No retrievable chunks parsed yet.{% else %}Ainda não há chunks analisáveis.{% endif %}</li>
-          {% endfor %}
-        </ul>
-      </section>
-
-      <section class="card">
-        <div class="brain-head">
-          <h2 class="brain-title">FlyBrain</h2>
-          <a class="brain-link" href="/admin/flybrain">{% if lang == 'en' %}Manage{% else %}Gerir{% endif %} →</a>
-        </div>
-        {% if flybrain and flybrain.steps is defined %}
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b>
-        </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ '%.4f'|format(flybrain.affinity) if flybrain.affinity is defined else '–' }}</b>
-        </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Octopamine{% else %}Octopamina{% endif %}</span><b>{{ '%.4f'|format(flybrain.octopamine) if flybrain.octopamine is defined else '–' }}</b>
-        </div>
-        <p class="brain-note">{% if lang == 'en' %}Real reinforcement state read from flybrain_state.{% else %}Estado de reforço real lido de flybrain_state.{% endif %}</p>
-        {% else %}
-        <p class="brain-empty">{% if lang == 'en' %}No reinforcement recorded yet. Feedback given in conversation is persisted immediately, so the first entry appears after the first rated response.{% else %}Ainda sem reforço registado. O feedback dado em conversa é persistido de imediato, por isso a primeira entrada aparece após a primeira resposta avaliada.{% endif %}</p>
-        {% endif %}
-      </section>
-
-      <section class="card">
-        <div class="brain-head">
-          <h2 class="brain-title">{% if lang == 'en' %}Memory{% else %}Memória{% endif %}</h2>
-          <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Tudo{% endif %} →</a>
-        </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memories_total }}</b>
-        </div>
-        {% if topic and topic.current_topic %}
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Current topic{% else %}Tópico atual{% endif %}</span><b>{{ topic.current_topic }}</b>
-        </div>
-        {% endif %}
-        <p class="brain-note">{% if lang == 'en' %}Sampled from the live brain.db.{% else %}Amostra do brain.db em direto.{% endif %}</p>
-      </section>
-    </div>
-  </div>
-</main>
-<style>
-.brain-grid { display:grid; grid-template-columns: minmax(0,1.35fr) minmax(320px,1fr); gap:var(--sp-4); align-items:start; }
-.brain-3d { padding:0; overflow:hidden; }
-.brain-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); padding:var(--sp-3) var(--sp-4); border-bottom:1px solid var(--border); }
-.brain-title { margin:0; font-size:var(--fs-h3); font-weight:var(--fw-h2); }
-.brain-link { font-size:var(--fs-small); color:var(--brand-400); text-decoration:none; white-space:nowrap; }
-.brain-link:hover { text-decoration:underline; }
-.brain-frame { display:block; width:100%; height:560px; border:0; background:var(--bg-color); }
-.brain-side { display:flex; flex-direction:column; gap:var(--sp-4); }
-.brain-note { margin:0 0 var(--sp-2); font-size:var(--fs-small); color:var(--muted); }
-.brain-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--sp-2); }
-.brain-item { display:flex; flex-direction:column; gap:2px; padding:var(--sp-2); background:var(--surface-2); border-radius:var(--radius-sm); font-size:var(--fs-small); }
-.brain-item-id { color:var(--brand-400); font-variant-numeric:tabular-nums; font-size:var(--fs-tiny); }
-.brain-item-text { color:var(--text-secondary); }
-.brain-empty { margin:0; font-size:var(--fs-small); color:var(--muted); font-style:italic; }
-.brain-kv { display:flex; justify-content:space-between; gap:var(--sp-2); padding:6px 0; border-bottom:1px solid var(--border); font-size:var(--fs-small); color:var(--muted); }
-.brain-kv b { color:var(--text); font-variant-numeric:tabular-nums; }
-@media (max-width:1080px) { .brain-grid { grid-template-columns:1fr; } .brain-frame { height:440px; } }
-@media (max-width:640px)  { .brain-frame { height:360px; } }
-</style>
-</body>
-</html>
-"""
-
-RAG_TEMPLATE = BASE_STYLE + """
-<!doctype html>
-<html lang="{{ lang }}">
-<title>{{ t('rag.title') }} | pHantasma</title>
-<div class="page">
-  {{ nav_menu | safe }}
-  <div class="page-header">
-    <div>
-      <h1 class="page-title">{{ t('brain.rag') }}</h1>
-      <p class="page-subtitle">{{ t('rag.subtitle') }}</p>
-    </div>
-    <a class="btn btn--secondary" href="/memory/3d">{{ t('brain.explorer') }}</a>
-  </div>
-
-  {{ subnav | safe }}
-
-  <div class="grid grid-stats" style="margin-bottom: 1.5rem;">
-    <div class="card stat">
-      <span class="stat-label">{{ t('dashboard.memories') }}</span>
-      <span class="stat-value">{{ stats.memories }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{{ t('dashboard.graph_nodes') }}</span>
-      <span class="stat-value">{{ stats.nodes }}</span>
-    </div>
-    <div class="card stat stat--info">
-      <span class="stat-label">{{ t('common.all') }}</span>
-      <span class="stat-value">{{ stats.links }}</span>
-    </div>
-    <div class="card stat {% if stats.unresolved_edges %}stat--warning{% endif %}">
-      <span class="stat-label">{{ t('memory.title') }} &middot; {{ t('common.filter') }}</span>
-      <span class="stat-value">{{ stats.unresolved_edges }}</span>
-    </div>
-  </div>
-
-  {% if chunks %}
-  <div class="card">
-    <h2 class="card-title">{{ t('rag.title') }}</h2>
-    <div class="card-scroll">
-      {% for c in chunks %}
-      <article class="card" style="background: var(--bg-color);">
-        <div style="display:flex; justify-content:space-between; align-items:center;
-                    gap:.5rem; margin-bottom:.5rem;">
-          <span class="badge badge--brand">#{{ c.id }}</span>
-          <span class="muted" style="font-size:var(--fs-small);">{{ c.timestamp }}</span>
-        </div>
-        <p style="margin:0 0 .5rem; line-height:1.5;">{{ c.summary }}</p>
-        {% if c.tags %}
-        <div style="display:flex; gap:.25rem; flex-wrap:wrap; margin-bottom:.5rem;">
-          {% for tag in c.tags %}<span class="badge">{{ tag }}</span>{% endfor %}
-        </div>
-        {% endif %}
-        {% if c.facts %}
-        <ul class="muted" style="margin:.25rem 0 0; padding-left:1.1rem; font-size:var(--fs-small);">
-          {% for f in c.facts[:5] %}<li>{{ f }}</li>{% endfor %}
-        </ul>
-        {% endif %}
-      </article>
-      {% endfor %}
-    </div>
-  </div>
-  {% else %}
-  <div class="empty">{{ t('rag.empty') }}</div>
-  {% endif %}
-</div>
-</html>
-"""
-
 MEMORY_TEMPLATE = BASE_STYLE + """
 <!doctype html>
 <title>Memória do pHantasma | pHantasma</title>
@@ -968,9 +760,7 @@ MEMORY_TEMPLATE = BASE_STYLE + """
             Logado como <strong>{{ user }}</strong>
         </div>
     </div>
-
-    {{ subnav | safe }}
-
+    
     <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;">
         <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem;">Estado do Tópico de Conversação</h2>
         {% if topic %}
@@ -985,7 +775,7 @@ MEMORY_TEMPLATE = BASE_STYLE + """
 
     <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 2rem; margin-bottom: 2rem;">
         <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem;">
-            <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem;">{{ t('rag.title') }} <a class="btn btn--ghost btn--sm" href="/admin/rag">{{ t('brain.rag') }} →</a></h2>
+            <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem;">Últimas Memórias (RAG)</h2>
             <div style="max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem;">
                 {% for m in memories %}
                 <div style="background: var(--bg-color); border: 1px solid var(--border); border-radius: 6px; padding: 1rem;">
@@ -1027,13 +817,11 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
 <div class="container" style="max-width: 960px; margin-top: 6rem;">
     {{ nav_menu | safe }}
     <div class="header">
-        <h1>{{ t('flybrain.title') }}</h1>
+        <h1>FlyBrain - Aprendizagem por Reforço</h1>
         <div class="user-info">
             Logado como <strong>{{ user }}</strong>
         </div>
     </div>
-
-    {{ subnav | safe }}
     
     <!-- Brain Graph Section -->
     <div class="brain-graph">
@@ -1094,11 +882,11 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
             
             // Initialize Cytoscape.js or use mermaid
             // For now, render mermaid flowchart
-            const mermaidContent = \\`graph TD
+            const mermaidContent = \`graph TD
     cortex -->|reinforcement| hippocampus
     hippocampus -->|reinforcement| nucleus_accumbens
     amygdala -->|reinforcement| nucleus_accumbens
-    nucleus_accumbens -->|reinforcement| cerebellum\\`;
+    nucleus_accumbens -->|reinforcement| cerebellum\`;
             
             // Initialize Cytoscape for interactive graph
             const cy = cytoscape({
@@ -1267,8 +1055,8 @@ def config_manager():
     return render_template_string(CONFIG_TEMPLATE, configs=configs, categories=categories, user=_current_user(), nav_menu=nav_menu)
 
 @admin_bp.route("/users", methods=["GET", "POST"])
-@login_required
 @admin_required
+@login_required
 def user_manager():
     """View and manage users."""
     if request.method == "POST":
@@ -1300,143 +1088,6 @@ def user_manager():
     nav_menu = _build_nav_menu("admin.user_manager", _current_user_data()['role'] if _current_user_data() else 'user')
     return render_template_string(USERS_TEMPLATE, users=users, user=_current_user(), nav_menu=nav_menu)
 
-@admin_bp.route("/lang/<code>")
-def set_language(code: str):
-    """Persist the UI language choice, then return the user where they were.
-
-    Deliberately unauthenticated: the switch must work on the login screen
-    too, and the only thing it sets is a display preference.
-    """
-    language = normalize_language(code)
-    if code and code.lower().split("-")[0] not in LANGUAGES:
-        # Unknown code must not silently resolve to PT for a real choice.
-        return redirect(request.referrer or url_for("admin.dashboard"))
-    session["lang"] = language
-    response = redirect(request.referrer or url_for("admin.dashboard"))
-    response.set_cookie(
-        LANG_COOKIE, language, max_age=365 * 24 * 3600, samesite="Lax"
-    )
-    return response
-
-
-@admin_bp.route("/rag")
-@login_required
-def rag_viewer():
-    """RAG view: the chunks retrieval actually returns, plus the real stats.
-
-    Rendered from the same ``memories`` rows the API serves. No synthetic
-    scores, no invented relevance ranking.
-    """
-    from .memory_graph import build_graph_from_db
-    import json as _json
-
-    conn = sqlite3.connect(BRAIN_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT id, timestamp, text FROM memories ORDER BY timestamp DESC LIMIT 100"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    chunks = []
-    for row in rows:
-        text = row["text"] or ""
-        try:
-            payload = _json.loads(text)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        chunks.append({
-            "id": row["id"],
-            "timestamp": row["timestamp"],
-            "summary": payload.get("summary") or payload.get("text") or "",
-            "tags": payload.get("tags") or [],
-            "facts": payload.get("facts") or [],
-        })
-
-    stats = build_graph_from_db(BRAIN_DB_PATH)["stats"]
-    nav_menu = _build_nav_menu("rag_viewer")
-    return render_template_string(
-        RAG_TEMPLATE,
-        chunks=chunks,
-        stats=stats,
-        subnav=_build_subnav("rag_viewer"),
-        nav_menu=nav_menu,
-        user=_current_user(),
-    )
-
-
-@admin_bp.route("/brain")
-@login_required
-def brain_hub():
-    """All four brain subsystems on one screen.
-
-    Memory, RAG, FlyBrain and the 3D explorer were four separate pages, which
-    meant four page loads and no way to see them side by side. This route
-    renders all four regions together, from exactly the same real data the
-    individual pages use -- no duplicated queries, no invented numbers.
-
-    The 3D explorer is embedded rather than inlined: it is a full-viewport
-    WebGL app with its own 36-test browser suite, and mounting Three.js twice on
-    one document would mean two canvases fighting over the same window and a
-    rewrite of tested rendering code. An iframe keeps the two concerns separate
-    while still putting everything on a single screen.
-    """
-    from .memory_graph import build_graph_from_db
-    import json as _json
-
-    conn = sqlite3.connect(BRAIN_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT id, timestamp, text FROM memories ORDER BY timestamp DESC LIMIT 50"
-        ).fetchall()
-        state_row = conn.execute("SELECT * FROM flybrain_state WHERE id = 1").fetchone()
-        topic_row = conn.execute("SELECT * FROM topic_state").fetchone()
-    finally:
-        conn.close()
-
-    # Reuse the RAG parser verbatim so both pages agree on what a "chunk" is.
-    chunks = []
-    for row in rows:
-        text = row["text"] or ""
-        try:
-            payload = _json.loads(text)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        chunks.append({
-            "id": row["id"],
-            "timestamp": row["timestamp"],
-            "summary": payload.get("summary") or payload.get("text") or "",
-            "tags": payload.get("tags") or [],
-            "facts": payload.get("facts") or [],
-        })
-
-    graph = build_graph_from_db(BRAIN_DB_PATH)
-    stats = graph["stats"]
-    # build_graph_from_db already attaches the real reinforcement state here;
-    # do not query it a second time.
-    flybrain = stats.get("flybrain")
-
-    role = _current_user_data()["role"] if _current_user_data() else "user"
-    return render_template_string(
-        BRAIN_TEMPLATE,
-        chunks=chunks,
-        stats=stats,
-        memories_total=len(rows),
-        topic=dict(topic_row) if topic_row else None,
-        flybrain_state=dict(state_row) if state_row else None,
-        flybrain=flybrain,
-        subnav=_build_subnav("admin.brain_hub"),
-        nav_menu=_build_nav_menu("admin.brain_hub", role),
-        user=_current_user(),
-    )
-
-
 @admin_bp.route("/memory")
 @login_required
 def memory_viewer():
@@ -1454,7 +1105,6 @@ def memory_viewer():
             graph=[dict(g) for g in graph],
             topic=dict(topic) if topic else None,
             user=_current_user(),
-            subnav=_build_subnav("admin.memory_viewer"),
             nav_menu=nav_menu)
     finally:
         conn.close()
@@ -1479,7 +1129,6 @@ def flybrain_manager():
         return render_template_string(FLYBRAIN_TEMPLATE, 
             state=dict(state) if state else None,
             user=_current_user(),
-            subnav=_build_subnav("admin.flybrain_manager"),
             nav_menu=nav_menu)
     finally:
         conn.close()

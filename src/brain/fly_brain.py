@@ -259,6 +259,25 @@ class FlyBrain:
             mbon=self.mb.mbon.copy(),
         )
 
+    def persist(self) -> bool:
+        """Force-write current state to the store, bypassing the auto-save interval.
+
+        ``step()`` only calls ``maybe_auto_save()``, which writes every
+        ``auto_save_interval`` steps (10 by default). User feedback is rare and
+        expensive -- each one is a deliberate correction of the assistant -- so
+        batching it means up to 9 corrections are silently lost on restart or
+        crash. Callers that represent a durable, user-authored event must call
+        this instead of relying on the interval.
+
+        Returns:
+            True if a write happened, False if no store is attached.
+        """
+        if not self._store:
+            return False
+        self._store.save(self)
+        self._store._steps_since_save = 0
+        return True
+
     def get_full_state(self) -> dict:
         """Return full internal state for persistence."""
         return {

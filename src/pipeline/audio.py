@@ -14,6 +14,8 @@ All classes are designed for real-time audio processing with minimal latency.
 import os
 import queue
 import time
+import re
+import subprocess
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -25,6 +27,43 @@ import webrtcvad
 
 from config import config
 from src.pipeline.utils import Result, logger
+
+
+def force_volume_down(card_index):
+    target = getattr(config.audio, 'volume_percent', 85)
+    logger.info(f"🎚️ A configurar áudio no Card {card_index} (Alvo: {target}%)...")
+    try:
+        cmd = ['amixer', '-c', str(card_index), 'scontrols']
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        controls = re.findall(r"Simple mixer control '([^']+)'", result.stdout)
+        if not controls:
+            return
+        for ctrl in controls:
+            if any(x in ctrl for x in ['PCM', 'Master', 'Speaker', 'Headphone', 'Playback']):
+                continue
+            if 'Capture' in ctrl or 'Mic' in ctrl:
+                logger.info(f"   ↘ Ajustando ganho: '{ctrl}' -> {target}%")
+                subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, f'{target}%', 'unmute', 'cap'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if 'AGC' in ctrl or 'Auto Gain' in ctrl:
+                logger.info(f"   🚫 A desativar AGC: '{ctrl}'")
+                subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, 'off'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao ajustar volumes: {e}")
+
+
+def find_working_samplerate(device_index):
+    candidates = [16000, 48000, 44100, 32000]
+    logger.info(f"🕵️ A negociar Sample Rate para o device {device_index}...")
+    for rate in candidates:
+        try:
+            with sd.InputStream(device=device_index, channels=1, samplerate=rate, dtype='int16'):
+                pass
+            logger.info(f"✅ Hardware aceitou: {rate} Hz")
+            return rate
+        except Exception:
+            continue
+    logger.warning("⚠️ Nenhuma sample rate aceita, fallback 16000 Hz")
+    return 16000
 
 
 @dataclass
@@ -127,34 +166,35 @@ class VADProcessor:
 class HotwordDetector:
     """openWakeWord hotword detection.
 
-    Loads pretrained openWakeWord models and runs inference on audio chunks.
-    Implements cooldown period to prevent repeated detections.
+    Matches the working legacy implementation from /home/seyon/dev/tmp/old-phant/pha/assistant.py.
+    Processes 1280-sample chunks (80ms at 16kHz) directly as int16.
 
     Attributes:
-        models: List of model names to detect (e.g., ["hey_jarvis", "alexa"]).
+        models: List of model names to detect.
         threshold: Detection confidence threshold 0.0-1.0.
-        sample_rate: Audio sample rate in Hz. Default 16000.
-        chunk_size: Expected audio chunk size in samples. Default 1600 (100ms at 16kHz).
+        chunk_size: Expected audio chunk size in samples (1280 for 80ms at 16kHz).
         oww_model: Underlying openwakeword.model.Model instance.
         _cooldown: Cooldown period in seconds (from config).
         _last_detection: Timestamp of last detection.
+        _streaks: Per-model detection streak counters.
+        _max_patience: Max patience for tolerance (2 frames).
+        _persistence: Number of consecutive frames needed for detection.
     """
 
     def __init__(
         self,
         models: list[str],
-        threshold: float = 0.5,
+        threshold: float = 0.7,  # Match working legacy WAKEWORD_CONFIDENCE
         sample_rate: int = 16000,
-        chunk_size: int = 1600,
+        chunk_size: int = 1280,  # 80ms at 16kHz - openWakeWord standard
     ):
         """Initialize hotword detector.
 
         Args:
-            models: List of model names to load. Must match pretrained model names
-                from openwakeword.get_pretrained_model_paths().
-            threshold: Detection threshold 0.0-1.0. Default 0.5.
+            models: List of model names/paths to load.
+            threshold: Detection threshold 0.0-1.0. Default 0.7 (legacy).
             sample_rate: Audio sample rate in Hz. Default 16000.
-            chunk_size: Audio chunk size in samples. Default 1600.
+            chunk_size: Audio chunk size in samples. Default 1280.
 
         Raises:
             RuntimeError: If openWakeWord model fails to load.
@@ -164,31 +204,35 @@ class HotwordDetector:
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
 
-        # Track last detection for cooldown (initialized on every load path,
-        # including the custom-paths branch below)
+        # Track last detection for cooldown
         self._last_detection = 0.0
         self._cooldown = config.hotword.cooldown_seconds
+        self._persistence = config.hotword.persistence
+        self._streaks = {}
+        # Patience must persist ACROSS calls. In the working legacy this was a
+        # variable in the enclosing function scope; as a local in process() it
+        # was re-initialised on every frame, so a single dip could never reset
+        # the streak and the "tolerance" the legacy relied on did not exist.
+        self._patience = {}
+        self._max_patience = 2
 
         # Custom model paths resolve to existing files -> load them directly.
-        # This is how the PT wake words (models/ola_fantasma.onnx etc.) are used;
-        # the old code only filtered pretrained model NAMES, so custom .onnx paths
-        # silently fell back to all English pretrained models ("Hey Jarvis").
+        # This is how the PT wake words (models/ola_fantasma.onnx etc.) are used.
         custom_paths = [p for p in models if os.path.isfile(p)]
         if custom_paths:
             logger.info(
                 f"Loading custom wake word models: {custom_paths}"
             )
-            audio_features_kwargs = {"sr": sample_rate, "ncpu": 1}
+            # NO sr/ncpu params - match working legacy implementation
             self.oww_model = openwakeword.model.Model(
                 wakeword_models=custom_paths,
                 inference_framework="onnx",
-                **audio_features_kwargs,
             )
+            self._prime_buffer()
             return
 
         # Load openWakeWord model - use pre-trained models if paths not provided
         model_paths = openwakeword.get_pretrained_model_paths()
-        # Filter to only the models we want
         filtered_paths = []
         for path in model_paths:
             model_name = os.path.basename(path).replace(".onnx", "")
@@ -201,25 +245,21 @@ class HotwordDetector:
                 "falling back to ALL pretrained openWakeWord models."
             )
 
-        # AudioFeatures kwargs (passed through Model **kwargs)
-        audio_features_kwargs = {"sr": sample_rate, "ncpu": 1}
-
         self.oww_model = openwakeword.model.Model(
             wakeword_models=filtered_paths if filtered_paths else model_paths,
             inference_framework="onnx",
-            **audio_features_kwargs,
         )
 
     def process(self, audio_chunk: np.ndarray) -> tuple[bool, Optional[str]]:
-        """Process audio chunk for hotword detection.
+        """Process 1280-sample int16 chunk for hotword detection.
+
+        Matches the working legacy: passes int16 directly to predict().
 
         Args:
-            audio_chunk: Audio data as numpy array (int16 or float32).
-                Must be chunk_size samples at sample_rate.
+            audio_chunk: Audio data as numpy array (int16), must be 1280 samples.
 
         Returns:
             Tuple of (detected: bool, model_name: Optional[str]).
-            model_name is the name of the model that triggered (e.g., "hey_jarvis").
         """
         now = time.time()
 
@@ -227,26 +267,95 @@ class HotwordDetector:
         if now - self._last_detection < self._cooldown:
             return False, None
 
-        # openWakeWord expects float32 [-1, 1]
-        if audio_chunk.dtype == np.int16:
-            audio_float = audio_chunk.astype(np.float32) / 32768.0
-        else:
-            audio_float = audio_chunk.astype(np.float32)
+        # openWakeWord accepts int16 directly (like legacy)
+        if audio_chunk.dtype != np.int16:
+            audio_chunk = audio_chunk.astype(np.int16)
 
-        # Run prediction
-        predictions = self.oww_model.predict(audio_float)
+        # Run prediction - pass int16 directly like working legacy
+        predictions = self.oww_model.predict(audio_chunk)
+        
+        if not predictions:
+            return False, None
 
-        # Check each model
+        # Log raw predictions when any score is above 0.05
+        max_score = max(predictions.values())
+        if max_score > 0.05:
+            # DEBUG, not INFO: this fired on virtually every speech frame and
+            # flooded the journal (80 lines/second of audio).
+            logger.debug(f"🔍 Predictions: {predictions}")
+
+        # --- LÓGICA DE DETECÇÃO COM TOLERÂNCIA (match legacy) ---
         for model_name, score in predictions.items():
             if score >= self.threshold:
+                bar = "█" * int(score * 20)
+                logger.info(f"👻 Wake word '{model_name}' probability: {score:.4f} | {bar}")
+
+            streak = self._streaks.get(model_name, 0)
+            patience = self._patience.get(model_name, 0)
+
+            if score >= self.threshold:
+                streak += 1
+                self._streaks[model_name] = streak
+                patience = self._max_patience  # Reset da paciência se acertou
+            else:
+                if streak > 0 and patience > 0:
+                    patience -= 1  # Não zera o streak, apenas gasta paciência
+                else:
+                    streak = 0
+                    patience = 0  # Zera tudo
+            self._patience[model_name] = patience
+
+            if streak >= self._persistence:
+                logger.info(f"\n⚡ WAKEWORD DETETADA! (Score final: {score:.2f})")
                 self._last_detection = now
+                self._streaks.clear()
+                self._patience.clear()
                 return True, model_name
 
         return False, None
 
+    def _prime_buffer(self, frames: int = 96):
+        """Fill openWakeWord's rolling mel buffer with SILENCE, deterministically.
+
+        openWakeWord seeds ``feature_buffer`` with
+        ``np.random.randint(-1000, 1000, ...)`` — unseeded random noise. The
+        model reads a 76-frame context window, so for the first ~6 seconds of
+        audio the predictions depend on that random noise.
+
+        Measured consequence in this project: identical audio produced
+        different verdicts between runs. Two streams sharing their first 16
+        frames ("olá fantasma" twice vs "olá" then "hey") one fired and one did
+        not, purely because of leftover random state.
+
+        Priming with true silence removes the non-determinism: the same clip
+        always yields the same scores. It does not raise the scores, so it does
+        not manufacture detections — it makes them reproducible.
+        """
+        if getattr(self, "oww_model", None) is None:
+            return
+        silence = np.zeros(self.chunk_size, dtype=np.int16)
+        for _ in range(frames):
+            self.oww_model.predict(silence)
+
     def reset(self):
-        """Reset cooldown timer. Useful for testing or manual reset."""
+        """Reset cooldown, streaks, patience AND the model's feature buffers.
+
+        Three defects were fixed here:
+
+        1. ``reset()`` was defined twice. Python keeps the last definition, so
+           the version that cleared ``_streaks`` was dead code and never ran.
+        2. It did not call ``oww_model.reset()``. openWakeWord's Model keeps a
+           rolling mel-spectrogram buffer, so the first detections after a
+           reset were computed against a stale (and randomly seeded) buffer.
+        3. It left the buffer randomly seeded, making detection
+           non-deterministic. It is now re-primed with silence.
+        """
         self._last_detection = 0.0
+        self._streaks.clear()
+        self._patience.clear()
+        if getattr(self, "oww_model", None) is not None:
+            self.oww_model.reset()
+            self._prime_buffer()
 
 
 class AudioCapture:
@@ -273,7 +382,7 @@ class AudioCapture:
         channels: int = 1,
         block_size: int = 1600,
         dtype: str = "int16",
-        queue_maxsize: int = 10,
+        queue_maxsize: int = 50,
     ):
         """Initialize audio capture.
 
@@ -293,6 +402,7 @@ class AudioCapture:
         self.queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=queue_maxsize)
         self._stream: Optional[sd.InputStream] = None
         self._running = False
+        self._downsample_factor = 1
 
     def _callback(self, indata, frames, time_info, status):
         """sounddevice callback - runs in audio thread.
@@ -311,12 +421,18 @@ class AudioCapture:
         if self._running:
             # Copy data to avoid buffer reuse issues
             try:
-                self.queue.put_nowait(indata.copy().flatten())
+                audio_copy = indata.copy().flatten()
+                if self._downsample_factor > 1:
+                    audio_copy = audio_copy[::self._downsample_factor]
+                self.queue.put_nowait(audio_copy)
             except queue.Full:
                 # Drop oldest frame to prevent blocking audio thread
                 try:
                     self.queue.get_nowait()
-                    self.queue.put_nowait(indata.copy().flatten())
+                    audio_copy = indata.copy().flatten()
+                    if self._downsample_factor > 1:
+                        audio_copy = audio_copy[::self._downsample_factor]
+                    self.queue.put_nowait(audio_copy)
                 except queue.Empty:
                     pass
 
@@ -339,6 +455,26 @@ class AudioCapture:
                         device_idx = i
                         break
 
+            # Auto detect sample rate and configure volume if enabled
+            if config.audio.auto_detect and isinstance(device_idx, int):
+                if config.audio.disable_agc:
+                    force_volume_down(device_idx)
+                detected_sr = find_working_samplerate(device_idx)
+                # Downsample logic to mimic old assistant.py
+                base_sr = 16000
+                base_block = 1280
+                factor = 1
+                if detected_sr == 48000:
+                    factor = 3
+                elif detected_sr == 32000:
+                    factor = 2
+                self._downsample_factor = factor
+                self.sample_rate = detected_sr
+                self.block_size = base_block * factor
+                logger.info(f"🎚️ Sample rate ajustado: {self.sample_rate} Hz | fator downsample {factor}x | blocksize {self.block_size}")
+            else:
+                self._downsample_factor = 1
+
             self._stream = sd.InputStream(
                 device=device_idx,
                 samplerate=self.sample_rate,
@@ -350,7 +486,7 @@ class AudioCapture:
             self._stream.start()  # type: ignore[union-attr]
             self._running = True
             logger.info(
-                f"Audio capture started: device={self.device}, sr={self.sample_rate}"
+                f"👂 Audio capture started: device={self.device}, sr={self.sample_rate}"
             )
             return Result.ok(None)
         except Exception as e:
