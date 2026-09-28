@@ -10,6 +10,8 @@ VAD-gated silence detection.
 """
 
 import logging
+
+# What the Phantom says when it hears its own name. Synthesised on first
 import os
 import random
 import re
@@ -40,6 +42,10 @@ from src.pipeline.tts import synthesize as tts_synthesize
 from src.pipeline.utils import Result, log_stage, logger
 from src.settings_store import get_persona
 from tools import search_with_searxng
+
+# What the Phantom says when it hears its own name. Synthesised on first
+# use and served from the TTS cache after that.
+GREETING_TEXT = "Sim."
 
 
 def sanitize_llm_context(context: str) -> str:
@@ -184,7 +190,16 @@ class PhantasmaPipeline:
 
         try:
             music_dir = config.audio_feedback.music_dir
-            music_files = [f for f in os.listdir(music_dir) if f.endswith((".mp3", ".wav", ".ogg"))]
+            # The music directory is optional. os.listdir raised
+            # FileNotFoundError when it was absent, the except below
+            # swallowed it, and the greeting -- the next statement -- was
+            # never reached. So the wake word fired, logged one warning
+            # and said nothing. Each part of the feedback has to fail on
+            # its own terms rather than take the greeting down with it.
+            music_files = []
+            if os.path.isdir(music_dir):
+                music_files = [f for f in os.listdir(music_dir)
+                               if f.endswith((".mp3", ".wav", ".ogg"))]
 
             if music_files:
                 music_file = os.path.join(music_dir, random.choice(music_files))
@@ -197,13 +212,43 @@ class PhantasmaPipeline:
                     data, sr = sf.read(music_file, dtype="int16")
                     self.audio_playback.play(data)
 
-            # Play greeting
+            # Play greeting. It is synthesised, not shipped: there is no
+            # audio/greeting.wav in any branch and there never was, so the
+            # only thing that could ever play it was the TTS cache. Serve the
+            # cache when it has the text, synthesise and cache it when it does
+            # not, and keep this independent of the music so one missing thing
+            # cannot silence the other.
             greeting_path = config.audio_feedback.greeting_path
+            if not os.path.isabs(greeting_path):
+                greeting_path = os.path.join(os.getcwd(), greeting_path)
+
+            greeted = False
             if os.path.exists(greeting_path):
                 import soundfile as sf
 
-                data, sr = sf.read(greeting_path, dtype="int16")
-                self.audio_playback.play(data)
+                data, _sr = sf.read(greeting_path, dtype="int16")
+                if len(data):
+                    self.audio_playback.play(data)
+                    greeted = True
+
+            if not greeted:
+                # play_tts reads the cache first and writes the result back,
+                # keyed on the text, so the second wake word costs nothing.
+                try:
+                    from audio_utils import play_tts
+
+                    play_tts(GREETING_TEXT, use_cache=True)
+                    greeted = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Greeting synthesis failed: %s", exc)
+
+            if not greeted:
+                # Silent is the failure mode that cost the session: the wake
+                # word fired, one warning was logged, and nothing was said.
+                logger.warning(
+                    "No greeting audio for %r: no cached or synthesised file",
+                    GREETING_TEXT,
+                )
 
             return Result.ok(None)
         except Exception as e:
