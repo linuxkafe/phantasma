@@ -1077,6 +1077,19 @@ BRAIN_TEMPLATE = (
     @media (max-width: 640px) {
         .sleep-bar { flex-wrap: wrap; position: static; }
     }
+    /* Fullscreen is fixed inset:0 with the stage absolutely positioned over
+       the whole hub, so a bar in normal flow would sit underneath the canvas.
+       In that mode the control floats over the graph instead. */
+    body.brain-fullscreen .sleep-bar {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        left: auto;
+        margin: 0;
+        max-width: min(28rem, calc(100vw - 24px));
+        z-index: 40;
+    }
+    body.brain-fullscreen .sleep-bar > div:first-child { display: none; }
     </style>
     <nav class="brain-tabs" role="tablist">
       <span class="brain-titlebar">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</span>
@@ -1101,6 +1114,7 @@ BRAIN_TEMPLATE = (
         {% if lang == 'en' %}Full screen{% else %}Ecrã inteiro{% endif %} ↗
       </a>
     </nav>
+
     <div class="sleep-bar" id="sonhar">
     <div style="flex:1; min-width:200px;">
       <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>{% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %} &mdash; {% if lang == 'en' %}pending issues{% else %}problemas pendentes{% endif %}{% endif %}</strong>
@@ -1109,20 +1123,6 @@ BRAIN_TEMPLATE = (
         {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
         {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
       </span>
-    </div>
-
-    <div class="brain-stage">
-      <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
-        <iframe class="brain-frame" src="/memory/3d?embed=1"
-                title="{% if lang == 'en' %}3D memory graph{% else %}Grafo 3D de memória{% endif %}"
-                loading="lazy"></iframe>
-      </section>
-
-      <section class="brain-panel" data-panel="summary" role="tabpanel">
-  <div class="grid grid-stats" style="margin-bottom:1.5rem;">
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Memories{% else %}Memórias{% endif %}</span>
-      <span class="stat-value">{{ stats.memories or 0 }}</span>
     </div>
     <div class="card stat">
       <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
@@ -1148,6 +1148,19 @@ BRAIN_TEMPLATE = (
     </div>
     {% endif %}
   </div>
+    <div class="brain-stage">
+      <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
+        <iframe class="brain-frame" src="/memory/3d?embed=1"
+                title="{% if lang == 'en' %}3D memory graph{% else %}Grafo 3D de memória{% endif %}"
+                loading="lazy"></iframe>
+      </section>
+
+      <section class="brain-panel" data-panel="summary" role="tabpanel">
+  <div class="grid grid-stats" style="margin-bottom:1.5rem;">
+    <div class="card stat">
+      <span class="stat-label">{% if lang == 'en' %}Memories{% else %}Memórias{% endif %}</span>
+      <span class="stat-value">{{ stats.memories or 0 }}</span>
+    </div>
 
     <button data-sleep class="btn btn--primary" style="white-space:nowrap;"
             onclick="triggerSleep()">

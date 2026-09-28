@@ -18,7 +18,9 @@ venv:
 
 setup: venv
 	@echo "Setting up $(AES_LANGUAGE) in $(VENV_DIR)..."
-	@$(VENV_PIP) install --extra-index-url https://download.pytorch.org/whl/cpu -e .[dev]
+	@$(VENV_PIP) install --extra-index-url https://download.pytorch.org/whl/cpu
+	@echo "    installing dev tools (playwright drives the layout tests)"
+	@$(VENV_PIP) install --quiet playwright ruff -e .[dev]
 
 run: venv
 	@$(VENV_PYTHON) -m src.main 2>/dev/null || $(VENV_PYTHON) src/main.py
