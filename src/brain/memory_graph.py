@@ -336,25 +336,46 @@ def retrieve_neighborhood(prompt: str, max_results: int = 5) -> list[dict]:
         return []
 
     matched = [r["label"].lower() for r in nodes]
-    edges: list[dict] = []
+    # An edge stores node_keys in source/target ("node:plataformas"), never
+    # labels. Comparing LOWER(source) against the label -- which is what this
+    # did -- can never be equal, so the edge expansion returned nothing at all
+    # and every answer saw an isolated node. The map below turns the matched
+    # labels into the keys the edge rows actually hold.
     with _connect() as conn:
-        for label in matched:
+        key_by_label, label_by_key = {}, {}
+        for r in conn.execute(
+            f"SELECT node_key, label FROM {GRAPH_TABLE} WHERE node_type = 'node'"
+        ).fetchall():
+            key_by_label[r["label"].lower()] = r["node_key"]
+            label_by_key[(r["node_key"] or "").lower()] = r["label"]
+        endpoints = {k for label in matched
+                     for k in (key_by_label.get(label),) if k}
+        edges: list[dict] = []
+        for key in endpoints:
             edge_rows = conn.execute(
                 f"""
                 SELECT node_type, label, source, target, affinity, weight
                 FROM {GRAPH_TABLE}
-                WHERE node_type = 'edge' AND (LOWER(source) = ? OR LOWER(target) = ?)
+                WHERE node_type = 'edge'
+                  AND (LOWER(source) = LOWER(?) OR LOWER(target) = LOWER(?))
                 """,
-                (label, label),
+                (key, key),
             ).fetchall()
             for e in edge_rows:
+                # Render the relation in labels, not keys: "node:plataformas
+                # -> node:capitalismo" is a database detail, and the consumer
+                # of this string is the LLM and the 3D view.
+                src_label = label_by_key.get((e["source"] or "").lower(),
+                                             e["source"])
+                tgt_label = label_by_key.get((e["target"] or "").lower(),
+                                             e["target"])
                 edges.append(
                     {
                         "type": "edge",
                         "label": e["label"],
                         "affinity": e["affinity"],
                         "weight": e["weight"],
-                        "relation": f"{e['source']} -> {e['target']}",
+                        "relation": f"{src_label} -> {tgt_label}",
                     }
                 )
 
