@@ -62,7 +62,14 @@ def play_tts(text, use_cache=True):
 
     if use_cache:
         os.makedirs(TTS_CACHE_DIR, exist_ok=True)
-        file_hash = hashlib.md5(text_cleaned.encode("utf-8")).hexdigest()
+        # The key covers the voice and the effects, not just the words. It did
+        # not, and that is how a 44-byte failure survived: a synthesis that
+        # produced nothing wrote a file, and the next run found the file and
+        # served it as though it were the answer. The same trap waits for a
+        # voice change -- a cache built by one voice would be replayed under
+        # another, forever, with nothing in the filename to say so.
+        recipe = "|".join([str(config.TTS_MODEL_PATH), "|".join(_ghost_effects())])
+        file_hash = hashlib.md5((text_cleaned + recipe).encode("utf-8")).hexdigest()
         cache_path = os.path.join(TTS_CACHE_DIR, f"{file_hash}.wav")
 
         if os.path.exists(cache_path):
