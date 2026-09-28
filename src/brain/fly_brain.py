@@ -85,9 +85,7 @@ class EPGRingAttractor:
         y = float((activity * np.sin(angles)).sum())
         return np.degrees(np.arctan2(y, x)) % 360.0
 
-    def step(
-        self, target_deg: float, amplitude: float = 1.0, n_solve: int = 20
-    ) -> float:
+    def step(self, target_deg: float, amplitude: float = 1.0, n_solve: int = 20) -> float:
         """Inject a bump at ``target_deg`` and relax the ring; returns orientation.
 
         Returns
@@ -334,12 +332,47 @@ class FlyBrain:
         self.pool.drive = pool_s["drive"]
 
         self.steps = state.get("steps", 0)
-        logger.info(
-            f"FlyBrain restored (steps={self.steps}, affinity={self.mb.affinity:.3f})"
-        )
+        logger.info(f"FlyBrain restored (steps={self.steps}, affinity={self.mb.affinity:.3f})")
 
     def sensory_default(self) -> np.ndarray:
         """Baseline sensory vector tagged with the current ring orientation."""
         c = np.cos(np.radians(self.ring.orientation_deg))
         s = np.sin(np.radians(self.ring.orientation_deg))
         return np.array([c, s, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+
+# ---------------------------------------------------------------------------
+# Shared instance
+# ---------------------------------------------------------------------------
+#
+# The assistant and skill_discord each constructed their own FlyBrain over the
+# same SQLite store. That is a correctness bug, not a style one: two objects
+# over one store means each holds its own in-memory ring state, so a reaction
+# from Discord steps a brain whose state the assistant never sees. The two
+# surfaces then write rows the other has not read.
+#
+# One instance, whoever asks. Registration happens once (the assistant's
+# pipeline constructor); every consumer resolves through here.
+
+_SHARED: "FlyBrain | None" = None
+
+
+def register_shared_fly_brain(brain: "FlyBrain") -> "FlyBrain":
+    """Register the canonical instance. Idempotent by design: the first
+    registration wins, because the assistant's is the one holding live ring
+    state, and a later caller must not silently replace it."""
+    global _SHARED
+    if _SHARED is None:
+        _SHARED = brain
+    return _SHARED
+
+
+def get_shared_fly_brain():
+    """The canonical FlyBrain, or None before the pipeline is up.
+
+    Returning None rather than building one is deliberate: a second instance
+    over the same store is exactly the bug this exists to prevent, and a
+    reaction arriving before startup is normal, not exceptional. Callers report
+    it; they do not paper over it by constructing a rival brain.
+    """
+    return _SHARED

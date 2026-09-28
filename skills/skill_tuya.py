@@ -1,15 +1,16 @@
+import config
+from pathlib import Path
+import time
 import json
 import os
 import socket
-import tempfile
+import sys
 import threading
-import time
-
-import config
+import tempfile
 
 try:
     import tinytuya
-    from tinytuya import Device, OutletDevice
+    from tinytuya import OutletDevice, Device 
 except ImportError:
     print("AVISO: Biblioteca 'tinytuya' não encontrada.")
     class Device: pass
@@ -17,11 +18,14 @@ except ImportError:
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
-CACHE_FILE = "/opt/phantasma/cache/tuya_cache.json"
+# Resolved through config.CACHE_DIR instead of a literal /opt/phantasma path.
+# A host path in code cannot be overridden, so these caches had to be forked
+# per host. In production the resolved path is byte-identical to the old one.
+CACHE_FILE = str(Path(config.CACHE_DIR) / "tuya_cache.json")
 PORTS_TO_LISTEN = [6666, 6667]
-POLL_COOLDOWN = 10
+POLL_COOLDOWN = 10 
 LAST_POLL = {}
-VERBOSE_LOGGING = False
+VERBOSE_LOGGING = False 
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
@@ -71,7 +75,7 @@ def _get_device_name_by_ip(ip):
 
 def _poll_device_task(name, details, force=False):
     ip = details.get('ip')
-    if not ip or ip.endswith('x'): return
+    if not ip or ip.endswith('x'): return 
     global LAST_POLL
     if not force and (time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN): return
     LAST_POLL[name] = time.time()
@@ -109,6 +113,17 @@ def init_skill_daemon():
     for name, details in config.TUYA_DEVICES.items(): threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
     for port in PORTS_TO_LISTEN: threading.Thread(target=_udp_listener, args=(port,), daemon=True).start()
 
+# Declared DPS schemas for known Tuya sensors, based on observed cache values.
+# dps 1 for these devices arrives in deci-celsius (245 -> 24.5 °C). Values are
+# evidence-based, not verified against a live device. No device in the fleet
+# currently declares a humidity DPS, so humidity is not reported until a live
+# reading confirms the DPS number.
+SENSOR_TEMP_MAP = {
+    "sensor do quarto": {"temperature": (1, 10.0)},
+    "sensor do wc": {"temperature": (1, 10.0)},
+}
+STALE_AFTER_S = 300  # 5 minutes - after this the reading is considered stale
+
 def get_status_for_device(nickname):
     cached = _get_cached_status(nickname)
     if not cached or 'dps' not in cached: return {"state": "unreachable"}
@@ -117,11 +132,28 @@ def get_status_for_device(nickname):
     result['state'] = 'on' if is_on else 'off'
     power_raw = dps.get('19') or dps.get('104')
     if power_raw: result['power_w'] = float(power_raw) / 10.0
-    temp = dps.get('1') or dps.get('102') or dps.get('va_temperature')
-    hum = dps.get('2') or dps.get('103') or dps.get('va_humidity')
-    if "sensor" in nickname.lower() or any(x in nickname.lower() for x in ["temp", "hum"]):
-        if temp: result['temperature'] = float(temp) / 10.0 if float(temp) > 100 else float(temp)
-        if hum: result['humidity'] = int(hum)
+
+    # Age and staleness: sensors are useless without recência.
+    ts = cached.get('timestamp')
+    now = time.time()
+    age_s = max(0, int(now - (ts or now)))
+    result['age_s'] = age_s
+    result['stale'] = age_s > STALE_AFTER_S
+
+    # Temperature: only when the device class declares which DPS holds temperature.
+    # This prevents the previous heuristic from guessing a DPS number based on value
+    # range and silently fabricating temperature/humidity (OPS-005).
+    schema = SENSOR_TEMP_MAP.get(nickname.lower())
+    if schema:
+        for field, (dps_id, scale) in schema.items():
+            raw = dps.get(str(dps_id))
+            if raw is None: continue
+            try:
+                value = float(raw) / scale
+            except (ValueError, TypeError):
+                continue
+            if field == "temperature" and 5.0 <= value <= 45.0:
+                result["temperature"] = round(value, 1)
     return result
 
 def handle(user_prompt_lower, user_prompt_full):
@@ -139,13 +171,13 @@ def handle(user_prompt_lower, user_prompt_full):
     for nick, conf in config.TUYA_DEVICES.items():
         if nick.lower() in user_prompt_lower:
             targets.append((nick, conf))
-
+    
     # 2. Lógica inteligente para Sensores e Locais
     if not targets:
         locations = ["sala", "quarto", "wc", "cozinha", "entrada"]
         mentioned_loc = next((loc for loc in locations if loc in user_prompt_lower), None)
         is_sensor_query = any(x in user_prompt_lower for x in ["temperatura", "humidade"])
-
+        
         for nick, conf in config.TUYA_DEVICES.items():
             nick_l = nick.lower()
             if mentioned_loc and mentioned_loc in nick_l:
@@ -182,19 +214,19 @@ def handle(user_prompt_lower, user_prompt_full):
             d = OutletDevice(conf['id'], conf['ip'], conf['key'])
             d.set_version(3.3); d.set_socketTimeout(2)
             idx = 20 if any(x in nick.lower() for x in ["luz", "lâmpada", "candeeiro"]) else 1
-
+            
             # Executa sem esperar retorno (nowait=True não retorna bool útil)
             d.set_value(idx, action == "on", nowait=True)
-
+            
             # Se não houve exceção, contamos como sucesso
             success += 1
             print(f"[Tuya] {nick} -> {action}")
-        except Exception as e:
+        except Exception as e: 
             print(f"[Tuya] Erro ao controlar {nick}: {e}")
             continue
 
     action_pt = "ligado" if action == "on" else "desligado"
-
+    
     if len(targets) > 1:
         return f"{success} dispositivos {action_pt}s."
     elif len(targets) == 1:

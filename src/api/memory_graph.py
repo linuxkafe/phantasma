@@ -25,9 +25,15 @@ import re
 import sqlite3
 import unicodedata
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
-BRAIN_DB_PATH = Path("/opt/phantasma/data/brain.db")
+import config
+
+# Resolved through config so a dev checkout uses its own database. This used to
+# be hardcoded to /opt/phantasma/data/brain.db, so a dev process read -- and
+# could write -- the PRODUCTION database. In production the resolved path is
+# identical to the old literal.
+BRAIN_DB_PATH = Path(config.BRAIN_DB_PATH)
 
 # Payload keys actually present in stored memories, including the variants
 # the model emitted on different runs.
@@ -183,13 +189,35 @@ def build_graph(
         "flybrain": None,
     }
 
-    def add_link(source: str, target: str, kind: str, affinity: float = 0.0) -> None:
+    def add_link(
+        source: str,
+        target: str,
+        kind: str,
+        affinity: float = 0.0,
+        node_key: Optional[str] = None,
+        weight: Optional[float] = None,
+    ) -> None:
+        """Add a link, carrying the identity needed to edit it.
+
+        ``node_key`` and ``weight`` are the stored row's key and weight, not
+        the merged concept's. Without them the 3D explorer could draw an edge
+        but not correct it: saving a weight needs a key to write against, and
+        the concept's own weight is a max() across several rows, so editing it
+        would silently rewrite the wrong one.
+        """
         sig = (source, target, kind)
         if source == target or sig in seen_link:
             return
         seen_link.add(sig)
         links.append(
-            {"source": source, "target": target, "kind": kind, "affinity": float(affinity)}
+            {
+                "source": source,
+                "target": target,
+                "kind": kind,
+                "affinity": float(affinity),
+                "node_key": node_key,
+                "weight": None if weight is None else float(weight),
+            }
         )
 
     # --- memory rows -> memory nodes + tag links -------------------------
@@ -252,7 +280,17 @@ def build_graph(
         concept = concepts.get(label or node_key)
         if "graph" not in concept["sources"]:
             concept["sources"].append("graph")
-        concept["weight"] = max(float(concept["weight"]), float(weight or 1.0))
+        # An explicit, operator-set weight on a stored node is a CORRECTION and
+        # outranks the aggregate, instead of being maxed into it. With `max`
+        # here, lowering a node weight wrote it to the database and then the very
+        # next read still showed the old value, because some other source (a
+        # memory-derived default) still weighed 1.0 -- so the edit looked like
+        # it had not stuck. `sources` records that a stored node backs this
+        # concept, which is what makes the node's own weight authoritative.
+        if "graph" in concept["sources"]:
+            concept["weight"] = float(weight if weight is not None else 1.0)
+        else:
+            concept["weight"] = max(float(concept["weight"]), float(weight or 1.0))
         concept["touch_count"] = max(int(concept["touch_count"]), int(touch or 0))
         concept["affinity"] = max(float(concept["affinity"]), float(affinity or 0.0))
         concept["graph_key"] = node_key
@@ -265,8 +303,14 @@ def build_graph(
 
     # Resolve stored graph edges by label; flag the ones that dangle.
     for src_label, tgt_label, affinity in graph_edge_labels:
-        src = next((c for c in concept_nodes if normalise(c["label"]) == normalise(src_label)), None)
-        tgt = next((c for c in concept_nodes if normalise(c["label"]) == normalise(tgt_label)), None)
+        src = next(
+            (c for c in concept_nodes if normalise(c["label"]) == normalise(src_label)),
+            None,
+        )
+        tgt = next(
+            (c for c in concept_nodes if normalise(c["label"]) == normalise(tgt_label)),
+            None,
+        )
         if src is None:
             src = concepts.get(src_label)
             src["unresolved"] = True
@@ -274,14 +318,16 @@ def build_graph(
             nodes.append(src)
             concept_nodes.append(src)
             stats["unresolved_edges"] += 1
+            src.setdefault("dangling", []).append({"edge_key": node_key, "side": "source"})
         if tgt is None:
             tgt = concepts.get(tgt_label)
             tgt["unresolved"] = True
             tgt["sources"].append("dangling")
             nodes.append(tgt)
+            tgt.setdefault("dangling", []).append({"edge_key": node_key, "side": "target"})
             concept_nodes.append(tgt)
             stats["unresolved_edges"] += 1
-        add_link(src["id"], tgt["id"], "graph", affinity)
+        add_link(src["id"], tgt["id"], "graph", affinity, node_key=node_key, weight=weight)
 
     stats["concepts"] = len(concept_nodes)
     stats["nodes"] = len(nodes)
@@ -349,7 +395,12 @@ def build_graph_from_db(db_path: Path | str = BRAIN_DB_PATH) -> dict[str, Any]:
         return {
             "nodes": [],
             "links": [],
-            "stats": {"nodes": 0, "links": 0, "memories": 0, "error": "brain.db not found"},
+            "stats": {
+                "nodes": 0,
+                "links": 0,
+                "memories": 0,
+                "error": "brain.db not found",
+            },
         }
 
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)

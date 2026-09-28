@@ -147,9 +147,7 @@ def log_stage(logger: logging.Logger, stage: str, result: Result, **extra):
     """
     fields = " ".join(f"{k}={v}" for k, v in extra.items())
     if result.success:
-        logger.info(
-            f"stage={stage} status=ok duration_ms={result.duration_ms:.1f} {fields}"
-        )
+        logger.info(f"stage={stage} status=ok duration_ms={result.duration_ms:.1f} {fields}")
     else:
         logger.error(
             f"stage={stage} status=error "

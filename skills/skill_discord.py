@@ -328,9 +328,12 @@ def init_skill_daemon():
     if not hasattr(config, "DISCORD_BOT_TOKEN"):
         return
 
-    # Initialize FlyBrain for reaction feedback
-    store = FlyBrainStore(config_module.BRAIN_DB_PATH)
-    _fly_brain = FlyBrain(store=store)
+    # Resolve the shared FlyBrain rather than building a second one over the
+    # same store. Two instances meant a Discord reaction stepped a brain whose
+    # state the assistant never saw.
+    from src.brain.fly_brain import get_shared_fly_brain
+
+    _fly_brain = get_shared_fly_brain()
     print(f"[Discord Skill] FlyBrain inicializado: {_fly_brain is not None}")
 
     print("[Discord Skill] A iniciar daemon do Discord...")

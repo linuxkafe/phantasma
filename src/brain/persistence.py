@@ -148,9 +148,7 @@ class FlyBrainStore:
         """
         try:
             with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute(
-                    f"SELECT data, schema_version FROM {TABLE_NAME} WHERE id = 1"
-                )
+                cursor = conn.execute(f"SELECT data, schema_version FROM {TABLE_NAME} WHERE id = 1")
                 row = cursor.fetchone()
 
             if not row:
@@ -161,8 +159,7 @@ class FlyBrainStore:
 
             if schema_version != SCHEMA_VERSION:
                 logger.warning(
-                    "Schema version mismatch: "
-                    f"DB={schema_version}, code={SCHEMA_VERSION}"
+                    f"Schema version mismatch: DB={schema_version}, code={SCHEMA_VERSION}"
                 )
 
             state = self._deserialize_state(data)

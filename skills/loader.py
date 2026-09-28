@@ -79,7 +79,19 @@ class LegacySkillAdapter(Skill):
         if t == TriggerType.STARTSWITH:
             return any(stripped.startswith(x) for x in triggers_lower)
         if t == TriggerType.CONTAINS:
-            return any(x in stripped for x in triggers_lower)
+            # Word boundary on both sides. Plain substring matching let the
+            # tapo skill's "ver" trigger fire on "verde": asked "O que e o
+            # Capuchinho Verde?" the assistant answered "Vigia inacessivel."
+            # because it thought it had been asked to look through a camera.
+            # Substring matching on short triggers steals unrelated questions.
+            import re as _re
+
+            for x in triggers_lower:
+                if not x:
+                    continue
+                if _re.search(r"\b" + _re.escape(x) + r"\b", stripped):
+                    return True
+            return False
         if t == TriggerType.REGEX:
             import re
 

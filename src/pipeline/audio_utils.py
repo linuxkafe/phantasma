@@ -24,9 +24,13 @@ from config import config
 from src.pipeline.utils import Result, logger
 
 # TTS cache directory (configurable via env, fallback to project dir)
-TTS_CACHE_DIR = os.getenv(
-    "TTS_CACHE_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "cache", "tts")
-)
+# Single source of truth for the cache path. This module binds `config` to the
+# Config INSTANCE (`from config import config`), so the attribute is
+# `config.tts_cache_dir` -- NOT `config.TTS_CACHE_DIR`, which only exists on the
+# module object. The sibling top-level audio_utils.py binds the MODULE and uses
+# the module-level constant. Both now resolve through config.py instead of
+# carrying their own host-specific default, so the two can no longer drift.
+TTS_CACHE_DIR = config.tts_cache_dir
 
 
 def clean_old_cache(days: int = 30) -> None:
@@ -67,9 +71,7 @@ def force_volume_down(card_index: int) -> Result:
 
         for ctrl in controls:
             # Skip playback controls
-            if any(
-                x in ctrl for x in ["PCM", "Master", "Speaker", "Headphone", "Playback"]
-            ):
+            if any(x in ctrl for x in ["PCM", "Master", "Speaker", "Headphone", "Playback"]):
                 continue
 
             # 1. Adjust Capture/Mic volume
@@ -108,9 +110,7 @@ def force_volume_down(card_index: int) -> Result:
         return Result.fail(str(e))
 
 
-def find_working_samplerate(
-    device_index: Optional[int], preferred_rates: list[int] = None
-) -> int:
+def find_working_samplerate(device_index: Optional[int], preferred_rates: list[int] = None) -> int:
     """
     Negotiate a working sample rate with the audio device.
 
@@ -122,9 +122,7 @@ def find_working_samplerate(
     logger.info(f"A negociar Sample Rate para o device {device_index}...")
     for rate in preferred_rates:
         try:
-            with sd.InputStream(
-                device=device_index, channels=1, samplerate=rate, dtype="int16"
-            ):
+            with sd.InputStream(device=device_index, channels=1, samplerate=rate, dtype="int16"):
                 pass
             logger.info(f"Hardware aceitou: {rate} Hz")
             return rate
@@ -148,13 +146,7 @@ def play_tts(text: str, use_cache: bool = True) -> Result:
     if not text:
         return Result.ok(None)
 
-    text_cleaned = (
-        text.replace("**", "")
-        .replace("*", "")
-        .replace("#", "")
-        .replace("`", "")
-        .strip()
-    )
+    text_cleaned = text.replace("**", "").replace("*", "").replace("#", "").replace("`", "").strip()
     logger.info(f"IA: {text_cleaned}")
 
     try:
@@ -267,9 +259,7 @@ def play_tts(text: str, use_cache: bool = True) -> Result:
         return Result.fail(str(e))
 
 
-def play_random_music_snippet(
-    music_dir: str = None, duration_seconds: int = 45
-) -> Result:
+def play_random_music_snippet(music_dir: str = None, duration_seconds: int = 45) -> Result:
     """Play a random music snippet from directory."""
     if music_dir is None:
         music_dir = config.audio_feedback.music_dir
@@ -284,9 +274,7 @@ def play_random_music_snippet(
         if mp3s:
             chosen = random.choice(mp3s)
             if chosen.endswith(".mp3"):
-                subprocess.run(
-                    ["mpg123", "-q", "-n", str(duration_seconds), chosen], check=False
-                )
+                subprocess.run(["mpg123", "-q", "-n", str(duration_seconds), chosen], check=False)
             else:
                 import soundfile as sf
 
@@ -369,16 +357,12 @@ def record_audio_vad(
         # Find working sample rate if device specified
         actual_rate = sample_rate
         if device is not None:
-            actual_rate = find_working_samplerate(
-                device, [sample_rate, 48000, 44100, 32000]
-            )
+            actual_rate = find_working_samplerate(device, [sample_rate, 48000, 44100, 32000])
             if actual_rate != sample_rate:
                 logger.info(f"Sample rate ajustado: {sample_rate} -> {actual_rate} Hz")
                 samples_per_frame = int(actual_rate * frame_duration_ms / 1000)
                 chunks_per_second = 1000 // frame_duration_ms
-                silence_limit_chunks = int(
-                    silence_threshold_seconds * chunks_per_second
-                )
+                silence_limit_chunks = int(silence_threshold_seconds * chunks_per_second)
                 max_chunks = int(max_duration_seconds * chunks_per_second)
 
         with sd.InputStream(
@@ -419,9 +403,9 @@ def record_audio_vad(
             ratio = 16000 / actual_rate
             new_length = int(len(audio_data) * ratio)
             indices = np.linspace(0, len(audio_data) - 1, new_length)
-            audio_data = np.interp(
-                indices, np.arange(len(audio_data)), audio_data
-            ).astype(np.float32)
+            audio_data = np.interp(indices, np.arange(len(audio_data)), audio_data).astype(
+                np.float32
+            )
 
         return Result.ok(audio_data)
 

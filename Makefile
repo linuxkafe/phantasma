@@ -73,3 +73,11 @@ doctor:
 
 help:
 	@echo "AES Commands: make setup run test lint format build check doctor typecheck"
+
+## Deploy pHantasma to production (dev -> prod, one direction only)
+deploy:
+	@scripts/deploy.sh --dry-run
+deploy-apply:
+	@scripts/deploy.sh
+deploy-status:
+	@scripts/deploy.sh --dry-run

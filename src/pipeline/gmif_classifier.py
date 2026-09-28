@@ -179,44 +179,33 @@ def classify_node(node_key: str, label: str) -> NodeClassification:
         return NodeClassification(
             gmif_type=NodeGMIFType.CONCEPT,
             confidence=0.90,
-            evidence=json.dumps(
-                {"node_key": node_key, "label": label, "basis": "key_pattern"}
-            ),
+            evidence=json.dumps({"node_key": node_key, "label": label, "basis": "key_pattern"}),
         )
     elif "entidade" in key_lower or "entity" in key_lower:
         return NodeClassification(
             gmif_type=NodeGMIFType.ENTITY,
             confidence=0.85,
-            evidence=json.dumps(
-                {"node_key": node_key, "label": label, "basis": "key_pattern"}
-            ),
+            evidence=json.dumps({"node_key": node_key, "label": label, "basis": "key_pattern"}),
         )
     elif "evento" in key_lower or "event" in key_lower:
         return NodeClassification(
             gmif_type=NodeGMIFType.EVENT,
             confidence=0.85,
-            evidence=json.dumps(
-                {"node_key": node_key, "label": label, "basis": "key_pattern"}
-            ),
+            evidence=json.dumps({"node_key": node_key, "label": label, "basis": "key_pattern"}),
         )
     elif any(
-        prop in label_lower
-        for prop in ["propriedade", "atributo", "qualidade", "característica"]
+        prop in label_lower for prop in ["propriedade", "atributo", "qualidade", "característica"]
     ):
         return NodeClassification(
             gmif_type=NodeGMIFType.PROPERTY,
             confidence=0.80,
-            evidence=json.dumps(
-                {"node_key": node_key, "label": label, "basis": "label_semantics"}
-            ),
+            evidence=json.dumps({"node_key": node_key, "label": label, "basis": "label_semantics"}),
         )
     else:
         return NodeClassification(
             gmif_type=NodeGMIFType.CONCEPT,
             confidence=0.80,
-            evidence=json.dumps(
-                {"node_key": node_key, "label": label, "basis": "default"}
-            ),
+            evidence=json.dumps({"node_key": node_key, "label": label, "basis": "default"}),
         )
 
 
@@ -229,9 +218,7 @@ def apply_gmif_to_edge(conn, edge_id: int) -> bool:
     if not row:
         return False
 
-    classification = classify_edge(
-        row["label"], row["source"] or "", row["target"] or ""
-    )
+    classification = classify_edge(row["label"], row["source"] or "", row["target"] or "")
 
     cur.execute(
         """
@@ -309,8 +296,7 @@ def classify_all_nodes(conn) -> int:
     """Classify all unclassified nodes in the graph."""
     cur = conn.cursor()
     nodes = cur.execute(
-        "SELECT id FROM memory_graph "
-        "WHERE node_type = 'node' AND node_gmif_type IS NULL"
+        "SELECT id FROM memory_graph WHERE node_type = 'node' AND node_gmif_type IS NULL"
     ).fetchall()
     count = 0
     for (node_id,) in nodes:
@@ -327,15 +313,13 @@ def get_gmif_stats(conn) -> dict:
         "SELECT COUNT(*) FROM memory_graph WHERE node_type = 'node'"
     ).fetchone()[0]
     stats["classified_nodes"] = cur.execute(
-        "SELECT COUNT(*) FROM memory_graph "
-        "WHERE node_type = 'node' AND node_gmif_type IS NOT NULL"
+        "SELECT COUNT(*) FROM memory_graph WHERE node_type = 'node' AND node_gmif_type IS NOT NULL"
     ).fetchone()[0]
     stats["total_edges"] = cur.execute(
         "SELECT COUNT(*) FROM memory_graph WHERE node_type = 'edge'"
     ).fetchone()[0]
     stats["classified_edges"] = cur.execute(
-        "SELECT COUNT(*) FROM memory_graph "
-        "WHERE node_type = 'edge' AND gmif_level IS NOT NULL"
+        "SELECT COUNT(*) FROM memory_graph WHERE node_type = 'edge' AND gmif_level IS NOT NULL"
     ).fetchone()[0]
     stats["logical_edges"] = cur.execute(
         "SELECT COUNT(*) FROM memory_graph "

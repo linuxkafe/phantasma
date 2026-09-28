@@ -256,9 +256,7 @@ class TestSynthesizeConvenienceFunction:
     def test_synthesize_delegates_to_class(self, mock_tts_class):
         """Test convenience function creates PiperTTS and calls synthesize."""
         mock_tts = MagicMock()
-        mock_tts.synthesize.return_value = Result.ok(
-            (np.zeros(100), 22050), duration_ms=200.0
-        )
+        mock_tts.synthesize.return_value = Result.ok((np.zeros(100), 22050), duration_ms=200.0)
         mock_tts_class.return_value = mock_tts
 
         result = synthesize("Hello")

@@ -37,7 +37,22 @@ def _safe_ollama_chat(prompt, system_instruction=""):
 
     for host, model in targets:
         try:
-            client = ollama.Client(host=host, timeout=config.OLLAMA_TIMEOUT)
+            # A per-call timeout, not the global OLLAMA_TIMEOUT.
+            #
+            # The global value is 600s and it governs ordinary conversation,
+            # where a long answer is desirable. The dream cycle chains several
+            # of these calls: measured 61.7s for a two-word "OK" against the
+            # primary host, because it is a cold local model generating without
+            # a warm cache. At the global timeout one step can hold the cycle for
+            # ten minutes, and the cycle is what the /admin/brain button waits
+            # on -- which is why "Sleep & Dream" appeared to do nothing.
+            #
+            # Falling back to the next host on timeout is the desired behaviour,
+            # not an error: a step that cannot finish should not stall the rest.
+            client = ollama.Client(
+                host=host,
+                timeout=float(getattr(config, "DREAM_OLLAMA_TIMEOUT", 90)),
+            )
             messages = []
             if system_instruction:
                 messages.append({'role': 'system', 'content': system_instruction})

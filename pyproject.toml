@@ -37,7 +37,7 @@ addopts = "--cov=src --cov-report=xml --cov-report=term --cov-fail-under=30"
 pythonpath = ["src"]
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 lint.select = ["E", "F", "W", "I"]
 
 [tool.mypy]
@@ -67,3 +67,23 @@ module = [
     "alsaaudio.*",
 ]
 ignore_missing_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# admin.py and design.py are almost entirely inline HTML/CSS. Wrapping a Jinja
+# attribute across lines is not a readability win, it is a diff that hides the
+# change it makes. The rule stays on everywhere else.
+"src/api/admin.py" = ["E402", "E501"]
+"src/api/design.py" = ["E501"]
+# i18n.py is a table of translated sentences: a translation cannot be wrapped
+# without editing the translation.
+"src/api/i18n.py" = ["E501"]
+# A handful of f-strings in log calls and test assertions read as one line or
+# they read as two facts stitched together badly.
+"src/pipeline/audio.py" = ["E501"]
+"tests/test_admin_nav_layout.py" = ["E501"]
+"tests/test_explorer_ui.py" = ["E501"]
+"tests/test_memory_graph.py" = ["E501"]
+# E402: these modules import after defining a logger or after a docstring-level
+# guard on purpose -- moving them to the top creates the import cycle the late
+# import avoids.
+"tests/conftest.py" = ["E402"]

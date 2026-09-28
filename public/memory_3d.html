@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pHantasma · Explorador 3D da Memória</title>
+<style>
+  :root {
+    --bg: #06060c;
+    --surface: #0f101d;
+    --surface-2: #161829;
+    --border: #1f2338;
+    --accent: #00d4aa;
+    --accent-dim: rgba(0, 212, 170, .16);
+    --warn: #ffb74d;
+    --danger: #ff6b6b;
+    --text: #e6e9ef;
+    --muted: #8b93a7;
+    --memory: #4aa3ff;
+    --concept: #00d4aa;
+    --mermaid: #b388ff;
+    --unresolved: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #stage { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  .panel {
+    position: fixed; z-index: 10;
+    background: rgba(15, 16, 29, .86);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  /* ---- top bar ---- */
+  #topbar {
+    top: 12px; left: 12px; right: 12px;
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 14px; flex-wrap: wrap;
+  }
+  #topbar h1 {
+    font-size: 14px; margin: 0; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent); white-space: nowrap;
+  }
+  #topbar .spacer { flex: 1 1 auto; }
+  .stat { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; }
+  .stat b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .stat.flagged b { color: var(--warn); }
+  a.back {
+    color: var(--muted); text-decoration: none; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 9px;
+    white-space: nowrap;
+  }
+  a.back:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- left controls ---- */
+  #controls {
+    top: 74px; left: 12px; width: 258px; padding: 14px;
+    max-height: calc(100vh - 100px); overflow-y: auto;
+  }
+  #controls h2, #details h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px;
+  }
+  input[type="search"], input[type="range"] { width: 100%; }
+  input[type="search"] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 7px 9px; font-size: 13px;
+  }
+  input[type="search"]:focus { outline: none; border-color: var(--accent); }
+  input[type="range"] { accent-color: var(--accent); }
+  .row { display: flex; gap: 7px; flex-wrap: wrap; }
+  button {
+    background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 11px; font-size: 12px; cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button[aria-pressed="true"] {
+    border-color: var(--accent); color: var(--accent); background: var(--accent-dim);
+  }
+  .checks { display: flex; flex-direction: column; gap: 6px; }
+  .checks label {
+    display: flex; align-items: center; gap: 7px; font-size: 13px;
+    color: var(--text); cursor: pointer;
+  }
+  .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.45; }
+  kbd {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 4px; font-size: 11px;
+  }
+
+  /* ---- details drawer ---- */
+  #details {
+    top: 74px; right: 12px; width: 372px; max-height: calc(100vh - 100px);
+    padding: 14px; display: none; overflow-y: auto;
+  }
+  #details.open { display: block; }
+  #details .close {
+    position: absolute; top: 8px; right: 8px;
+    background: none; border: none; color: var(--muted); font-size: 17px;
+    padding: 2px 6px;
+  }
+  #details .close:hover { color: var(--danger); }
+  .kind {
+    display: inline-block; font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 20px;
+    border: 1px solid currentColor; margin-bottom: 8px;
+  }
+  .kind.memory { color: var(--memory); }
+  .kind.concept { color: var(--concept); }
+  .kind.mermaid { color: var(--mermaid); }
+  .dlabel { color: var(--text); font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .dmeta { color: var(--muted); font-size: 11px; margin-bottom: 12px; }
+  .dmeta code { color: var(--accent); }
+  .tag {
+    display: inline-block; background: var(--accent-dim); color: var(--accent);
+    border-radius: 5px; padding: 2px 7px; font-size: 11px; margin: 0 4px 4px 0;
+    cursor: pointer; border: 1px solid transparent;
+  }
+  .tag:hover { border-color: var(--accent); }
+  .facts { margin: 0; padding-left: 17px; font-size: 12.5px; color: #c6ccd8; }
+  .facts li { margin-bottom: 4px; }
+  pre.raw {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 7px;
+    padding: 9px; font-size: 11px; max-height: 190px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; color: #9aa3b5; margin: 0;
+  }
+  .warnbox {
+    background: rgba(255, 183, 77, .1); border: 1px solid var(--warn);
+    color: var(--warn); border-radius: 7px; padding: 8px 10px;
+    font-size: 12px; margin-bottom: 12px;
+  }
+  #mermaid-host {
+    background: #0a0b12; border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px; overflow: auto; max-height: 260px;
+  }
+  #mermaid-host svg { max-width: 100%; height: auto; }
+
+  /* ---- tooltip + hud ---- */
+  #tooltip {
+    position: fixed; z-index: 30; pointer-events: none; display: none;
+    background: rgba(6, 6, 12, .95); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 4px 8px; font-size: 12px; max-width: 260px;
+  }
+  #legend {
+    bottom: 12px; left: 12px; padding: 9px 12px;
+    display: flex; gap: 14px; font-size: 11px; color: var(--muted); flex-wrap: wrap;
+  }
+  #legend .item { display: flex; align-items: center; gap: 5px; }
+  #loading {
+    position: fixed; inset: 0; z-index: 50; display: flex;
+    align-items: center; justify-content: center; flex-direction: column; gap: 12px;
+    background: var(--bg); color: var(--muted);
+  }
+  #loading .err { color: var(--danger); max-width: 520px; text-align: center; }
+  .spinner {
+    width: 26px; height: 26px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* ---- mobile: collapse the controls behind a hamburger ----
+     Previously this block only narrowed #controls, so on a phone the panel
+     stayed open on top of the canvas and the graph was unusable. */
+  .panel-toggle { display: none; }
+  @media (max-width: 900px) {
+    #topbar { padding-right: 60px; }
+    .panel-toggle {
+      display: flex; position: absolute; top: 10px; right: 12px; z-index: 20;
+      width: 40px; height: 40px; padding: 0;
+      align-items: center; justify-content: center; flex-direction: column; gap: 4px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 8px; cursor: pointer;
+    }
+    .panel-toggle span {
+      display: block; width: 16px; height: 2px; border-radius: 2px;
+      background: var(--text); transition: transform .16s ease, opacity .16s ease;
+    }
+    .panel-toggle[aria-expanded="true"] span:nth-child(1) { transform: translateY(5px) rotate(45deg); }
+    .panel-toggle[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+    .panel-toggle[aria-expanded="true"] span:nth-child(3) { transform: translateY(-5px) rotate(-45deg); }
+
+    /* closed by default; opened only by the toggle */
+    #controls {
+      display: none; top: 62px; left: 12px; right: 12px; width: auto;
+      max-height: calc(100vh - 86px);
+    }
+    #controls.open { display: block; }
+
+    #details { width: calc(100vw - 24px); }
+    /* stats wrap to two rows on a phone and eat the viewport */
+    #topbar .stat { display: none; }
+    #topbar .stat.flagged, #topbar #s-fly-box { display: flex; }
+  }
+
+  /* ---- embed mode (?embed=1) ----
+     Used by /admin/brain, which frames this page beside the RAG and FlyBrain
+     panels. The iframe already supplies the page chrome, so the back link and
+     the heading are redundant and cost vertical space in a 360-560px frame. */
+  body.embed #back-link, body.embed #topbar h1 { display: none; }
+  body.embed #topbar { top: 8px; left: 8px; right: 8px; padding: 8px 10px; }
+  body.embed #controls { top: 58px; }
+  body.embed #details { top: 58px; }
+
+    /* --- graph editing ------------------------------------------------
+       44px targets throughout: these are corrections to the brain, and a
+       missed tap is a missed correction. The danger variant is red because
+       deleting an edge is the one irreversible-feeling action here -- it is
+       audited, but the owner should feel it. */
+    .edit-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.10); }
+    .edit-section h4 { margin: 0 0 8px; font-size: .8rem; letter-spacing: .04em;
+                       text-transform: uppercase; opacity: .65; }
+    .edit-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .edit-row > span { flex: 0 0 96px; font-size: .8rem; opacity: .8; }
+    .edit-row input, .edit-row textarea {
+      flex: 1 1 auto; min-height: 44px; padding: 8px 10px;
+      background: rgba(255,255,255,.06); color: inherit;
+      border: 1px solid rgba(255,255,255,.14); border-radius: 8px;
+      font: inherit; font-size: .95rem;
+    }
+    .edit-row textarea { min-height: 88px; resize: vertical; }
+    /* The resolve section (T046) needs a select and a note; .edit-row only
+       styled input/textarea, so the dropdown rendered unstyled and the
+       explanation ran full-bleed. */
+    .edit-row select {
+      flex: 1 1 auto; min-height: 44px; background: #1a1a1a; color: #eee;
+      border: 1px solid #333; border-radius: 8px; padding: 6px 8px; font: inherit;
+    }
+    .edit-row select:focus-visible { outline: 2px solid var(--accent); }
+    .edit-note { margin: 0 0 10px; font-size: .8rem; line-height: 1.5; opacity: .78; }
+    .edit-note code { font-size: .95em; word-break: break-all; }
+    .edit-row input:focus, .edit-row textarea:focus {
+      outline: 2px solid #6ee7b7; outline-offset: 1px;
+    }
+    .edit-row .btn { min-height: 44px; padding: 0 14px; border-radius: 8px;
+                     border: 1px solid rgba(255,255,255,.18);
+                     background: rgba(255,255,255,.08); color: inherit;
+                     font: inherit; font-size: .85rem; cursor: pointer; }
+    .edit-row .btn:hover { background: rgba(255,255,255,.16); }
+    .edit-row .btn.danger { border-color: rgba(248,113,113,.5); color: #f8a1a1; }
+    .edit-row .btn.danger:hover { background: rgba(248,113,113,.16); }
+    .edit-feedback { min-height: 20px; margin-top: 8px; font-size: .8rem; }
+    .edit-feedback.ok { color: #86efac; }
+    .edit-feedback.err { color: #fca5a5; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="topbar" class="panel">
+  <button type="button" class="panel-toggle" id="btn-menu"
+          aria-controls="controls" aria-expanded="false" aria-label="Abrir menu">
+    <span></span><span></span><span></span>
+  </button>
+  <h1>🧠 Explorador 3D</h1>
+  <a class="back" href="/admin/dashboard" id="back-link">← Voltar</a>
+  <div class="spacer"></div>
+  <div class="stat"><span>memórias</span><b id="s-mem">–</b></div>
+  <div class="stat"><span>conceitos</span><b id="s-con">–</b></div>
+  <div class="stat"><span>Ligações</span><b id="s-link">–</b></div>
+  <div class="stat"><span>com Mermaid</span><b id="s-mmd">–</b></div>
+  <div class="stat flagged" id="s-dangle-box" hidden>
+    <span>refs por resolver</span><b id="s-dangle">–</b>
+  </div>
+  <div class="stat" id="s-fly-box"><span>FlyBrain</span><b id="s-fly">–</b></div>
+</div>
+
+<div id="controls" class="panel">
+  <h2>Navegar</h2>
+  <div class="field">
+    <label for="search">Procurar</label>
+    <input type="search" id="search" placeholder="ex.:中全会, veganismo, #73" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="degree">Ótimo mínimo: <b id="degree-val">1</b></label>
+    <input type="range" id="degree" min="1" max="12" value="1">
+    <div class="hint">Esconde o rabo de tags usadas uma única vez.</div>
+  </div>
+  <div class="field checks">
+    <label><input type="checkbox" id="k-memory" checked> <span class="swatch" style="background:var(--memory)"></span> memórias</label>
+    <label><input type="checkbox" id="k-concept" checked> <span class="swatch" style="background:var(--concept)"></span> conceitos</label>
+    <label><input type="checkbox" id="k-mermaid"> <span class="swatch" style="background:var(--mermaid)"></span> nós Mermaid</label>
+    <label><input type="checkbox" id="k-unresolved" checked> <span class="swatch" style="background:var(--unresolved)"></span> refs por resolver</label>
+  </div>
+  <hr>
+  <h2>Câmara</h2>
+  <div class="row">
+    <button id="btn-reset">Recentrar</button>
+    <button id="btn-rotate" aria-pressed="true">Rotação auto</button>
+    <button id="btn-labels" aria-pressed="true">Rótulos</button>
+    <button id="btn-physics">Repuxar</button>
+  </div>
+  <hr>
+  <div class="hint">
+    <kbd>arrastar</kbd> orbita · <kbd>scroll</kbd> zoom · <kbd>botão direito</kbd> desloca<br>
+    <kbd>clique</kbd> foca e abre · <kbd>Esc</kbd> fecha
+  </div>
+</div>
+
+<div id="details" class="panel">
+  <button class="close" id="btn-close" title="Fechar">✕</button>
+  <div id="detail-body"></div>
+  <!-- Live feedback for every edit in this panel. This element did not
+       exist -- only its CSS did -- so `feedback()` hit `if (!host) return`
+       and a failed save (422 on a node with no stored row) was invisible.
+       That is what made "it does not save" look like a silent no-op. -->
+  <div id="edit-feedback" class="edit-feedback" role="status" aria-live="polite"></div>
+</div>
+
+<div id="legend" class="panel">
+  <div class="item"><span class="swatch" style="background:var(--memory)"></span> memória</div>
+  <div class="item"><span class="swatch" style="background:var(--concept)"></span> conceito</div>
+  <div class="item"><span class="swatch" style="background:var(--mermaid)"></span> mermaid</div>
+  <div class="item"><span class="swatch" style="background:var(--unresolved)"></span> por resolver</div>
+  <div class="item" id="visible-count">— visíveis</div>
+</div>
+
+<div id="tooltip"></div>
+
+<div id="loading"><div class="spinner"></div><div>a carregar o grafo…</div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/public/vendor/three.module.js",
+    "three/addons/": "/public/vendor/"
+  }
+}
+</script>
+<script>
+// Embed mode is decided by the query string so it works with a static file
+// (no server round-trip) and survives a full reload inside the iframe.
+if (new URLSearchParams(location.search).get('embed') === '1') {
+  document.body.classList.add('embed');
+}
+</script>
+<script>
+// Mobile menu for the controls panel. Kept here (not in explorer.mjs) so the
+// control exists even if the WebGL module fails to load.
+(function () {
+  var btn = document.getElementById('btn-menu');
+  var panel = document.getElementById('controls');
+  if (!btn || !panel) return;
+
+  var mq = window.matchMedia('(max-width: 900px)');
+
+  function setOpen(open) {
+    panel.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.setAttribute('aria-label', open ? 'Fechar menu' : 'Abrir menu');
+  }
+
+  setOpen(false);
+  btn.addEventListener('click', function () {
+    setOpen(!panel.classList.contains('open'));
+  });
+  // A tap on a control should not leave the overlay covering the graph.
+  panel.addEventListener('click', function (ev) {
+    if (ev.target.closest('button') && mq.matches) setOpen(false);
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') setOpen(false);
+  });
+  var onChange = function () { if (!mq.matches) setOpen(false); };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+})();
+</script>
+<script type="module" src="/public/static/explorer.mjs"></script>
+</body>
+</html>

@@ -120,9 +120,7 @@ class TestHotwordDetector:
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
     @patch("src.pipeline.audio.openwakeword.model.Model")
     @patch("src.pipeline.audio.os.path.isfile")
-    def test_init_loads_custom_model_paths(
-        self, mock_isfile, mock_model_class, mock_get_paths
-    ):
+    def test_init_loads_custom_model_paths(self, mock_isfile, mock_model_class, mock_get_paths):
         """Test HotwordDetector loads custom .onnx paths directly."""
         custom = ["/app/models/hey_fantasma.onnx", "/app/models/ola_fantasma.onnx"]
         mock_isfile.return_value = True
@@ -194,7 +192,14 @@ class TestHotwordDetector:
         mock_model_instance.predict.return_value = {"hey_jarvis": 0.8, "alexa": 0.1}
         mock_model_class.return_value = mock_model_instance
 
-        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5)
+        # persistence is pinned to 1 on purpose. __init__ used to read
+        # config.hotword.persistence with no way to override, so these
+        # three tests were coupled to the ambient .env: a single above-
+        # threshold frame could never satisfy the default persistence=2,
+        # and the tests only passed if someone set persistence=1 in .env.
+        # persistence IS the false-positive fix, so the contract is real;
+        # the tests just have to state which contract they are asserting.
+        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5, persistence=1)
         audio_chunk = np.zeros(1600, dtype=np.int16)
 
         detected, model = detector.process(audio_chunk)
@@ -204,16 +209,21 @@ class TestHotwordDetector:
 
     @patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths")
     @patch("src.pipeline.audio.openwakeword.model.Model")
-    def test_process_no_detection_below_threshold(
-        self, mock_model_class, mock_get_paths
-    ):
+    def test_process_no_detection_below_threshold(self, mock_model_class, mock_get_paths):
         """Test process returns (False, None) when below threshold."""
         mock_get_paths.return_value = ["/models/hey_jarvis.onnx"]
         mock_model_instance = MagicMock()
         mock_model_instance.predict.return_value = {"hey_jarvis": 0.3}
         mock_model_class.return_value = mock_model_instance
 
-        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5)
+        # persistence is pinned to 1 on purpose. __init__ used to read
+        # config.hotword.persistence with no way to override, so these
+        # three tests were coupled to the ambient .env: a single above-
+        # threshold frame could never satisfy the default persistence=2,
+        # and the tests only passed if someone set persistence=1 in .env.
+        # persistence IS the false-positive fix, so the contract is real;
+        # the tests just have to state which contract they are asserting.
+        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5, persistence=1)
         audio_chunk = np.zeros(1600, dtype=np.int16)
 
         detected, model = detector.process(audio_chunk)
@@ -230,7 +240,14 @@ class TestHotwordDetector:
         mock_model_instance.predict.return_value = {"hey_jarvis": 0.8}
         mock_model_class.return_value = mock_model_instance
 
-        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5)
+        # persistence is pinned to 1 on purpose. __init__ used to read
+        # config.hotword.persistence with no way to override, so these
+        # three tests were coupled to the ambient .env: a single above-
+        # threshold frame could never satisfy the default persistence=2,
+        # and the tests only passed if someone set persistence=1 in .env.
+        # persistence IS the false-positive fix, so the contract is real;
+        # the tests just have to state which contract they are asserting.
+        detector = HotwordDetector(models=["hey_jarvis"], threshold=0.5, persistence=1)
         audio_chunk = np.zeros(1600, dtype=np.int16)
 
         # First detection
@@ -244,9 +261,7 @@ class TestHotwordDetector:
     def test_reset_clears_cooldown(self):
         """Test reset clears cooldown timer."""
         with (
-            patch(
-                "src.pipeline.audio.openwakeword.get_pretrained_model_paths"
-            ) as mock_paths,
+            patch("src.pipeline.audio.openwakeword.get_pretrained_model_paths") as mock_paths,
             patch("src.pipeline.audio.openwakeword.model.Model") as mock_model,
         ):
             mock_paths.return_value = ["/models/hey_jarvis.onnx"]
@@ -254,7 +269,11 @@ class TestHotwordDetector:
             mock_model_instance.predict.return_value = {"hey_jarvis": 0.8}
             mock_model.return_value = mock_model_instance
 
-            detector = HotwordDetector(models=["hey_jarvis"])
+            # persistence pinned to 1: this test asserts that reset() clears
+            # the COOLDOWN, so the single frame after the reset must be enough
+            # on its own. Under the ambient .env persistence=2 it could never
+            # fire, and the assertion tested the config, not reset().
+            detector = HotwordDetector(models=["hey_jarvis"], persistence=1)
             audio_chunk = np.zeros(1600, dtype=np.int16)
 
             detector.process(audio_chunk)  # First detection

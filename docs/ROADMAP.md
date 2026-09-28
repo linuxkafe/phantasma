@@ -96,3 +96,103 @@
 - Effort: Low
 - Status: backlog
 - Description: [DISCOVERED mid-task T031] docker-compose.yml healthcheck curls :5000/health, which is only served in `api` mode; assistant mode container shows `unhealthy` while the pipeline runs fine. Fix: make assistant mode expose health, or change healthcheck.
+## [MEDIUM] [DISCOVERED 2026-09-27] GMIF não classifica nós do grafo
+
+- **Impact**: médio. O grafo tem 2 nós + 1 aresta para 61 memórias. Só a
+  aresta tem claim GMIF (`logical_form`, `level=M3`, `validation_type`).
+  Os 2 nós têm `extraction_confidence=0.0`, `validation_confidence=0.0`,
+  `logical_form=''`, `level=NULL`, `validation_type=NULL`. O
+  `node_gmif_confidence=0.8` que aparece nos nós é um default fixo, não uma
+  classificação — contar colunas não-nulas dá uma leitura enganosa.
+- **Effort**: médio. Requer classificar claims nos nós, não só nas arestas.
+- **Status**: por fazer — bloqueado por dependência de Ollama.
+- **Why blocked**: o único caminho de saída (`_research_gap` →
+  `_safe_ollama_chat`) escreve em `http://10.0.0.128:11434`, inacessível.
+  O journal mostra o ciclo a correr e a falhar sempre aí, pelo que o grafo
+  nunca cresce. Decidir o destino do Ollama primário é pré-requisito.
+- **Related**: `skills/skill_gmif_dream.py` também usa
+  `datetime.now().strftime("%H:%M") == "03:00"` — igualdade de string num
+  loop de 30s. Funciona por margem, mas perde o dia se a máquina suspender
+  ou o loop atrasar >60s. Redesign, não bug.
+
+## [RESOLVIDO] [2026-09-27] `config.py` / `audio_utils.py` — bifurcação eliminada
+
+- **Causa**: valores de host viviam no código, não no ambiente. `block_size`
+  (512) e `auto_detect` (False) estavam fixos no dataclass de prod sem override
+  possível, e `TTS_CACHE_DIR` estava hardcoded em `audio_utils.py`. Como não
+  havia env var, a única forma de afinar a prod era bifurcar o ficheiro.
+- **Correcção**: `AUDIO_BLOCK_SIZE` e `AUDIO_DEVICE_AUTO_DETECT` passaram a ser
+  lidos do `.env`; `TTS_CACHE_DIR` foi promovido a campo de config (o
+  `getattr(config, "TTS_CACHE_DIR", ...)` de `audio_utils.py` existia mas o
+  atributo não, logo a indirecção era **inerte** e caía sempre no default
+  hardcoded). Os três ficheiros passaram a ser byte-idênticos.
+- **Bug adicional encontrado**: o `.env` de prod declarava `AUDIO_AUTO_DETECT`
+  mas o código lê `AUDIO_DEVICE_AUTO_DETECT`. A linha estava morta — editá-la
+  não fazia nada, e o default ("true") ganhava. Neutralizada com comentário.
+- **Verificação (reformulada após peer review)**: os valores efectivos em prod
+  **depois** são `block_size=512`, `auto_detect=False`, `device_in=0`,
+  `sample_rate=16000`, `volume_percent=85`, `threshold=0.7`, `persistence=2` —
+  reproduzível por qualquer revisor com
+  `cd /opt/phantasma && ./venv/bin/python3 -c "...;import config;print(...)"`.
+  A alegação original de "idênticos antes e depois" foi **retirada**: `/opt/phantasma`
+  não tem commits e o `config.py` pré-refactor não é recuperável, portanto a
+  metade "antes" era NÃO-VERIFICÁVEL e dependia apenas da palavra do autor.
+  Isto é uma lacuna real de proveniência, não um，示意 de que houve regressão:
+  o `block_size=512` de prod é um valor que já vinha do dataclass *antes* do
+  refactor e que o `validate.sh` fixa agora como invariante verificada.
+- **Achado do peer review (BLOCKER, corrigido)**: mover o valor para o `.env`
+  criou um *fail-open*. Sem `.env`, ou com o nome escrito errado, `block_size`
+  ia a 1600 e `auto_detect` a True em silêncio — pior que a bifurcação
+  anterior, que pelo menos era visível num `cmp`. Corrigido com chaves em
+  `.env.example` e um gate no `deploy.sh` que falha com exit≠0.
+- **Prevenção**: `deploy.sh` imprime `WARN <ficheiro> diverges` se algum destes
+  divergir — é um tripwire para detetar um valor de host a vazar para o código.
+
+
+## [BACKLOG] [2026-09-27] TLS / reverse proxy à frente do phantasma
+
+**Estado:** adiado pelo utilizador — "deixa o proxy em backlog, trato disso depois".
+
+### O que é
+O serviço escuta em `0.0.0.0:5000` **em claro**, e a máquina está em
+`10.0.0.111` (RFC1918). Não há reverse proxy: o `node` que ocupa :80/:443 é o
+`copilot-api` em `127.0.0.1:4141`, não um proxy. O acesso externo chega ao 5000
+por **port-forward do router**, e é por isso que o bind `0.0.0.0` é necessário.
+
+### Porquê o bind NÃO pode ser mudado para 127.0.0.1
+Foi-me proposto, e está errado. Sem proxy, mudar para `127.0.0.1` **tira o
+acesso ao admin**. O `0.0.0.0` não é descuido: é o que torna o port-forward
+funcional.
+
+### A correcção, quando for feita
+1. Reverse proxy com TLS (caddy/nginx) em `127.0.0.1:443` e `127.0.0.1:80`.
+2. `proxy_pass` para `127.0.0.1:5000`.
+3. **Só depois** mudar o port-forward do router para o proxy (443), não para o 5000.
+4. **Só depois** mudar o bind da app para `127.0.0.1`.
+5. A linha de `client_key()` em `src/api/ratelimit.py` passa a poder confiar no
+   proxy — mas apenas o **último salto**, nunca o header cru. Ver o aviso no
+   docstring dessa função.
+
+### Evidência de que é urgente (mas não activo)
+30 dias de log: **296 sondagens** a `.env`, `.git/config`, `.aws/credentials`,
+`.codex/auth.json`, `actuator/env`, `phpinfo.php` — e 2 a `/.git-credentials`.
+**Todas devolveram 404**, sem fuga de segredos, e o `/admin` OTP não foi
+followers. Mas o vector continua aberto enquanto o 5000 estiver em claro.
+
+Ver `audit-uso-rotas.md` §5.
+
+## `--force-host` em config.py — 2026-09-28
+
+O gate de deploy exige `config.py` byte-idêntico entre dev e prod, para
+impedir que um valor de host vaze do `.env` para o código. Disparou ao
+publicar a correcção do grafo/RAG.
+
+Verificado antes de forçar:
+- ASTs idênticos (mesmo código, outra formatação).
+- Diff por palavras: apenas parênteses e quebras de linha. Nenhum token,
+  string ou endereço diferente.
+- O ficheiro já continha `10.0.0.128:11434` e `127.0.0.1:8081` antes
+  desta alteração; nada novo foi introduzido.
+
+Causa: `ruff format` reformatou `config.py` no dev e o gate compara
+bytes. O código não mudou. Reformatado com `--force-host`.

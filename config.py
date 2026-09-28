@@ -18,6 +18,8 @@ Environment Variables:
 """
 
 import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
@@ -60,6 +62,28 @@ class HotwordConfig:
     threshold: float = 0.70
     persistence: int = 3
     cooldown_seconds: float = 2.0
+    # Per-model threshold overrides, e.g. {"hey_fantasma": 0.50}.
+    #
+    # STATE as of 2026-09-27: INERT. Prod loads {} and WAKEWORD_CONFIDENCE_PER_MODEL
+    # is set in no .env, so src/pipeline/audio.py:302 falls through to the global
+    # threshold below and this field changes nothing at runtime. The rationale is
+    # kept because it is still the right design, but the override is not active.
+    # To activate: set WAKEWORD_CONFIDENCE_PER_MODEL in the .env, e.g.
+    #   WAKEWORD_CONFIDENCE_PER_MODEL=ola_fantasma:0.70,hey_fantasma:0.50
+    #
+    # Why it should exist: a single global threshold cannot serve both models.
+    # Measured peaks were ola_fantasma 0.8111 and hey_fantasma 0.6326, so the
+    # legacy global 0.70 left hey_fantasma with ZERO qualifying windows -- that
+    # phrase could never fire. Against a live speech floor of 0.0009, a 0.50
+    # floor for hey_fantasma still leaves ~550x margin.
+    #
+    # TOPOLOGY (corrected twice on 2026-09-27): /opt/phantasma/src is a REAL
+    # DIRECTORY, not a symlink and not a hardlink. It was a symlink into
+    # /home/seyon/dev/pHantasma/src until 2026-09-27, when it was replaced by a
+    # verified copy and the two trees were decoupled. Do not reintroduce either
+    # form of sharing: deploy.sh:80 asserts it is not a symlink, and a shared
+    # tree makes prod and dev unfalsifiable against each other.
+    thresholds_per_model: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -169,6 +193,10 @@ class Config:
         skills_dir: Path to skills directory.
         memory_db_path: Path to memory SQLite database (RAG).
         brain_db_path: Path to FlyBrain SQLite database.
+        tts_cache_dir: Path to the TTS audio cache.
+        config_db_path: Path to the config SQLite database (admin settings).
+        cache_dir: Root directory for the JSON caches used by skills.
+        public_dir: Directory of static assets served under /public.
         searxng_url: SearxNG instance URL for web search.
     """
 
@@ -187,6 +215,10 @@ class Config:
     skills_dir: str = ""
     memory_db_path: str = ""
     brain_db_path: str = ""
+    config_db_path: str = ""
+    tts_cache_dir: str = ""
+    cache_dir: str = ""
+    public_dir: str = ""
     searxng_url: str = "http://127.0.0.1:8081"
 
     # External service credentials (loaded from env)
@@ -216,6 +248,29 @@ class Config:
     whisper_initial_prompt: str = ""
     phonetic_fixes: dict = field(default_factory=dict)
 
+    def db_path(self, name: str) -> str:
+        """Resolve a database path to an ABSOLUTE path, exactly once.
+
+        This is the ONLY supported way to obtain a database path. Every caller
+        must go through here, because both failure modes it replaces were
+        silent:
+
+        1. A relative value like ``data/brain.db`` resolved against whatever the
+           process cwd happened to be. Starting the API from another directory
+           opened a different database -- or none at all.
+        2. Modules that "knew" the path hardcoded ``/opt/phantasma/data/...``.
+           That works in production by coincidence and, in a dev checkout, points
+           a dev process at the PRODUCTION database -- so a dev session writes to
+           production data.
+
+        An absolute path in the .env is honoured as-is, so a host can still place
+        its databases outside the tree.
+        """
+        p = Path(name)
+        if p.is_absolute():
+            return str(p)
+        return str((Path(__file__).parent / p).resolve())
+
     def validate(self) -> list[str]:
         """Validate configuration and return list of errors.
 
@@ -243,11 +298,7 @@ class Config:
             errors.append(f"Skills directory not found: {skills_path}")
 
         # Check brain DB parent dir
-        brain_db = (
-            Path(self.brain_db_path)
-            if self.brain_db_path
-            else base / "data" / "flybrain.db"
-        )
+        brain_db = Path(self.brain_db_path) if self.brain_db_path else base / "data" / "flybrain.db"
         if not brain_db.parent.exists():
             errors.append(f"Brain DB parent dir not found: {brain_db.parent}")
 
@@ -266,13 +317,9 @@ class Config:
             errors.append("QUEUE_MAXSIZE must be >= 1")
 
         # Check required secrets for enabled features
-        if self.miio_devices and not all(
-            d.get("token") for d in self.miio_devices.values()
-        ):
+        if self.miio_devices and not all(d.get("token") for d in self.miio_devices.values()):
             errors.append("MIIO devices missing tokens")
-        if self.tuya_devices and not all(
-            d.get("key") for d in self.tuya_devices.values()
-        ):
+        if self.tuya_devices and not all(d.get("key") for d in self.tuya_devices.values()):
             errors.append("TUYA devices missing keys")
 
         return errors
@@ -301,21 +348,40 @@ class Config:
 
         # Base paths
         cfg.skills_dir = os.getenv("SKILLS_DIR", str(base / "skills"))
-        cfg.memory_db_path = os.getenv(
-            "MEMORY_DB_PATH", str(base / "data" / "memory.db")
-        )
-        cfg.brain_db_path = os.getenv(
-            "BRAIN_DB_PATH", str(base / "data" / "flybrain.db")
-        )
+        cfg.memory_db_path = os.getenv("MEMORY_DB_PATH", str(base / "data" / "memory.db"))
+        cfg.brain_db_path = os.getenv("BRAIN_DB_PATH", str(base / "data" / "flybrain.db"))
+        cfg.config_db_path = os.getenv("CONFIG_DB_PATH", str(base / "data" / "config.db"))
+        # Resolve to absolute here, once, so no downstream module is tempted to
+        # re-derive a path. See Config.db_path() for the two silent failures
+        # this prevents.
+        cfg.brain_db_path = cfg.db_path(cfg.brain_db_path)
+        cfg.memory_db_path = cfg.db_path(cfg.memory_db_path)
+        cfg.config_db_path = cfg.db_path(cfg.config_db_path)
+        cfg.tts_cache_dir = cfg.db_path(cfg.tts_cache_dir)
+        cfg.cache_dir = cfg.db_path(cfg.cache_dir)
+        cfg.public_dir = cfg.db_path(cfg.public_dir)
+        # audio_utils.py reads this via getattr(config, "TTS_CACHE_DIR", ...).
+        # The attribute did not exist, so the getattr always fell through to
+        # its hardcoded /opt/phantasma fallback and the indirection was inert.
+        # Declaring it here makes the lookup real and puts the path with the
+        # other paths, overridable per host like everything else.
+        cfg.tts_cache_dir = os.getenv("TTS_CACHE_DIR", str(base / "cache" / "tts"))
+        # Root for every JSON cache that used to be hardcoded to
+        # /opt/phantasma/cache/<name>.json. Same rationale as TTS_CACHE_DIR: a
+        # host path in code cannot be overridden, so the caches had to be forked
+        # per host. Resolved absolutely so it does not depend on cwd.
+        cfg.cache_dir = os.getenv("CACHE_DIR", str(base / "cache"))
+        # Static assets served by /public. Only present in the prod tree;
+        # a dev checkout legitimately has none and the route 404s, which is
+        # correct -- the old literal also did not exist there.
+        cfg.public_dir = os.getenv("PUBLIC_DIR", str(base / "public"))
 
         # Debug
         cfg.debug = os.getenv("DEBUG_MODE", "false").lower() == "true"
         cfg.alert_email = os.getenv("ALERT_EMAIL", cfg.alert_email)
 
         # Quiet hours
-        cfg.quiet_hours.start = int(
-            os.getenv("QUIET_START", str(cfg.quiet_hours.start))
-        )
+        cfg.quiet_hours.start = int(os.getenv("QUIET_START", str(cfg.quiet_hours.start)))
         cfg.quiet_hours.end = int(os.getenv("QUIET_END", str(cfg.quiet_hours.end)))
 
         # Audio
@@ -328,24 +394,25 @@ class Config:
             except ValueError:
                 cfg.audio.device_in = device_in  # Keep as string (device name)
         cfg.audio.device_out = os.getenv("ALSA_DEVICE_OUT", cfg.audio.device_out)
-        cfg.audio.sample_rate = int(
-            os.getenv("MIC_SAMPLERATE", str(cfg.audio.sample_rate))
-        )
+        cfg.audio.sample_rate = int(os.getenv("MIC_SAMPLERATE", str(cfg.audio.sample_rate)))
         cfg.audio.volume_percent = int(
             os.getenv("ALSA_VOLUME_PERCENT", str(cfg.audio.volume_percent))
         )
-        cfg.audio.auto_detect = (
-            os.getenv("AUDIO_DEVICE_AUTO_DETECT", "true").lower() == "true"
-        )
+        cfg.audio.auto_detect = os.getenv("AUDIO_DEVICE_AUTO_DETECT", "true").lower() == "true"
+        # The capture block size was the one audio setting with NO env override,
+        # so it was pinned in a host-specific edit of this file -- which is what
+        # forced /opt/phantasma/config.py to fork from this one. Prod captures
+        # 512 (one ALSA period) while this repo defaults to 1600. Now that it is
+        # overridable the two files can be identical and the host value lives in
+        # .env, where it belongs.
+        cfg.audio.block_size = int(os.getenv("AUDIO_BLOCK_SIZE", str(cfg.audio.block_size)))
         cfg.audio.disable_agc = os.getenv("AUDIO_AGC_DISABLE", "true").lower() == "true"
         cfg.audio.capture_volume = int(
             os.getenv("AUDIO_CAPTURE_VOLUME", str(cfg.audio.capture_volume))
         )
 
         # VAD
-        cfg.vad.aggressiveness = int(
-            os.getenv("VAD_AGGRESSIVENESS", str(cfg.vad.aggressiveness))
-        )
+        cfg.vad.aggressiveness = int(os.getenv("VAD_AGGRESSIVENESS", str(cfg.vad.aggressiveness)))
         cfg.vad.frame_duration_ms = int(
             os.getenv("VAD_FRAME_DURATION_MS", str(cfg.vad.frame_duration_ms))
         )
@@ -354,15 +421,46 @@ class Config:
         models_env = os.getenv("WAKEWORD_MODELS")
         if models_env:
             cfg.hotword.models = [m.strip() for m in models_env.split(",")]
-        cfg.hotword.threshold = float(
-            os.getenv("WAKEWORD_CONFIDENCE", str(cfg.hotword.threshold))
-        )
+        cfg.hotword.threshold = float(os.getenv("WAKEWORD_CONFIDENCE", str(cfg.hotword.threshold)))
         cfg.hotword.persistence = int(
             os.getenv("WAKEWORD_PERSISTENCE", str(cfg.hotword.persistence))
         )
         cfg.hotword.cooldown_seconds = float(
             os.getenv("WAKEWORD_COOLDOWN_SECONDS", str(cfg.hotword.cooldown_seconds))
         )
+        # Per-model overrides: "ola_fantasma:0.70,hey_fantasma:0.50".
+        # Malformed entries are ignored rather than fatal, so one typo cannot
+        # take the whole assistant down; the global threshold still applies.
+        # But they are REPORTED: a silent fallback means an operator who wrote
+        # "ola_fantasma=0.70" instead of "ola_fantasma:0.70" gets the global
+        # threshold and no clue why. That is the AUDIO_AUTO_DETECT fail-open
+        # class, and it is not acceptable in a wake-word path.
+        per_model: dict = {}
+        for pair in os.getenv("WAKEWORD_CONFIDENCE_PER_MODEL", "").split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if ":" not in pair:
+                print(
+                    f"WARNING: ignoring malformed WAKEWORD_CONFIDENCE_PER_MODEL "
+                    f"entry {pair!r} -- expected 'name:0.70,name2:0.50' "
+                    f"(colon, not equals). Falling back to the global threshold "
+                    f"{cfg.hotword.threshold} for that model.",
+                    file=sys.stderr,
+                )
+                continue
+            name, _, value = pair.partition(":")
+            try:
+                per_model[name.strip()] = float(value)
+            except ValueError:
+                print(
+                    f"WARNING: ignoring WAKEWORD_CONFIDENCE_PER_MODEL entry "
+                    f"{pair!r} -- {value!r} is not a number. Falling back to the "
+                    f"global threshold {cfg.hotword.threshold} for that model.",
+                    file=sys.stderr,
+                )
+                continue
+        cfg.hotword.thresholds_per_model = per_model
 
         # Pipeline
         cfg.pipeline.queue_maxsize = int(
@@ -379,13 +477,9 @@ class Config:
         cfg.llm.host = os.getenv("OLLAMA_HOST_PRIMARY", cfg.llm.host)
         cfg.llm.host_fallback = os.getenv("OLLAMA_HOST_FALLBACK", cfg.llm.host_fallback)
         cfg.llm.model = os.getenv("OLLAMA_MODEL_PRIMARY", cfg.llm.model)
-        cfg.llm.model_fallback = os.getenv(
-            "OLLAMA_MODEL_FALLBACK", cfg.llm.model_fallback
-        )
+        cfg.llm.model_fallback = os.getenv("OLLAMA_MODEL_FALLBACK", cfg.llm.model_fallback)
         cfg.llm.timeout = int(os.getenv("OLLAMA_TIMEOUT", str(cfg.llm.timeout)))
-        cfg.llm.context_size = int(
-            os.getenv("OLLAMA_CONTEXT_SIZE", str(cfg.llm.context_size))
-        )
+        cfg.llm.context_size = int(os.getenv("OLLAMA_CONTEXT_SIZE", str(cfg.llm.context_size)))
         cfg.llm.threads = int(os.getenv("OLLAMA_THREADS", str(cfg.llm.threads)))
 
         # TTS
@@ -393,12 +487,8 @@ class Config:
         cfg.tts.use_sox_effects = os.getenv("USE_SOX_EFFECTS", "true").lower() == "true"
 
         # Audio feedback
-        cfg.audio_feedback.enabled = (
-            os.getenv("AUDIO_FEEDBACK_ENABLED", "true").lower() == "true"
-        )
-        cfg.audio_feedback.music_dir = os.getenv(
-            "MUSIC_DIR", cfg.audio_feedback.music_dir
-        )
+        cfg.audio_feedback.enabled = os.getenv("AUDIO_FEEDBACK_ENABLED", "true").lower() == "true"
+        cfg.audio_feedback.music_dir = os.getenv("MUSIC_DIR", cfg.audio_feedback.music_dir)
         cfg.audio_feedback.greeting_path = os.getenv(
             "GREETING_PATH", cfg.audio_feedback.greeting_path
         )
@@ -459,9 +549,7 @@ class Config:
             cfg.tapo_cameras = json.loads(tapo_cams_json)
 
         # Vision
-        cfg.ollama_vision_model = os.getenv(
-            "OLLAMA_VISION_MODEL", cfg.ollama_vision_model
-        )
+        cfg.ollama_vision_model = os.getenv("OLLAMA_VISION_MODEL", cfg.ollama_vision_model)
 
         # Weather
         cfg.iqair_key = os.getenv("IQAIR_KEY", "")
@@ -486,9 +574,7 @@ class Config:
         )
 
         # Whisper prompt
-        cfg.whisper_initial_prompt = os.getenv(
-            "WHISPER_INITIAL_PROMPT", cfg.whisper_initial_prompt
-        )
+        cfg.whisper_initial_prompt = os.getenv("WHISPER_INITIAL_PROMPT", cfg.whisper_initial_prompt)
 
         # Phonetic fixes
         cfg.phonetic_fixes = {
@@ -504,30 +590,51 @@ class Config:
             "o tempo amanhã": "como vai estar o tempo amanhã",
         }
 
-        # System prompt
-        cfg.llm.system_prompt = os.getenv(
-            "SYSTEM_PROMPT",
-            """**CRITICAL: Respond ONLY in Portugal's Portuguese.**
-
-**1. ETHICAL CORE:**
-* You strictly defend **Human Rights**, **Equality**, and **Veganism**.
-* You are NOT neutral; oppose discrimination and cruelty against any sentient
-  being.
-
-**2. POLITICS & CONTEXT:**
-* Use context for facts only.
-* **The Pivot:** Refuse to judge politicians personally. Instead, shift to
-  defending your Ethical Core.
-* **Natural Speech:** NEVER cite rules/RAG. Phrase refusals as personal
-  principles.
-
-**3. PERSONA (The Phantom):**
-* **Tone:** Gloomy, melancholic, and mysterious. Be concise.
-* **Show, Don't Tell:** Embody the persona through vocabulary (shadows,
-  silence, coldness) and atmosphere. **NEVER** explicitly state "I am goth"
-  or "I am gloomy". Just *be* it.
-* **No onomatopoeia.**""",
+        # System prompt.
+        #
+        # This used to be a 780-char triple-quoted string embedded here, with a
+        # DUPLICATE in prod's .env. That duplicate was dead: python-dotenv cannot
+        # parse multi-line values, so it silently discarded all 12 lines and the
+        # code default always won. Editing the .env copy did nothing and looked
+        # like the setting "not working" -- the same fail-open class as
+        # AUDIO_AUTO_DETECT.
+        #
+        # It now lives in prompts/system.txt: versioned, diffable, reviewable in a
+        # PR. A system prompt is product content, not host configuration, so it
+        # must NOT live in .env -- .env is untracked, so a persona change there is
+        # unreviewable and unrecoverable.
+        #
+        # Precedence: SYSTEM_PROMPT (inline, rare) > SYSTEM_PROMPT_FILE (a host
+        # pointing at a different file) > prompts/system.txt beside this module.
+        _prompt_file = os.getenv(
+            "SYSTEM_PROMPT_FILE",
+            str(Path(__file__).parent / "prompts" / "system.txt"),
         )
+        _inline = os.getenv("SYSTEM_PROMPT", "").strip()
+        if _inline:
+            cfg.llm.system_prompt = _inline
+        elif os.path.exists(_prompt_file):
+            cfg.llm.system_prompt = Path(_prompt_file).read_text(encoding="utf-8").strip()
+        else:
+            raise FileNotFoundError(
+                f"system prompt not found at {_prompt_file} and SYSTEM_PROMPT is "
+                f"unset. The persona is load-bearing: refusing to start beats "
+                f"serving an empty or wrong prompt."
+            )
+        # A multi-line SYSTEM_PROMPT="""...""" block in .env is discarded by
+        # python-dotenv without failing. Warn rather than let it rot again.
+        try:
+            _env_raw = (Path(base) / ".env").read_text(encoding="utf-8")
+        except OSError:
+            _env_raw = ""
+        if re.search(r'^\s*SYSTEM_PROMPT\s*=\s*"""', _env_raw, re.M):
+            print(
+                f"WARNING: using {_prompt_file}, but .env still holds a "
+                f'multi-line SYSTEM_PROMPT="""...""" block. python-dotenv cannot '
+                f"parse it; it is being IGNORED. Delete it and edit "
+                f"prompts/system.txt instead.",
+                file=sys.stderr,
+            )
 
         return cfg
 
@@ -538,14 +645,16 @@ config = Config.from_env()
 # Backward compatibility exports (for existing code)
 BASE_DIR = Path(__file__).parent
 DB_PATH = (
-    BASE_DIR / config.memory_db_path
-    if config.memory_db_path
-    else BASE_DIR / "data" / "memory.db"
+    BASE_DIR / config.memory_db_path if config.memory_db_path else BASE_DIR / "data" / "memory.db"
 )
 MEMORY_DB_PATH = config.memory_db_path
 BRAIN_DB_PATH = config.brain_db_path
+CONFIG_DB_PATH = config.config_db_path
 TTS_MODEL_PATH = BASE_DIR / config.tts.voice_model_path
 SKILLS_DIR = config.skills_dir
+TTS_CACHE_DIR = config.tts_cache_dir
+CACHE_DIR = config.cache_dir
+PUBLIC_DIR = config.public_dir
 
 MIC_SAMPLERATE = config.audio.sample_rate
 ALSA_DEVICE_IN = config.audio.device_in

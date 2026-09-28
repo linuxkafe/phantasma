@@ -92,9 +92,7 @@ class TestOllamaLLM:
     def test_chat_success(self, mock_client_class):
         """Test chat returns response text on success."""
         mock_client = MagicMock()
-        mock_client.chat.return_value = {
-            "message": {"content": "Hello, how can I help?"}
-        }
+        mock_client.chat.return_value = {"message": {"content": "Hello, how can I help?"}}
         mock_client_class.return_value = mock_client
 
         llm = OllamaLLM()

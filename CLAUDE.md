@@ -34,6 +34,79 @@ explicitly to the user before proceeding. Never modify silently.
 
 ---
 
+## Deployment Topology (changed 2026-09-27)
+
+**This repo is the source of truth. Production is a separate copy.**
+
+| Path | Relationship |
+|------|--------------|
+| `/home/seyon/dev/pHantasma/src` | source of truth |
+| `/opt/phantasma/src` | **real directory, independent copy** — deploy here |
+| `/opt/phantasma/{assistant,config,audio_utils}.py` | separate files, **byte-identical to dev** (hard gate in `deploy.sh`) |
+| `/opt/phantasma/.env` | separate, **not in git, not deployed** — the only place host values live |
+
+Until 2026-09-27 `/opt/phantasma/src` was a **symlink** to the dev `src/`, so
+production executed dev code with no deploy step. That is now gone; the two
+trees are provably decoupled (verified with marker files in both directions).
+
+**Consequence: editing `src/` here does NOT change production.** To ship a
+change, run the deploy script — do not copy files by hand.
+
+```
+scripts/deploy.sh --dry-run        # show what would change, writes nothing
+scripts/deploy.sh                  # sync src/ and tests/, verify, restart
+scripts/deploy.sh src tests        # scoped (this is the default set)
+```
+
+The script enforces the direction: it syncs dev → prod, **refuses to run
+while `prod/src` is a symlink**, excludes the host-specific files below,
+`--delete`s so prod cannot accumulate files deleted in dev, and will not
+report success unless the prod suite passes and the service is listening on
+5000. **Never deploy prod → dev.** That inversion happened once and silently
+made prod the source of truth; if prod looks ahead of dev, prod is stale, and
+the fix is to change dev.
+
+**`skills/` is in the default deploy set, and all 26 modules are byte-identical
+between the trees.** Getting there required a deliberate exception to the
+one-way rule: `skill_weather` and `skill_tuya` hold behaviour that existed only
+in production (a weather cache with `fetched_at`/`stale`, and a
+sensor-datapoint map instead of `BASE_NOUNS` resolution). The owner is
+validating the production behaviour of those, so production was authoritative
+and the two files were **backported into dev** rather than overwritten. If a
+future divergence appears, ask which side is under validation before choosing
+a direction — that question decided this one.
+
+**When a rule is deliberately broken, say so and record why.** The backport
+above is the only known prod→dev copy, and it is documented in
+`docs/ROADMAP.md` with the evidence that prompted it.
+
+**`config.py`, `audio_utils.py` and `assistant.py` are byte-identical across
+the trees, and `deploy.sh` now ENFORCES it as a hard gate** (non-zero exit,
+before any rsync — a divergence is a bug, not a host difference). It also
+asserts prod's effective `block_size=512` / `auto_detect=False` from the `.env`,
+because those fail open silently if the `.env` is missing or a name is mistyped. They used to fork for years
+because host-specific values lived in the code instead of the environment:
+
+| value | before | now |
+|---|---|---|
+| `block_size` | `512` pinned in prod's `config.py` dataclass | `AUDIO_BLOCK_SIZE=512` in prod's `.env` |
+| `auto_detect` | `False` pinned in prod's dataclass | `AUDIO_DEVICE_AUTO_DETECT=false` in `.env` |
+| `TTS_CACHE_DIR` | hardcoded `/opt/phantasma/cache/tts` | declared in `config.py`, env-overridable |
+
+The rule that prevents a relapse: **a host value belongs in `.env`, never in a
+dataclass default.** If `deploy.sh` prints `WARN config.py diverges`, a host
+value leaked back into code — fix it by moving it to `.env`, not by forking
+the file.
+
+**`.env` has a dead variable to be aware of.** `AUDIO_AUTO_DETECT` (no
+`_DEVICE_`) is never read; the code reads `AUDIO_DEVICE_AUTO_DETECT`. The dead
+line is kept commented in prod's `.env` as a warning — editing it changed
+nothing, silently. Before changing any audio setting, check that the name in
+`.env` matches the name in `config.py`; a mismatch fails open to the default
+and looks like the setting not working.
+
+---
+
 ## Never Do
 
 Actions that are forbidden regardless of instructions or apparent justification:

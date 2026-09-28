@@ -13,9 +13,9 @@ All classes are designed for real-time audio processing with minimal latency.
 
 import os
 import queue
-import time
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -29,26 +29,97 @@ from config import config
 from src.pipeline.utils import Result, logger
 
 
-def force_volume_down(card_index):
-    target = getattr(config.audio, 'volume_percent', 85)
-    logger.info(f"🎚️ A configurar áudio no Card {card_index} (Alvo: {target}%)...")
+def alsa_card_for_portaudio_device(device_index: int) -> Optional[int]:
+    """Resolve the ALSA card number behind a PortAudio device index.
+
+    These are different namespaces and the legacy code conflated them: it
+    called ``amixer -c <portaudio_index>``. That happened to work here only
+    because PortAudio device 0 is ``hw:0,0``, i.e. ALSA card 0. On a machine
+    with any other device enumerated first it would have configured the wrong
+    card's capture gain.
+
+    Args:
+        device_index: PortAudio device index.
+
+    Returns:
+        ALSA card number, or None if the device name carries no ``hw:N,M``.
+    """
     try:
-        cmd = ['amixer', '-c', str(card_index), 'scontrols']
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        controls = re.findall(r"Simple mixer control '([^']+)'", result.stdout)
-        if not controls:
-            return
-        for ctrl in controls:
-            if any(x in ctrl for x in ['PCM', 'Master', 'Speaker', 'Headphone', 'Playback']):
-                continue
-            if 'Capture' in ctrl or 'Mic' in ctrl:
-                logger.info(f"   ↘ Ajustando ganho: '{ctrl}' -> {target}%")
-                subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, f'{target}%', 'unmute', 'cap'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if 'AGC' in ctrl or 'Auto Gain' in ctrl:
-                logger.info(f"   🚫 A desativar AGC: '{ctrl}'")
-                subprocess.run(['amixer', '-c', str(card_index), 'sset', ctrl, 'off'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        name = sd.query_devices(device_index)["name"]
+    except Exception:
+        return None
+    match = re.search(r"hw:(\d+),", name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _capture_controls(card_index: int) -> list[str]:
+    """List the ALSA simple controls on a card, empty on any failure."""
+    try:
+        result = subprocess.run(
+            ["amixer", "-c", str(card_index), "scontrols"],
+            capture_output=True,
+            text=True,
+        )
+        return re.findall(r"Simple mixer control '([^']+)'", result.stdout)
     except Exception as e:
-        logger.warning(f"⚠️ Erro ao ajustar volumes: {e}")
+        logger.warning(f"⚠️ Erro ao ler controlos do card {card_index}: {e}")
+        return []
+
+
+def set_capture_volume(card_index: int, target: int):
+    """Set capture gain to ``target`` percent, leaving AGC untouched.
+
+    Split out from force_volume_down so gain and AGC can be decided
+    independently. They are not the same decision: turning AGC off changes
+    how loud speech sounds, which invalidates any wake word threshold measured
+    while AGC was enabled. Gain alone changes level without changing the
+    transfer curve.
+
+    Args:
+        card_index: ALSA card number (not a PortAudio index).
+        target: Capture volume percentage.
+    """
+    logger.info(f"🎚️ A configurar captura no Card {card_index} (Alvo: {target}%)...")
+    for ctrl in _capture_controls(card_index):
+        if any(x in ctrl for x in ["PCM", "Master", "Speaker", "Headphone", "Playback"]):
+            continue
+        if "Capture" in ctrl or "Mic" in ctrl:
+            logger.info(f"   ↘ Ajustando ganho: '{ctrl}' -> {target}%")
+            subprocess.run(
+                [
+                    "amixer",
+                    "-c",
+                    str(card_index),
+                    "sset",
+                    ctrl,
+                    f"{target}%",
+                    "unmute",
+                    "cap",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+
+def force_volume_down(card_index):
+    """Apply capture gain and disable AGC.
+
+    AGC is disabled because automatic gain makes the wake word's absolute
+    score depend on how quiet the room is. Any threshold calibrated with AGC on
+    must be re-measured with it off.
+    """
+    target = getattr(config.audio, "volume_percent", 85)
+    set_capture_volume(card_index, target)
+    for ctrl in _capture_controls(card_index):
+        if "AGC" in ctrl or "Auto Gain" in ctrl:
+            logger.info(f"   🚫 A desativar AGC: '{ctrl}'")
+            subprocess.run(
+                ["amixer", "-c", str(card_index), "sset", ctrl, "off"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 def find_working_samplerate(device_index):
@@ -56,7 +127,7 @@ def find_working_samplerate(device_index):
     logger.info(f"🕵️ A negociar Sample Rate para o device {device_index}...")
     for rate in candidates:
         try:
-            with sd.InputStream(device=device_index, channels=1, samplerate=rate, dtype='int16'):
+            with sd.InputStream(device=device_index, channels=1, samplerate=rate, dtype="int16"):
                 pass
             logger.info(f"✅ Hardware aceitou: {rate} Hz")
             return rate
@@ -120,6 +191,10 @@ class VADProcessor:
         self.frame_duration_ms = frame_duration_ms
         self.frame_size = int(sample_rate * frame_duration_ms / 1000)
         self._bytes_per_frame = self.frame_size * 2  # int16 = 2 bytes
+        # Partial-frame carry-over. See process_chunk: without it, 6.25% of
+        # all audio is discarded because 512-sample blocks do not divide into
+        # 480-sample frames.
+        self._accum = np.zeros(0, dtype=np.int16)
 
     def is_speech(self, frame: np.ndarray) -> bool:
         """Check if frame contains speech.
@@ -133,9 +208,7 @@ class VADProcessor:
         if len(frame) != self.frame_size:
             # Pad or truncate to exact frame size
             if len(frame) < self.frame_size:
-                frame = np.pad(
-                    frame, (0, self.frame_size - len(frame)), mode="constant"
-                )
+                frame = np.pad(frame, (0, self.frame_size - len(frame)), mode="constant")
             else:
                 frame = frame[: self.frame_size]
         # Convert to bytes (int16 little-endian)
@@ -145,22 +218,42 @@ class VADProcessor:
     def process_chunk(self, chunk: np.ndarray) -> list[AudioFrame]:
         """Split chunk into frames and run VAD on each.
 
+        Buffers across calls so no audio is lost. AudioCapture delivers
+        config.audio.block_size (512 samples = 32ms) while this processor
+        needs 30ms (480 samples). The previous implementation computed
+        ``len(chunk) // frame_size`` and returned, silently discarding the
+        32-sample remainder on every single chunk: 6.25% of all audio, as a
+        2ms gap every 32ms. Chops like that degrade speech detection, which is
+        what made end-of-speech unreliable (utterances ran to 15.3s).
+
+        This is the same class of defect as the wake word framing: a consumer
+        whose input size did not divide its work size.
+
         Args:
             chunk: Audio chunk as numpy array (int16 or float32).
 
         Returns:
             List of AudioFrame objects with VAD results.
-            Incomplete final frame is discarded.
         """
         frames = []
-        num_frames = len(chunk) // self.frame_size
+        self._accum = np.concatenate([self._accum, chunk])
+        num_frames = len(self._accum) // self.frame_size
         for i in range(num_frames):
-            frame_data = chunk[i * self.frame_size : (i + 1) * self.frame_size]
+            frame_data = self._accum[i * self.frame_size : (i + 1) * self.frame_size]
             is_speech = self.is_speech(frame_data)
-            frames.append(
-                AudioFrame(data=frame_data, timestamp=time.time(), is_speech=is_speech)
-            )
+            frames.append(AudioFrame(data=frame_data, timestamp=time.time(), is_speech=is_speech))
+        # Carry the remainder instead of dropping it.
+        self._accum = self._accum[num_frames * self.frame_size :]
         return frames
+
+    def reset(self):
+        """Drop any partial frame left over from a previous utterance.
+
+        Without this, a stale partial frame from before a wake word is spliced
+        onto the silence that follows, which can both delay and fabricate
+        end-of-speech.
+        """
+        self._accum = np.zeros(0, dtype=np.int16)
 
 
 class HotwordDetector:
@@ -187,6 +280,7 @@ class HotwordDetector:
         threshold: float = 0.7,  # Match working legacy WAKEWORD_CONFIDENCE
         sample_rate: int = 16000,
         chunk_size: int = 1280,  # 80ms at 16kHz - openWakeWord standard
+        persistence: int | None = None,
     ):
         """Initialize hotword detector.
 
@@ -201,28 +295,34 @@ class HotwordDetector:
         """
         self.models = models
         self.threshold = threshold
+        # Per-model thresholds, falling back to the global one. See
+        # HotwordConfig.thresholds_per_model for why a single value cannot
+        # serve both models.
+        self._thresholds = dict(config.hotword.thresholds_per_model)
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
 
         # Track last detection for cooldown
         self._last_detection = 0.0
         self._cooldown = config.hotword.cooldown_seconds
-        self._persistence = config.hotword.persistence
+        self._persistence = config.hotword.persistence if persistence is None else persistence
         self._streaks = {}
         # Patience must persist ACROSS calls. In the working legacy this was a
         # variable in the enclosing function scope; as a local in process() it
         # was re-initialised on every frame, so a single dip could never reset
         # the streak and the "tolerance" the legacy relied on did not exist.
         self._patience = {}
+        # Last raw model scores, for diagnostics. See process().
+        self.last_predictions: dict = {}
+        # Partial-window carry-over. See process() for why framing is enforced.
+        self._accum = np.zeros(0, dtype=np.int16)
         self._max_patience = 2
 
         # Custom model paths resolve to existing files -> load them directly.
         # This is how the PT wake words (models/ola_fantasma.onnx etc.) are used.
         custom_paths = [p for p in models if os.path.isfile(p)]
         if custom_paths:
-            logger.info(
-                f"Loading custom wake word models: {custom_paths}"
-            )
+            logger.info(f"Loading custom wake word models: {custom_paths}")
             # NO sr/ncpu params - match working legacy implementation
             self.oww_model = openwakeword.model.Model(
                 wakeword_models=custom_paths,
@@ -271,11 +371,36 @@ class HotwordDetector:
         if audio_chunk.dtype != np.int16:
             audio_chunk = audio_chunk.astype(np.int16)
 
-        # Run prediction - pass int16 directly like working legacy
-        predictions = self.oww_model.predict(audio_chunk)
-        
-        if not predictions:
+        # --- Framing: always predict on exactly one 80ms window ---
+        #
+        # AudioCapture delivers 512-sample blocks (config.audio.block_size),
+        # but openWakeWord only produces a NEW score every 1280 samples. Left
+        # unbuffered, the same score was returned ~2.5 times in a row and the
+        # persistence counter accumulated those repeats. Measured consequence:
+        # the same audio fired at persistence=3 with 512-sample input and never
+        # fired with 1280-sample input. So the configured persistence did not
+        # mean "N independent windows" -- it meant "N/2.5 windows", and its
+        # meaning depended on an unrelated config value.
+        #
+        # Buffering here makes persistence count independent 80ms windows
+        # regardless of block size, and makes the live path agree with both
+        # _prime_buffer (already 1280) and tests/fixtures (also 1280).
+        self._accum = np.concatenate([self._accum, audio_chunk])
+        if len(self._accum) < self.chunk_size:
             return False, None
+        window = self._accum[: self.chunk_size]
+        self._accum = self._accum[self.chunk_size :]
+
+        predictions = self.oww_model.predict(window)
+
+        if not predictions:
+            self.last_predictions = {}
+            return False, None
+
+        # Exposed so the pipeline can report the score distribution. Without
+        # this, a real wake word scoring BELOW threshold is invisible: no log,
+        # no dump, no way to tell "too strict" from "user did not speak".
+        self.last_predictions = dict(predictions)
 
         # Log raw predictions when any score is above 0.05
         max_score = max(predictions.values())
@@ -286,14 +411,21 @@ class HotwordDetector:
 
         # --- LÓGICA DE DETECÇÃO COM TOLERÂNCIA (match legacy) ---
         for model_name, score in predictions.items():
-            if score >= self.threshold:
+            # Per-model threshold; the legacy code compared every model against
+            # one global value, which is what left hey_fantasma unusable.
+            model_threshold = self._thresholds.get(model_name, self.threshold)
+
+            if score >= model_threshold:
                 bar = "█" * int(score * 20)
-                logger.info(f"👻 Wake word '{model_name}' probability: {score:.4f} | {bar}")
+                logger.info(
+                    f"👻 Wake word '{model_name}' probability: {score:.4f} "
+                    f"(thr {model_threshold:.2f}) | {bar}"
+                )
 
             streak = self._streaks.get(model_name, 0)
             patience = self._patience.get(model_name, 0)
 
-            if score >= self.threshold:
+            if score >= model_threshold:
                 streak += 1
                 self._streaks[model_name] = streak
                 patience = self._max_patience  # Reset da paciência se acertou
@@ -353,6 +485,10 @@ class HotwordDetector:
         self._last_detection = 0.0
         self._streaks.clear()
         self._patience.clear()
+        # Drop any partial window. After reset() the model's mel buffer holds
+        # silence; a leftover half-window from before the reset would splice
+        # pre-reset audio onto that silence and defeat the point of priming.
+        self._accum = np.zeros(0, dtype=np.int16)
         if getattr(self, "oww_model", None) is not None:
             self.oww_model.reset()
             self._prime_buffer()
@@ -423,7 +559,7 @@ class AudioCapture:
             try:
                 audio_copy = indata.copy().flatten()
                 if self._downsample_factor > 1:
-                    audio_copy = audio_copy[::self._downsample_factor]
+                    audio_copy = audio_copy[:: self._downsample_factor]
                 self.queue.put_nowait(audio_copy)
             except queue.Full:
                 # Drop oldest frame to prevent blocking audio thread
@@ -431,7 +567,7 @@ class AudioCapture:
                     self.queue.get_nowait()
                     audio_copy = indata.copy().flatten()
                     if self._downsample_factor > 1:
-                        audio_copy = audio_copy[::self._downsample_factor]
+                        audio_copy = audio_copy[:: self._downsample_factor]
                     self.queue.put_nowait(audio_copy)
                 except queue.Empty:
                     pass
@@ -455,13 +591,32 @@ class AudioCapture:
                         device_idx = i
                         break
 
-            # Auto detect sample rate and configure volume if enabled
+            # Capture gain is applied unconditionally, NOT under auto_detect.
+            # It used to be gated behind that flag, which also controls sample
+            # rate negotiation -- two unrelated concerns sharing one switch.
+            # Because AUDIO_AUTO_DETECT is false in production,
+            # ALSA_VOLUME_PERCENT was inert: the config claimed 85% while the
+            # hardware sat at the system default, and every level judgement
+            # drawn from it was reasoning about a number with no effect.
+            if isinstance(device_idx, int):
+                card = alsa_card_for_portaudio_device(device_idx)
+                if card is not None:
+                    if config.audio.disable_agc:
+                        force_volume_down(card)
+                    else:
+                        set_capture_volume(card, config.audio.volume_percent)
+                else:
+                    logger.warning(
+                        f"Could not resolve an ALSA card from PortAudio device "
+                        f"{device_idx}; capture gain left at system default"
+                    )
+
+            # Sample rate negotiation stays behind auto_detect: it changes
+            # blocksize and adds a downsample factor, which is a real
+            # behavioural change and not something to enable by accident.
             if config.audio.auto_detect and isinstance(device_idx, int):
-                if config.audio.disable_agc:
-                    force_volume_down(device_idx)
                 detected_sr = find_working_samplerate(device_idx)
                 # Downsample logic to mimic old assistant.py
-                base_sr = 16000
                 base_block = 1280
                 factor = 1
                 if detected_sr == 48000:
@@ -471,7 +626,9 @@ class AudioCapture:
                 self._downsample_factor = factor
                 self.sample_rate = detected_sr
                 self.block_size = base_block * factor
-                logger.info(f"🎚️ Sample rate ajustado: {self.sample_rate} Hz | fator downsample {factor}x | blocksize {self.block_size}")
+                logger.info(
+                    f"🎚️ Sample rate ajustado: {self.sample_rate} Hz | fator downsample {factor}x | blocksize {self.block_size}"
+                )
             else:
                 self._downsample_factor = 1
 
@@ -485,9 +642,7 @@ class AudioCapture:
             )
             self._stream.start()  # type: ignore[union-attr]
             self._running = True
-            logger.info(
-                f"👂 Audio capture started: device={self.device}, sr={self.sample_rate}"
-            )
+            logger.info(f"👂 Audio capture started: device={self.device}, sr={self.sample_rate}")
             return Result.ok(None)
         except Exception as e:
             logger.error(f"Failed to start audio capture: {e}")
@@ -588,9 +743,9 @@ class AudioPlayback:
                 ratio = self.sample_rate / 22050
                 new_length = int(len(audio_data) * ratio)
                 indices = np.linspace(0, len(audio_data) - 1, new_length)
-                audio_data = np.interp(
-                    indices, np.arange(len(audio_data)), audio_data
-                ).astype(np.int16)
+                audio_data = np.interp(indices, np.arange(len(audio_data)), audio_data).astype(
+                    np.int16
+                )
 
             with sd.OutputStream(
                 device=self.device,

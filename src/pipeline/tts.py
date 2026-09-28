@@ -55,17 +55,13 @@ class PiperTTS:
             Result.ok(None) if both found, Result.fail(error) if missing.
         """
         try:
-            subprocess.run(
-                [self._piper_bin, "--help"], capture_output=True, check=False
-            )
+            subprocess.run([self._piper_bin, "--help"], capture_output=True, check=False)
         except FileNotFoundError:
             return Result.fail(f"piper not found in PATH (tried: {self._piper_bin})")
 
         if self._sox_bin:
             try:
-                subprocess.run(
-                    [self._sox_bin, "--help"], capture_output=True, check=False
-                )
+                subprocess.run([self._sox_bin, "--help"], capture_output=True, check=False)
             except FileNotFoundError:
                 logger.warning("sox not found, disabling effects")
                 self._sox_bin = None
@@ -129,9 +125,7 @@ class PiperTTS:
 
                 # Apply sox effects if enabled
                 if self._sox_bin and config.tts.sox_effects:
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".wav", delete=False
-                    ) as tmp_effected:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_effected:
                         effected_path = tmp_effected.name
 
                     try:
@@ -139,9 +133,7 @@ class PiperTTS:
                         for effect in config.tts.sox_effects:
                             sox_cmd.extend(effect)
 
-                        sox_proc = subprocess.run(
-                            sox_cmd, capture_output=True, timeout=10
-                        )
+                        sox_proc = subprocess.run(sox_cmd, capture_output=True, timeout=10)
 
                         if sox_proc.returncode == 0:
                             output_path = effected_path
@@ -150,9 +142,7 @@ class PiperTTS:
                             logger.warning(f"sox failed, using raw output: {err}")
 
                     finally:
-                        if effected_path != output_path and os.path.exists(
-                            effected_path
-                        ):
+                        if effected_path != output_path and os.path.exists(effected_path):
                             os.unlink(effected_path)
 
                 # Load audio

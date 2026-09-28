@@ -3,6 +3,7 @@ import os
 import time
 
 import config
+from pathlib import Path
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
@@ -16,7 +17,11 @@ TRIGGERS = [
     "estado do alarme",
 ]
 
-CACHE_FILE = "/opt/phantasma/tuya_cache.json"
+# NOTE: this used to point at /opt/phantasma/tuya_cache.json, a file that does
+# not exist -- the cache was silently dead. It is deliberately NOT pointed at
+# the tuya skill's cache: that is a different device system, and sharing the
+# file would feed it another device's datapoints. Own cache, no host literal.
+CACHE_FILE = str(Path(config.CACHE_DIR) / "brennenstuhl_cache.json")
 
 
 def _get_cached_data(device_name):

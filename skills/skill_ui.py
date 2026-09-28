@@ -1,14 +1,83 @@
+import config
+from pathlib import Path
 import json
 import os
 
-from flask import jsonify
+from flask import jsonify, make_response
 
 TRIGGER_TYPE = "none"
 TRIGGERS = []
-WEATHER_CACHE_FILE = "/opt/phantasma/cache/weather_cache.json"
+WEATHER_CACHE_FILE = str(Path(config.CACHE_DIR) / "weather_cache.json")
+
+# The chat page is a *skill*: it is loaded by the dynamic skill loader and must
+# keep working even if the admin package is not importable. So the shared design
+# system is loaded by absolute path with a self-contained fallback, rather than a
+# hard `from src.api.design import ...` that would raise at skill-load time.
+_DESIGN_CSS_FALLBACK = """
+:root{--bg-color:#0a0a0a;--surface:#171717;--surface-2:#262626;--border:#262626;
+ --border-strong:#404040;--text:#fafafa;--text-secondary:#d4d4d4;--muted:#a3a3a3;
+ --brand-500:#009FDF;--brand-400:#38bdf8;--accent:#22c55e;--destructive:#ef4444;
+ --radius:8px;--radius-sm:6px;--radius-lg:12px;--sp-1:4px;--sp-2:8px;--sp-3:12px;
+ --sp-4:16px;--sp-6:24px;--fs-small:13px;--fs-tiny:11px;--fs-body:15px;
+ --fw-h2:600;--fw-display:700;}
+@media (max-width:900px){.nav-menu{display:none;}.nav-menu.open{display:flex;}}
+"""
+
+# Nav fallback: the same contract as design.js() -- discover every .nav-toggle,
+# resolve its panel via aria-controls, then drive the "open" class and
+# aria-expanded. Replaced 2026-09-27: this used to hardcode #topbar, so the
+# device UI could never share toggle behaviour with the admin pages.
+_DESIGN_JS_FALLBACK = """
+(function(){document.querySelectorAll('.nav-toggle').forEach(function(t){
+var m=document.getElementById(t.getAttribute('aria-controls'))||document.querySelector('.nav-menu');
+if(!m||t.dataset.wired==='1')return;t.dataset.wired='1';
+function s(o){m.classList.toggle('open',o);t.setAttribute('aria-expanded',o?'true':'false');
+t.setAttribute('aria-label',o?'Fechar menu':'Abrir menu');}
+s(false);t.addEventListener('click',function(){s(!m.classList.contains('open'));});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')s(false);});});})();
+"""
+
+
+def _shared_design():
+    """Return ``(css, js)`` from the admin design system, or the fallback.
+
+    Importing by absolute file path keeps this skill independent of the caller's
+    ``sys.path`` and of package layout.
+    """
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "_phantasma_design",
+            str(Path(__file__).resolve().parent.parent / "src" / "api" / "design.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.design_css(), module.design_js()
+    except Exception:
+        # A skill must never take the whole UI down over cosmetics.
+        return _DESIGN_CSS_FALLBACK, _DESIGN_JS_FALLBACK
+
 
 def register_routes(app):
-    app.add_url_rule('/', 'ui', handle_request)
+
+
+    # The chat page is ONE html document carrying both the css and the js for
+    # every reaction button. With no cache headers the browser is free to reuse
+    # the document it already has, and a stale copy reproduces exactly the two
+    # symptoms of a broken feature: the buttons render with the default UA
+    # background (the white block) because the css that made them transparent
+    # is not in that copy, and the click does nothing because the delegated
+    # listener is not in that copy either. Pinning the document keeps the css,
+    # the js and the markup in the same version.
+    def _ui_page():
+        resp = make_response(handle_request())
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+        return resp
+
+    app.add_url_rule('/', 'ui', _ui_page)
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
 
 def handle_weather_api():
@@ -17,8 +86,45 @@ def handle_weather_api():
         with open(WEATHER_CACHE_FILE, 'r') as f: return jsonify(json.load(f))
     except Exception as e: return jsonify({"error": str(e)})
 
+def _viewer_is_admin() -> bool:
+    """Is the current requester an admin?
+
+    Resolved server-side so admin links are never SENT to a non-admin, rather
+    than hidden in CSS: a display:none link still leaves its URL in the page
+    source, which is disclosure by accident. The real gate remains
+    @admin_required on the routes; not sending a link the viewer cannot use is
+    the honest behaviour on top of it.
+    """
+    try:
+        from flask import request
+
+        addr = request.remote_addr or ""
+        # Same loopback rule as src/api/localauth.py, reused rather than
+        # reimplemented: a second copy of this check is how the two drift.
+        from src.api.localauth import bypass_identity
+
+        ident = bypass_identity(addr)
+        if ident is not None:
+            return ident.get("role") == "admin"
+        from src.api.admin import _current_user_data
+
+        ident = _current_user_data()
+        return bool(ident) and ident.get("role") == "admin"
+    except Exception:
+        # Never let an auth probe break the device page.
+        return False
+
+
 def handle_request():
-    return """
+        _css, _js = _shared_design()
+        is_admin = _viewer_is_admin()
+        # No admin links on the root page. Reverses the 2026-09-27 decision
+        # to keep them visible: the owner reported twice that the panel still
+        # showed on `/`, and once it was a bordered box it read as a stuck
+        # hamburger. Admin lives behind /admin/* now, reached by URL.
+        admin_links_html = ""
+        return (
+        """
     <!DOCTYPE html>
     <html lang="pt">
     <head>
@@ -26,9 +132,16 @@ def handle_request():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Phantasma UI</title>
         <style>
-            :root { --bg-color: #121212; --chat-bg: #1e1e1e; --user-msg: #2d2d2d; --ia-msg: #005a9e; --text: #e0e0e0; }
+            __SHARED_CSS__
+            /* Root page chrome. Declared at the top, outside any @media, with a
+               child selector: Playwright reported ZERO matching rules for
+               .nav-bar when this lived further down the sheet, so the
+               right-alignment silently did nothing on desktop. */
+            #header-strip > .nav-bar { margin-left:auto; }
+            #header-strip > .nav-bar .nav-toggle { min-width:44px; min-height:44px; }
+            :root { --bg-color: #0a0a0a; --surface: #171717; --border: #262626; --text: #fafafa; --muted: #737373; --accent: #22c55e; --destructive: #ef4444; --chat-bg: var(--surface); --user-msg: #2d2d2d; --ia-msg: var(--accent); }
             body { 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+                font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
                 background: var(--bg-color); color: var(--text); 
                 display: flex; flex-direction: column; 
                 height: 100vh; height: 100dvh; margin: 0; overflow: hidden;
@@ -37,10 +150,28 @@ def handle_request():
             /* --- SIDEBAR UNIFICADA (DASHBOARD) --- */
             #header-strip {
                 display: flex; align-items: flex-start; 
-                background: #181818; 
-                border-bottom: 1px solid #2a2a2a; 
+                background: var(--surface); 
+                border-bottom: 1px solid var(--border); 
                 box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-                height: 240px; flex-shrink: 0; z-index: 50; 
+                /* The strip is context, not content. A fixed 240px with
+                   flex-shrink:0 meant it claimed the same space whether or
+                   not there was anything to show, and on a 375x667 phone
+                   the chat was left 244px. Capped and shrinkable: #devices
+                   scrolls, #chat-log takes the rest. */
+                /* 240px on desktop; on a phone the strip has to hold the brand,
+                   the device readings and the admin links, which measured 394px
+                   at 375 wide. A flat 190px cap clipped the admin links
+                   outright -- invisible and unclickable -- which an adversarial
+                   falsifier caught after the hover work had already shipped.
+                   So the cap is proportional and the device strip is the part
+                   that yields: it already has its own scroll region. */
+                /* 34dvh, not 46: measured floor is brand 78px + nav 67px = 145px,
+                   plus a 64px peek of the device strip = ~210px. At 46dvh the
+                   header took 300px of a 667px phone and the chat lost ~100px for
+                   no gain -- the extra space all went to the device strip, which
+                   scrolls anyway. 34dvh fits the floor and leaves the rest to the
+                   chat. */
+                height: 240px; max-height: 34dvh; flex: 0 1 auto; z-index: 50; 
             }
             #brand {
                 display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -78,7 +209,7 @@ def handle_request():
                 margin-bottom: 5px;
             }
             #brand-logo { 
-                font-size: 3.5rem; 
+                font-size: 2rem; 
                 transition: all 1s ease; z-index: 10;
             }
             
@@ -110,13 +241,40 @@ def handle_request():
             .ghost-storm { filter: drop-shadow(0 0 10px #7e57c2) contrast(1.2); animation: shakeGhost 0.5s infinite; }
 
             /* --- TOPBAR (DEVICES) --- */
-            #topbar {
-                flex: 1; display: flex; align-items: flex-start; align-content: flex-start;
+            /* Always visible, outside the burger: the device readings are the
+               primary content of this page and must never be behind a menu. */
+            #devices {
+                display:flex; flex:1; min-width:0; box-sizing:border-box;
+                align-items:flex-start; align-content:flex-start;
+                flex-wrap:wrap; overflow-y:auto; overflow-x:hidden;
+                height:100%; padding:20px 20px 20px 0;
+            }
+            @media (max-width:768px) {
+                /* The brand is width:100% below 768px and #header-strip is a
+                   flex ROW, so the device strip was pushed past the viewport
+                   (382px inside 375px). Give the devices their own row. */
+                #devices { flex:1 1 100%; min-width:0; padding-right:0; }
+                /* flex-wrap is what actually gives #devices its own row: a
+                   100% flex-basis on a non-wrapping row just overflows. */
+                #header-strip { flex-wrap:wrap; }
+            }
+            #devices::-webkit-scrollbar { width:4px; }
+            #devices::-webkit-scrollbar-thumb { background:#333; border-radius:2px; }
+
+            /* The device panel now collapses at EVERY width, because the
+               toggle is visible at every width -- the shared design system made
+               the toggle permanent, so a panel that stayed pinned open on
+               desktop would leave the button doing nothing there. Closed by
+               default; design.js() adds .open. The device strip is unchanged
+               once opened: same 4 rooms, same 14 tiles. */
+            #nav-menu:not(.nav-menu-always) {
+                flex: 1; display: none; align-items: flex-start; align-content: flex-start;
                 flex-wrap: wrap; overflow-y: auto; overflow-x: hidden;
                 height: 100%; padding: 20px 0 20px 20px;
             }
-            #topbar::-webkit-scrollbar { width: 4px; }
-            #topbar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+            #nav-menu.open { display: flex; }
+            #nav-menu::-webkit-scrollbar { width: 4px; }
+            #nav-menu::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 
             .device-room {
                 display: inline-flex; flex-direction: column;
@@ -128,21 +286,63 @@ def handle_request():
             .room-content { display: flex; gap: 8px; flex-wrap: wrap; }
 
             /* WIDGETS */
-            .device-toggle, .device-sensor { 
-                display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
-                background: #222; opacity: 0.5; transition: all 0.3s; 
-                min-width: 68px; height: 56px; border-radius: 8px; padding: 3px 4px;
+                /* Vertical stack, cross-axis centred, text centred -- the
+                   `flex flex-col items-center text-center` behaviour. It was
+                   already a column with align-items:center, but the tile was
+                   pinned to height:44px, which squeezed the label into a 2-line
+                   clamp at 0.6rem and made the centring invisible. 44px is kept
+                   as a MINIMUM (the touch-target floor), never as a cap. */
+                .device-toggle, .device-sensor {
+                    flex: 0 0 auto; display: flex; flex-direction: column;
+                    align-items: center; justify-content: center; text-align: center;
+                    background: #222; opacity: 0.5; transition: all 0.3s;
+                    min-width: 60px; min-height: 44px;
+                    border-radius: 8px; padding: 8px 10px;
+                    flex-grow: 1; min-width: 0;
+                }
+
+            @media (min-width: 768px) {
+                /* Was a FIXED height:56px, which cannot hold the 40px badge +
+                   its 8px margin + a 3-line label + 16px padding -- the badge
+                   measured 40x30 because flex-shrink ate the difference. The
+                   tile now grows to its content, with 88px as the floor. */
+                .device-toggle, .device-sensor {
+                    min-width: 60px;
+                    min-height: 88px;
+                    height: auto;
+                    flex-grow: 0;
+                }
             }
             .device-sensor { background: #252525; border: 1px solid #333; }
             .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
             .device-toggle.active .device-icon { filter: grayscale(0%); }
             
-            .device-icon { font-size: 1.3rem; filter: grayscale(100%); transition: filter 0.3s; margin-bottom: 2px; }
-            .device-label { 
-                font-size: 0.6rem; color: #aaa; width: 100%; text-align: center;
-                line-height: 1.05; white-space: normal; overflow: hidden; 
-                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-            }
+                /* The icon is the tile's badge, matching pdftools ToolCard.tsx:52-53
+                   -- `flex h-10 w-10 items-center justify-center rounded-lg` with
+                   `mb-2` and a hover scale. The tile itself was already
+                   `flex flex-direction:column; align-items:center` (215-217);
+                   only the badge box was missing, so the glyph sat loose on the
+                   tile background. Styled here rather than wrapped in the JS
+                   builder (line 540) so the DOM contract is untouched. */
+                .device-icon {
+                    display: flex; align-items: center; justify-content: center;
+                    flex: 0 0 auto;
+                    width: 2.5rem; height: 2.5rem;
+                    border-radius: 0.5rem;
+                    background: var(--surface-2, #252525);
+                    font-size: 1.25rem;
+                    filter: grayscale(100%);
+                    transition: filter 0.3s, transform 0.3s;
+                    margin-bottom: 0.5rem;
+                }
+                .device-toggle:hover .device-icon { transform: scale(1.05); }
+                .device-label {
+                    font-size: 0.65rem; color: #aaa; width: 100%; text-align: center;
+                    line-height: 1.15; white-space: normal; overflow: hidden;
+                    /* Clamp at 3, not 2: the tile is taller now, so a 2-line
+                       clamp was cutting real device names in half. */
+                    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                }
 
             .switch { position: relative; display: inline-block; width: 28px; height: 14px; margin-bottom: 2px; }
             .switch input { opacity: 0; width: 0; height: 0; }
@@ -151,7 +351,9 @@ def handle_request():
             input:checked + .slider { background-color: var(--ia-msg); }
             input:checked + .slider:before { transform: translateX(12px); }
 
-            .sensor-data, .sensor-temp, .sensor-hum { font-size: 0.7rem; color: #4db6ac; font-weight: bold; }
+            .sensor-data { font-size: 0.7rem; color: #4db6ac; font-weight: bold; 
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+            }
             .sensor-label { font-size: 0.6rem; color: #888; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
             /* CHAT */
@@ -175,7 +377,11 @@ def handle_request():
 
             #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); align-items: flex-end; }
             #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; resize: none; height: 24px; max-height: 100px; font-family: inherit; overflow-y: hidden; }
-            #chat-send { background: var(--ia-msg); color: white; border: none; padding: 0 20px; border-radius: 25px; font-weight: bold; cursor: pointer; height: 48px; }
+            #chat-send { 
+    background: var(--ia-msg); color: white; border: none; padding: 0 12px; border-radius: 25px; 
+    font-weight: bold; cursor: pointer; 
+    height: 48px; flex: 0 0 auto; 
+}
 
             @keyframes floatGhost { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-5px); } }
             @keyframes floatWeather { 0%, 100% { transform: translateY(0px) scale(1); } 50% { transform: translateY(-3px) scale(1.05); } }
@@ -189,58 +395,343 @@ def handle_request():
             #cli-help.open { max-height: 200px; overflow-y: auto; padding: 10px; }
             #help-toggle { text-align: center; font-size: 0.8rem; color: #666; padding: 5px; cursor: pointer; }
 
+            #header-strip #devices { min-height: 0; overflow-y: auto; }
+            #main { flex: 1 1 auto; min-height: 0; }
+            #chat-log { flex: 1 1 auto; min-height: 0; }
+
             /* --- MOBILE (≤ 768px) --- */
+            /* --- admin links on a phone: one 44px row ---------------------
+               Measured at 375 wide: the links wrapped onto two rows of 48px
+               (127px of nav-bar) and, stacked under the brand and the device
+               strip, pushed past the header's cap -- so they were rendered
+               outside it and clipped. Four icon-only targets in one row are
+               4x44 = 176px, which fits. The accessible name comes from
+               aria-label, so hiding the text costs nothing for a screen
+               reader, and the 44px floor is preserved. */
+            @media (max-width: 768px) {
+                .nav-menu.nav-menu-always { flex-wrap:nowrap; }
+                .nav-menu.nav-menu-always .nav-link {
+                    min-width:44px; min-height:44px; width:44px;
+                    padding:0; justify-content:center; font-size:0; gap:0;
+                }
+                .nav-menu.nav-menu-always .nav-link span.lbl { display:none; }
+                .nav-menu.nav-menu-always .nav-link .ico { font-size:1.15rem; }
+            }
             @media (max-width: 768px) {
                 #header-strip { flex-direction: column; height: auto; min-height: 0; }
+                /* The strip became a COLUMN above, but the max-width:768px block
+                   still leaves `flex-wrap: wrap` on it (that rule was written for
+                   a ROW). Wrapping a column whose height is auto wraps on the
+                   CROSS axis -- i.e. horizontally -- so #brand filled 0-375px and
+                   #devices was pushed onto a second line at left:375px:
+                   documentElement.scrollWidth 750 inside a 375px viewport. A
+                   column must not wrap; the items already stack vertically. */
+                #header-strip { flex-wrap: nowrap; }
+                /* THE mobile layout bug, and it was one declaration.
+                   The base rule is `height:240px; flex-shrink:0` (line ~94).
+                   Mobile set `height:auto` but never reset `flex-shrink`, so
+                   inside `body{height:100dvh; overflow:hidden}` the strip
+                   claimed the FULL content height of all 14 tiles at 84px each
+                   and pushed the composer out of the viewport, where
+                   overflow:hidden clipped it. Measured: document scrollHeight
+                   was exactly the viewport height, so there was nothing to
+                   scroll back to -- the composer was unreachable. The strip
+                   has to be allowed to shrink and cap itself, with #devices as
+                   the scrolling region. */
+                #header-strip {
+                    flex: 0 1 auto;
+                    min-height: 0;
+                    /* Kept in step with the base rule (34dvh). These two caps
+                       drifted apart and the mobile one won, so the header
+                       stayed at 300px of a 667px phone and the chat lost
+                       ~100px for nothing. */
+                    max-height: 34dvh;
+                    overflow: hidden;
+                }
+                #devices {
+                    flex: 1 1 auto;
+                    /* min-height, not 0: with the brand now refusing to shrink,
+                       devices is the only thing that yields, and at 320x568
+                       yielding to zero would hide every device. 120px shows
+                       roughly one full row plus the start of the next. */
+                    min-height: 120px;
+                    width: 100%;
+                    overflow-y: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                /* #chat-log must take what is left and scroll internally, or the
+                   14 tiles starve it. min-height:0 is what actually allows a
+                   flex child to shrink below its content size. */
+                #chat-log {
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    overflow-y: auto;
+                    -webkit-overflow-scrolling: touch;
+                }
+                /* #brand is `height:100%` + `justify-content:center` +
+                   `overflow:hidden`. In the column strip its content is taller
+                   than its box, so centring pushed the top out of view and
+                   overflow:hidden cut it: measured, #sky-stage and
+                   #main-weather-icon sat at top:-23px on EVERY mobile size --
+                   the weather icon was half off-screen. Let the brand take its
+                   natural height so nothing is clipped. */
+                #brand { flex: 0 0 auto; height: auto; }
+
+                #chat-input { min-height: 44px; height: auto; }
+                #chat-send { min-height: 44px; }
+
+                /* 320x568 measured 7 of 14 devices FULLY hidden: the tiles are
+                   84px tall and only ~2 rows fit the bounded strip. On short
+                   screens compact the tile so the devices are actually
+                   reachable rather than merely scrollable. */
+                @media (max-height: 700px) {
+                    .device-toggle, .device-sensor { min-height: 64px; padding: 6px 8px; }
+                    .device-icon { width: 32px; height: 32px; font-size: 1rem; margin-bottom: 4px; }
+                    .device-label { font-size: 0.7rem; }
+                }
+
+                /* Scroll affordance. The strip is an inner scroller inside a
+                   non-scrolling app shell, so a half-visible row was
+                   indistinguishable from a rendering bug. The class is toggled
+                   in JS only when the container actually overflows, so a
+                   fully-visible grid is not dimmed for no reason. */
+                #devices.is-scrollable {
+                    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 28px), transparent 100%);
+                    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 28px), transparent 100%);
+                }
+                /* #header-strip is a COLUMN here, but the max-width:768px block
+                   above still gave #devices `flex: 1 1 100%` + the strip
+                   `flex-wrap: wrap` -- machinery written for a ROW. In a column
+                   flex-basis is the HEIGHT, so none of it positioned the strip
+                   horizontally, and with `align-items: flex-start` on the strip
+                   #devices measured at left:375px inside a 375px viewport
+                   (documentElement.scrollWidth 750). A column needs no flex
+                   basis games: full width, natural height. */
+                /* The device strip is the SCROLLING region, so it is the part
+                   that must yield when the header is capped. With `flex: 0 0 auto`
+                   it took its natural height (measured 299px at 375 wide) and
+                   pushed the admin links out of the header, where the strip's
+                   overflow:hidden clipped them: measured invisible AND
+                   unclickable at 375x667. Catching that required checking
+                   hit-testing, not just `getBoundingClientRect().width > 0`. */
+                #devices { flex: 1 1 auto; min-height: 64px; width: 100%; overflow-y: auto; }
                 #brand {
                     width: 100%; height: auto; flex-direction: row; align-items: center;
                     justify-content: space-between; border-right: none; padding: 8px 12px;
                 }
                 #sky-stage { margin-bottom: 0; gap: 8px; }
                 #ghost-stage { margin-bottom: 0; }
-                #brand-logo { font-size: 2.2rem; }
-                #aqi-indicator { right: -8px; bottom: 2px; font-size: 1rem; }
+                #brand-logo { font-size: 0.8rem !important; }
+                /* right was -8px, hanging outside the box on purpose on desktop. With
+                   #header-strip overflow:hidden on mobile that clipped the AQI value
+                   in half at the screen edge, so it reads as a stray character. */
+                #aqi-indicator { right: 4px; bottom: 2px; font-size: 1rem; }
                 #brand-name { font-size: 0.75rem; }
                 #power-display { font-size: 1.1rem; }
-                #topbar {
+                #nav-menu:not(.nav-menu-always) {
                     width: 100%; padding: 10px; box-sizing: border-box;
                     height: auto; align-content: flex-start;
-                    flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+                    flex-wrap: wrap; overflow-x: hidden; overflow-y: auto;
+                    max-height: 46vh;
                 }
                 .device-room { margin-right: 10px; margin-bottom: 0; padding-right: 10px; flex-shrink: 0; }
-                .device-toggle, .device-sensor { min-width: 60px; height: 52px; }
+                .device-toggle, .device-sensor { min-width: 60px; min-height: 84px; height: auto; }
                 .device-icon { font-size: 1.2rem; }
                 .sensor-data, .device-label, .sensor-label, .room-header { font-size: 0.75rem; line-height: 1.15; }
-                .room-content { width: max-content; max-width: none; }
+                #admin-links {
+                    /* Column, like every other nav: measured, 6 links collapsed
+                       into 1 row here while /admin stacked 7 into 7. The root
+                       menu and the admin menu must present the same list the
+                       same way. */
+                    display: flex; flex-direction: column; flex-wrap: wrap; gap: 8px; width: 100%;
+                    padding: 10px 2px 2px; margin-top: 4px;
+                    border-top: 1px solid var(--border); box-sizing: border-box;
+                }
+                #admin-links a {
+                    display: inline-flex; align-items: center; gap: 6px;
+                    min-height: 44px; padding: 0 14px; border-radius: 8px;
+                    border: 1px solid var(--border); background: var(--surface-2);
+                    color: var(--text); text-decoration: none; font-size: 0.85rem;
+                }
+                #admin-links a:hover { border-color: var(--brand-500); color: var(--brand-400); }
+                #admin-links a:focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
+                #admin-links a.logout { color: var(--destructive); }
+                /* Was `width:max-content; max-width:none`, which sized the room
+                   strip to fit every tile on ONE line. Measured at 375px: the
+                   strip was 361px wide and its tiles reached right=514px,
+                   forcing 382px of horizontal document overflow. The strip must
+                   be allowed to WRAP inside the viewport, so the max-content
+                   sizing is dropped and the row is capped to its container. */
+                .room-content { width: 100%; max-width: 100%; box-sizing: border-box; }
                 #chat-input { font-size: 16px; }
                 .msg { max-width: 92%; font-size: 1.05rem; }
                 #cli-help.open { max-height: 150px; }
+            }
+            /* ---- device strip on a phone ----
+               The strip used to become a full-width horizontal scroller on
+               phones, pushing the chat log off-screen. The fix was never a
+               hamburger: the strip scrolls, and the admin links sit beside it
+               as a short always-visible row. Nothing here is conditional. */
+            /* The links stay visible at every width. On a phone they shrink to
+               icons with an accessible name rather than disappearing behind a
+               toggle -- five short links fit; a menu gating them did not earn
+               its tap. */
+            /* The shared .nav-menu is display:none -- the ADMIN pages hide theirs
+               behind a burger, and that default is unconditional, not inside a
+               media query. This page has no burger, so it opts out with
+               .nav-menu-always, declared in design.py next to the rule it
+               overrides. Playwright measured 0x0 here before it existed. */
+            /* Right-aligned at EVERY width. Playwright measured nav-bar at
+               x=210 on a 1280px viewport when this rule only applied below
+               900px -- the burger sat left of centre and its panel opened at
+               x=54, i.e. to the left of the button that controls it. */
+            /* !important on purpose: .nav-bar in the shared design system is
+               position:sticky with its own box, and the root page's header
+               layout must win. Measured: without it the burger sat at x=210 on a
+               1280px viewport (left of centre) and its panel opened at x=54, to
+               the LEFT of the button that opens it. */
+            .nav-bar { margin-left:auto !important; }
+
+            /* Admin panel: collapses behind the burger, same contract as the
+               admin pages and the same design.js() that drives it. */
+            /* The brand owns the left edge; navigation is pushed to the right
+               with margin-left:auto so the two never compete. The burger is
+               44x44 at every width -- the same floor as every other control,
+               and the reason this is not a 24px icon. */
+            #nav-menu:not(.nav-menu-always) { right:0; }
+            /* No burger. Removed 2026-09-27 by owner decision, after a round
+               that had just added one: the panel holds four admin links and
+               nothing else, so the toggle gated nothing worth gating. They are
+               always visible now, right-aligned because the left edge belongs
+               to the brand. */
+            @media (max-width: 480px) {
+                /* The emoji is the icon; font-size 0 hides the redundant text
+                   but the accessible name comes from the aria-label below. */
+            }
+
+            /* --- FlyBrain reaction bar -------------------------------------
+               44px targets, same floor as every other control: these are the
+               primary way to teach the brain, so a miss is a lost signal. */
+            .react-holder { display:flex; justify-content:flex-end; margin-top:2px; }
+.react-bar {
+  display:flex; gap:4px; flex-wrap:wrap;
+  /* Closed state: invisible AND inert. `opacity` alone was the bug: it hides the
+     bar without removing it from hit-testing, so the 44px row kept swallowing
+     taps meant for the text. `pointer-events:none` takes it out of the target
+     tree. The buttons stay focusable, which is what `:focus-within` needs --
+     `visibility:hidden` would break that (R2). */
+  opacity:0; pointer-events:none;
+  transition:opacity .15s ease;
+}
+/* Open state, one trigger per input model. The state lives on the .msg-row
+   because that element survives the /api/reactions backfill: the .react-bar
+   innerHTML is replaced when the emoji map arrives, and state kept on the bar
+   would die with it (R7). */
+.msg-row:hover > .react-holder .react-bar,
+.msg-row:focus-within > .react-holder .react-bar,
+.msg-row.react-revealed > .react-holder .react-bar {
+  opacity:1; pointer-events:auto;
+}
+/* Closed at EVERY width, not only on touch. The holder being merely
+   transparent reserved a 44px band inside every message forever, so the replies
+   were permanently indented and the band was a dead zone for text selection.
+   `display:none` is what makes the closed state actually closed; the input model
+   only decides WHAT opens it (hover / focus-within / long-press). */
+.msg-row > .react-holder { display:none; }
+.msg-row:hover > .react-holder,
+.msg-row:focus-within > .react-holder,
+.msg-row.react-revealed > .react-holder { display:flex; }
+            .react-btn {
+              min-width:44px; min-height:44px; padding:0 6px;
+              background:transparent; border:1px solid transparent;
+              border-radius:var(--radius,8px); cursor:pointer;
+              font-size:1.15rem; line-height:1;
+              display:inline-flex; align-items:center; justify-content:center;
+            }
+            .react-btn:hover { background:var(--surface-2,#222); border-color:var(--border); }
+            .react-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+            /* "reacted" is set optimistically and reverted on a network error,
+               so a stuck highlight always means the signal was accepted. */
+            .msg.reacted { border-color:var(--accent); }
+            .react-loading { opacity:.5; font-size:.85rem; padding:0 8px; }
+            /* The chosen reaction, so it is visible which one was given. A
+               border + tint rather than a colour swap, so it stays legible on
+               both themes without relying on --accent resolving. */
+            .react-btn.is-chosen {
+              background:rgba(255,255,255,.10);
+              border-color:var(--brand-500, #3b82f6);
+              box-shadow:inset 0 0 0 1px var(--brand-500, #3b82f6);
+            }
+            /* The outcome of the reaction, from the server's own report. */
+            .react-note {
+              font-size:.75rem; color:var(--muted, #999);
+              padding:2px 0 0; text-align:right; line-height:1.4;
+            }
+            .react-note.is-error { color:var(--destructive, #ef4444); }
+            /* "Guardar esta resposta como no": the explicit alternative to
+               auto-creating a concept on every unmatched reaction. */
+            .react-savenode {
+              align-self:flex-end; margin-top:4px; padding:4px 8px;
+              font-size:.7rem; font-family:inherit; cursor:pointer;
+              color:var(--muted, #999); background:transparent;
+              border:1px dashed var(--border, #333); border-radius:var(--radius, 8px);
+            }
+            .react-savenode:hover { color:var(--brand-400, #22d3ee); border-color:var(--brand-500, #06b6d4); }
+            .react-savenode:disabled { opacity:.5; cursor:default; }
+            .react-count { font-size:.75rem; color:var(--muted); align-self:center; }
+
+            /* Accessibility: visible focus outline */
+            .device-toggle:focus-visible,
+            .device-sensor:focus-visible {
+                outline: 2px solid var(--accent);
+                outline-offset: 2px;
             }
         </style>
     </head>
     <body>
         <div id="easter-egg-layer"><div id="big-ghost">👻</div></div>
 
-        <div id="header-strip">
-            <div id="brand" onclick="triggerEasterEgg()">
-                <div id="sky-stage">
-                    <div class="sky-element" title="Meteorologia">
-                        <div id="main-weather-icon">☁️</div>
-                        <div id="main-weather-temp">--°</div>
-                    </div>
-                    <div class="sky-element" title="Fase Lunar">
-                        <div id="main-moon-icon">🌑</div>
-                    </div>
-                </div>
-                <div id="ghost-stage">
-                    <div id="brand-logo" class="ghost-normal">👻</div>
-                    <div id="aqi-indicator" title="Qualidade do Ar"></div>
-                </div>
-                <div id="brand-name">pHantasma</div>
-                <div id="power-display" title="Consumo Geral">-- W</div>
-            </div>
-            <div id="topbar"></div>
-        </div>
+          <div id="header-strip">
+              <div id="brand" onclick="triggerEasterEgg()">
+                  <div id="sky-stage">
+                      <div class="sky-element" title="Meteorologia">
+                          <div id="main-weather-icon">☁️</div>
+                          <div id="main-weather-temp">--°</div>
+                      </div>
+                      <div class="sky-element" title="Fase Lunar">
+                          <div id="main-moon-icon">🌑</div>
+                      </div>
+                  </div>
+                  <div id="ghost-stage">
+                      <div id="brand-logo" class="ghost-normal">👻</div>
+                      <div id="aqi-indicator" title="Qualidade do Ar"></div>
+                  </div>
+                  <div id="brand-name">pHantasma</div>
+                  <div id="power-display" title="Consumo Geral">-- W</div>
+              </div>
+              <!-- Secondary nav, always visible. Shares .nav-menu styling with
+                   the admin pages but has no toggle: on this screen a burger
+                   would gate five links and nothing else. -->
+              
+              <!-- Always available, outside the burger. -->
+              <div id="devices" aria-label="Dispositivos"></div>
+<div class="nav-bar">
+                  <!-- Admin navigation lives here, and only here. It is a
+                       right-aligned burger because the LEFT edge of this page is
+                       the brand: the layout reads left-to-right as
+                       identity -> navigation, and a menu in the top-left
+                       competes with the mark that names the thing.
+
+                       Rendered server-side only for an admin viewer, so a
+                       non-admin is not sent links they cannot use. The burger
+                       collapses the panel below 900px, matching the admin
+                       pages, which is the behaviour that shared design.js()
+                       implements. -->
+                  
+                  <nav class="nav-menu nav-menu-always" id="nav-menu" aria-label="Administração">__ADMIN_LINKS__</nav>
+              </div>
+          </div>
+
 
         <div id="main">
             <div id="chat-log"></div>
@@ -256,7 +747,9 @@ def handle_request():
             const chatLog = document.getElementById('chat-log');
             const chatInput = document.getElementById('chat-input');
             const chatSend = document.getElementById('chat-send');
-            const topBar = document.getElementById('topbar');
+            // Dispositivos sao montados dentro de #devices, que vive no painel
+          // .nav-menu partilhado com o admin. Antes apontava para #topbar.
+          const devicesEl = document.getElementById('devices');
             const helpContent = document.getElementById('help-content');
             
             const ALL_DEVICES_ELEMENTS = []; 
@@ -295,7 +788,7 @@ def handle_request():
                 const roomWrapper = document.createElement('div'); roomWrapper.className = 'device-room';
                 const header = document.createElement('div'); header.className = 'room-header'; header.innerText = room;
                 roomContainer = document.createElement('div'); roomContainer.className = 'room-content'; roomContainer.id = `room-content-${room}`; 
-                roomWrapper.append(header, roomContainer); topBar.appendChild(roomWrapper);
+                roomWrapper.append(header, roomContainer); devicesEl.appendChild(roomWrapper);
                 return roomContainer;
             }
 
@@ -309,12 +802,253 @@ def handle_request():
             }
             function removeTypingIndicator() { const row = document.getElementById('typing-indicator-row'); if (row) row.remove(); }
 
+            // --- FlyBrain reactions -------------------------------------
+            // The reward map is fetched from /api/reactions so the buttons and
+            // the training behaviour cannot drift: an emoji added server-side
+            // appears here with no frontend change.
+            //
+            // Declared BEFORE addToChatLog uses it. An earlier version of this
+            // referenced reactionEmojis from inside addToChatLog without ever
+            // declaring it, which threw a ReferenceError on the FIRST message:
+            // the user's own text rendered and the assistant's reply never did.
+            // A chat that silently drops half its messages is worse than one
+            // that visibly fails.
+            let reactionEmojis = [];
+            async function loadReactions() {
+              try {
+                const r = await fetch('/api/reactions');
+                const d = await r.json();
+                reactionEmojis = (d.emojis || []).map(e => e.emoji);
+                // Backfill bars drawn while this fetch was in flight. The first
+                // assistant message is usually rendered BEFORE the map arrives,
+                // so without this it would keep an empty bar forever -- which is
+                // what made the reactions look broken while the API was fine.
+                document.querySelectorAll('.react-bar').forEach(bar => {
+                  if (bar.querySelector('.react-btn')) return;
+                  const fresh = reactionBar();
+                  bar.innerHTML = fresh.innerHTML;
+                });
+              } catch (e) { reactionEmojis = []; }
+            }
+            loadReactions();
+            wireReactionDelegation();
+
+            // One delegated listener on #chat-log, attached once. It survives
+            // bars rendered later and re-rendered again when the map arrives --
+            // a listener bound to a button that gets replaced dies with it, which
+            // is why the reactions were visible but did nothing.
+            let msgSeq = 0;
+            function wireReactionDelegation() {
+              const log = document.getElementById('chat-log');
+              if (!log || log.dataset.reactWired) return;
+              log.dataset.reactWired = '1';
+              // Long-press reveal for touch. Attached here, once, on the same
+              // element as the click delegation: a per-message listener would
+              // die every time the /api/reactions backfill rebuilds a bar (R6).
+              // Gated on the media query, NOT on a user-agent string (R5).
+              const coarse = matchMedia('(pointer: coarse)');
+              const HOLD_MS = 600, MOVE_TOLERANCE = 10;
+              let holdTimer = null, holdStart = null, holdRow = null;
+              function cancelHold() {
+                if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+                holdStart = null; holdRow = null;
+              }
+              log.addEventListener('touchstart', ev => {
+                if (!coarse.matches) return;                 // desktop: hover rules
+                const row = ev.target.closest('.msg-row');
+                // Only the assistant's own replies are reactable, and only
+                // starting on the text, never on a button.
+                if (!row || row.classList.contains('user')) return;
+                if (ev.target.closest('.react-btn')) return;
+                const t = ev.changedTouches[0];
+                holdRow = row; holdStart = {x: t.clientX, y: t.clientY};
+                holdTimer = setTimeout(() => {
+                  if (holdRow) holdRow.classList.add('react-revealed');
+                  holdTimer = null;
+                }, HOLD_MS);
+              }, {passive: true});
+              log.addEventListener('touchmove', ev => {
+                // A press that turns into a scroll must never reveal the bar (R4).
+                if (!holdStart) return;
+                const t = ev.changedTouches[0];
+                if (Math.abs(t.clientX - holdStart.x) > MOVE_TOLERANCE
+                 || Math.abs(t.clientY - holdStart.y) > MOVE_TOLERANCE) cancelHold();
+              }, {passive: true});
+              ['touchend','touchcancel'].forEach(t =>
+                log.addEventListener(t, cancelHold, {passive: true}));
+              // Tapping elsewhere closes a revealed bar: one open at a time, and
+              // the bar is a transient affordance, not a pinned panel.
+              log.addEventListener('click', ev => {
+                if (ev.target.closest('.react-btn')) return;
+                const open = log.querySelector('.msg-row.react-revealed');
+                if (open && !ev.target.closest('.msg-row')) {
+                  open.classList.remove('react-revealed');
+                }
+              });
+              log.addEventListener('pointerdown', ev => {
+                if (ev.pointerType === 'touch' || !ev.target.closest('.react-btn')) return;
+                const row = ev.target.closest('.msg-row');
+                if (row) row.classList.add('react-revealed');
+              }, {passive: true});
+              log.addEventListener('click', ev => {
+                const btn = ev.target.closest('.react-btn');
+                if (!btn) return;
+                const row = btn.closest('.msg-row');
+                const msg = row && row.querySelector('.msg');
+                if (msg) sendReaction(btn.textContent, msg, btn);
+              });
+            }
+            // The backend does real work and says what it did: the reply carries
+            // `flybrain: "stepped"`, `graph: "rewarded"`, the reward and the topic
+            // it touched. This used to discard the whole body and only toggle a
+            // transient class, so reacting looked like it did nothing -- the
+            // request succeeded and the screen said nothing at all. The outcome
+            // is now shown on the message it belongs to.
+            function reactionNote(msgEl, text, isError) {
+              let note = msgEl.parentElement.querySelector('.react-note');
+              if (!note) {
+                note = document.createElement('div');
+                note.className = 'react-note';
+                msgEl.parentElement.appendChild(note);
+              }
+              note.textContent = text;
+              note.classList.toggle('is-error', !!isError);
+            }
+
+            function reactionReport(d) {
+              const bits = [(d.reward > 0 ? '+' : '') + Number(d.reward).toFixed(2)];
+              if (d.flybrain) bits.push('FlyBrain: ' + d.flybrain);
+              // "no_match" is not jargon to show a user: it means the reply
+              // talked about nothing the graph has a node for, so the graph was
+              // deliberately left alone. Saying so is the whole point -- the
+              // previous behaviour credited an unrelated node and looked fine.
+              if (d.graph === 'no_match') {
+                bits.push('esta resposta nao nomeia nenhum no do grafo, por isso o grafo ficou intacto');
+              } else if (d.graph === 'topic_fallback') {
+                bits.push('grafo: no do topico actual (a resposta nao foi usada)');
+              } else if (d.graph) {
+                bits.push('grafo: ' + d.graph + (d.graph_node ? ' (' + d.graph_node + ')' : ''));
+              }
+              if (d.topic_key) bits.push(d.topic_key);
+              if (!d.applied) bits.push('nao aplicada');
+              return bits.join(' \u00b7 ');
+            }
+
+            function addSaveNodeAction(msgEl, btn) {
+              const row = msgEl.parentElement;
+              if (row.querySelector('.react-savenode')) return;
+              const b = document.createElement('button');
+              b.className = 'react-savenode';
+              b.type = 'button';
+              b.textContent = 'Guardar esta resposta como nó do grafo';
+              b.title = 'Cria um nó a partir desta resposta, para que futuras '
+                      + 'reações a ela reforcem esse nó';
+              b.addEventListener('click', async () => {
+                b.disabled = true;
+                const r = await fetch('/api/graph/node', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({
+                    label: (msgEl.innerText || '').trim().slice(0, 120),
+                    text: (msgEl.innerText || '').trim().slice(0, 2000),
+                  }),
+                });
+                const d = await r.json();
+                const note = row.querySelector('.react-note');
+                if (d.ok) {
+                  if (note) {
+                    note.textContent += ' \u00b7 nó criado: ' + (d.result.label || '');
+                  }
+                  b.remove();
+                } else {
+                  b.disabled = false;
+                  if (note) note.textContent = 'Nó não criado: ' + (d.error || 'erro');
+                }
+              });
+              row.appendChild(b);
+            }
+
+            async function sendReaction(emoji, msgEl, btn) {
+              msgEl.classList.add('reacted');
+              try {
+                const r = await fetch('/api/reaction', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({emoji: emoji, source: 'web',
+                                        // message_text travels with the reaction: the graph reward must
+                                        // resolve the node THIS reply is about. Without it the backend fell
+                                        // back to the ambient topic, so every reaction reinforced whatever
+                                        // node happened to be current -- a thumbs-up on an answer about
+                                        // mortality reported node:capitalismo tardio.
+                                        message_id: msgEl.dataset.mid || '',
+                                        message_text: (msgEl.innerText || '').slice(0, 2000)})
+                });
+                const d = await r.json();
+                if (!d.ok) {
+                  msgEl.classList.remove('reacted');
+                  reactionNote(msgEl, 'Reacao nao aplicada: ' + (d.error || d.message || 'recusada'), true);
+                  return;
+                }
+                // The chosen reaction is marked, so it is visible WHICH one was
+                // given instead of all six looking identical.
+                if (btn) {
+                  msgEl.parentElement.querySelectorAll('.react-btn.is-chosen')
+                    .forEach(b => b.classList.remove('is-chosen'));
+                  btn.classList.add('is-chosen');
+                }
+                reactionNote(msgEl, emoji + ' ' + reactionReport(d), false);
+                // When the reply named no node, the graph was deliberately left
+                // alone. Creating one automatically is NOT the right default: a
+                // reaction is a sentiment, and turning every unanswered text into
+                // a concept would bloat the graph with whatever happened to be
+                // said. So the capability is offered as an explicit action, and
+                // the operator decides.
+                if (d.graph === 'no_match' && btn) {
+                  addSaveNodeAction(msgEl, btn);
+                }
+              } catch (e) {
+                msgEl.classList.remove('reacted');
+                reactionNote(msgEl, 'Erro de rede: ' + e, true);
+              }
+            }
+
+            function reactionBar() {
+              const bar = document.createElement('div'); bar.className = 'react-bar';
+              for (const e of reactionEmojis) {
+                const b = document.createElement('button');
+                b.type = 'button'; b.className = 'react-btn';
+                b.textContent = e;
+                b.title = e + ' — ensina o cérebro';
+                b.setAttribute('aria-label', 'Reagir com ' + e);
+                bar.appendChild(b);
+              }
+              return bar;
+            }
+
+
             function addToChatLog(text, sender = 'ia') {
                 removeTypingIndicator(); 
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
                 if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻'; row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
-                msgDiv.innerText = text; row.appendChild(msgDiv); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
+                // Stable per-message id. Without it `message_id` was always the
+                // empty string, so the endpoint's 30s rate limit keyed on
+                // (actor, emoji, '') and refused a second reaction -- even on a
+                // different message -- as "already reacted to this message".
+                msgDiv.dataset.mid = msgDiv.dataset.mid ||
+                  ('m' + Date.now().toString(36) + (msgSeq++).toString(36));
+                msgDiv.innerText = text;
+                row.appendChild(msgDiv);
+                // Reactions attach to assistant messages only: reacting to your own
+                // prompt is not feedback on anything.
+                if (sender === 'ia') {
+                    const holder = document.createElement('div'); holder.className = 'react-holder';
+                    const bar = reactionBar();
+                    bar.dataset.mid = msgDiv.dataset.mid || '';
+                    holder.appendChild(bar);
+                    row.appendChild(holder);
+                }
+                chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
             }
 
             async function sendChatCommand() {
@@ -362,11 +1096,9 @@ def handle_request():
                 const div = document.createElement('div'); div.className = 'device-sensor'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'sensor';
                 const dataSpan = document.createElement('span'); dataSpan.className = 'sensor-data'; dataSpan.innerText = '...';
-                const tempSpan = document.createElement('span'); tempSpan.className = 'sensor-temp'; tempSpan.innerText = '';
-                const humSpan = document.createElement('span'); humSpan.className = 'sensor-hum'; humSpan.innerText = '';
                 const label = document.createElement('span'); label.className = 'sensor-label'; 
                 label.innerText = device.replace(/sensor|alarme/gi, '').trim().substring(0,12);
-                div.append(dataSpan, tempSpan, humSpan, label); container.appendChild(div);
+                div.append(dataSpan, label); container.appendChild(div);
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', element: div, dataSpan: dataSpan, label: label });
             }
 
@@ -392,37 +1124,43 @@ def handle_request():
             }
             
             async function fetchSensorStatus(item) {
-                const { name, element, dataSpan, tempSpan, humSpan } = item;
+                const { name, element, dataSpan } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
-                    element.style.opacity = data.state === 'unreachable' ? 0.5 : 1;
-                    if (data.state === 'unreachable') return;
-                    
-                    // Power
+                    if (data.state === 'unreachable') {
+                        element.style.opacity = 0.35;
+                        dataSpan.innerText = 'indisponível';
+                        dataSpan.style.color = '#737373';
+                        element.title = name + ' — indisponível';
+                        return;
+                    }
+                    element.style.opacity = data.stale ? 0.45 : 1;
+                    let measurements = [];
+                    let color = '#4db6ac';
                     if (data.power_w !== undefined) {
-                        dataSpan.innerText = Math.round(data.power_w) + ' W';
-                        dataSpan.style.color = "#ffb74d";
-                    } else {
-                        dataSpan.innerText = '';
-                        dataSpan.style.color = "#4db6ac";
+                        measurements.push(Math.round(data.power_w) + ' W');
+                        color = '#ffb74d';
                     }
-                    // Temperature
-                    if (data.temperature !== undefined) {
-                        tempSpan.innerText = Math.round(data.temperature) + '°';
-                    } else {
-                        tempSpan.innerText = '';
+                    if (data.temperature !== undefined) measurements.push(data.temperature + '°');
+                    if (data.humidity !== undefined) measurements.push(data.humidity + '%');
+                    if (data.ppm !== undefined) {
+                        measurements.push(data.ppm + ' ppm');
+                        if (data.status !== 'normal') color = '#ff5252';
                     }
-                    // Humidity
-                    if (data.humidity !== undefined) {
-                        humSpan.innerText = data.humidity + '%';
-                    } else {
-                        humSpan.innerText = '';
+                    let agePart = '';
+                    if (data.age_s !== undefined) {
+                        const m = Math.round(data.age_s / 60);
+                        agePart = m < 1 ? 'agora' : (m < 60 ? m + 'm' : Math.round(m / 60) + 'h');
                     }
+                    const base = measurements.length ? measurements.join(' · ') : 'sem leitura';
+                    const text = agePart ? base + ' · ' + agePart : base;
+                    dataSpan.innerText = text;
+                    dataSpan.style.color = parts.length ? color : '#737373';
+                    const ageDesc = data.age_s !== undefined ? Math.round(data.age_s / 60) + ' min' : '?';
+                    element.title = `${name} — última leitura há ${ageDesc}${data.stale ? ' (desatualizado)' : ''}`;
                 } catch (e) {}
-            }
-
-            async function updateHomePower() {
+            }async function updateHomePower() {
                 try {
                     const res = await fetch(`/device_status?nickname=casa`);
                     const data = await res.json();
@@ -437,6 +1175,16 @@ def handle_request():
                 try {
                     const res = await fetch('/api/weather'); const data = await res.json();
                     if (!data.forecast) return;
+                    // When the weather cache is stale, the user should not be left wondering
+                    // whether the data is current. Mark the icon as stale in its title.
+                    const weatherIcon = document.getElementById('main-weather-icon');
+                    if (weatherIcon) {
+                        if (data.stale) {
+                            weatherIcon.title = data.fetched_at ? `Dados meteorológicos desatualizados (atualizados em ${data.fetched_at})` : 'Dados arquivados';
+                        } else {
+                            weatherIcon.title = 'Meteorologia';
+                        }
+                    }
                     const today = data.forecast[0];
                     let wType = today.idWeatherType;
                     let wIcon = '☁️';
@@ -491,16 +1239,39 @@ def handle_request():
                 } catch (e) {}
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
+
+            /* The device strip is an inner scroller inside a non-scrolling app
+               shell (body is 100dvh + overflow:hidden), so a clipped row of
+               tiles looked like a rendering bug rather than "scroll me". Toggle
+               a fade class from the ACTUAL overflow state, so a grid that fits
+               is not dimmed, and re-evaluate on resize/orientation. */
+            function updateDeviceScrollHint() {
+                const dev = document.getElementById('devices');
+                if (!dev) return;
+                dev.classList.toggle('is-scrollable', dev.scrollHeight > dev.clientHeight + 2);
+            }
+            window.addEventListener('resize', updateDeviceScrollHint);
+            window.addEventListener('orientationchange', updateDeviceScrollHint);
+            if (window.ResizeObserver) {
+                const ro = new ResizeObserver(updateDeviceScrollHint);
+                ro.observe(document.body);
+            }
             chatSend.onclick = sendChatCommand; 
             chatInput.onkeydown = (e) => { 
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatCommand(); }
                 setTimeout(() => { chatInput.style.height = 'auto'; chatInput.style.height = chatInput.scrollHeight + 'px'; }, 0);
             };
             loadDevicesStructure(); loadHelp(); addToChatLog("Nas sombras, aguardo...", "ia");
+            /* After the device tiles are in the DOM, not before -- measuring
+               scrollHeight on an empty container would always report "fits". */
+            setTimeout(updateDeviceScrollHint, 300);
         </script>
+        <script>__SHARED_JS__</script>
     </body>
     </html>
-    """
+    """).replace("__ADMIN_LINKS__", admin_links_html) \
+        .replace("__SHARED_CSS__", _css) \
+        .replace("__SHARED_JS__", _js)
 
 def handle(user_prompt_lower, user_prompt_full):
     """UI skill doesn't handle voice commands - only registers web routes."""

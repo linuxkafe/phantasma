@@ -171,6 +171,49 @@ def apply_reward(reward: float, topic_key: Optional[str] = None) -> Optional[str
 # ---------------------------------------------------------------------------
 
 
+def find_node_for_text(text: str) -> Optional[dict]:
+    """The STORED node whose label is named in `text`, or None.
+
+    Read-only on purpose. A reaction is a judgement about one reply, and it used
+    to be credited to `get_current_topic()` -- the ambient topic. Measured:
+    reactions to two unrelated replies both landed on `node:capitalismo tardio`,
+    so a 👍 on an answer about mortality silently reinforced a node about
+    capitalism. Worse, it looked like it had worked.
+
+    Matching is exact on the normalised label, never fuzzy: the most specific
+    (longest) label that occurs in the text wins, so "vida" cannot be beaten by
+    a longer label that merely contains it. Nothing is created -- this resolves
+    to rows that already exist, and returns None when the text names none.
+    """
+    if not text or not str(text).strip():
+        return None
+    con = _connect()
+    try:
+        rows = con.execute(
+            "SELECT node_key, label, weight, affinity FROM memory_graph WHERE node_type = 'node'"
+        ).fetchall()
+    finally:
+        con.close()
+
+    # Imported locally: this module is src.brain.memory_graph, and the
+    # normaliser lives in a DIFFERENT module of the same name,
+    # src.api.memory_graph. A module-level import of the bare name reads as
+    # local and resolves to the wrong file.
+    from src.api.memory_graph import normalise
+
+    haystack = " " + normalise(text) + " "
+    best = None
+    for r in rows:
+        label = normalise(r["label"])
+        if not label or len(label) < 3:
+            continue
+        if (" " + label + " ") in haystack or haystack.strip().endswith(label):
+            # Longest match wins: a specific label beats a generic one.
+            if best is None or len(label) > len(normalise(best["label"])):
+                best = {"node_key": r["node_key"], "label": r["label"]}
+    return best
+
+
 def set_current_topic(node_key: str) -> None:
     """Remember the most recently discussed topic (single-row table)."""
     if not node_key:
@@ -191,9 +234,7 @@ def set_current_topic(node_key: str) -> None:
 def get_current_topic() -> Optional[str]:
     """Return the node_key of the current topic, or None."""
     with _connect() as conn:
-        row = conn.execute(
-            f"SELECT current_key FROM {TOPIC_TABLE} WHERE id = 1"
-        ).fetchone()
+        row = conn.execute(f"SELECT current_key FROM {TOPIC_TABLE} WHERE id = 1").fetchone()
     return row["current_key"] if row else None
 
 
@@ -241,8 +282,8 @@ def index_memory(memory: dict) -> list[str]:
     mermaid = memory.get("mermaid") or ""
     if isinstance(mermaid, str):
         for node_a, label_a, node_b, label_b in _EDGE_RE.findall(mermaid):
-            src = (label_a.strip() if label_a.strip() else node_a.strip())
-            dst = (label_b.strip() if label_b.strip() else node_b.strip())
+            src = label_a.strip() if label_a.strip() else node_a.strip()
+            dst = label_b.strip() if label_b.strip() else node_b.strip()
             keys.append(upsert_edge(src, dst))
 
     if keys:
@@ -251,9 +292,12 @@ def index_memory(memory: dict) -> list[str]:
     return keys
 
 
-def retrieve_neighborhood(
-    prompt: str, max_results: int = 5
-) -> list[dict]:
+# Below this a match is not a match. Exported so tests and the admin can
+# state the rule rather than rediscover it.
+MIN_AFFINITY = 0.05
+
+
+def retrieve_neighborhood(prompt: str, max_results: int = 5) -> list[dict]:
     """Retrieve affinity-weighted graph context for a prompt.
 
     Matches nodes whose label appears in the prompt, then expands to their
@@ -287,11 +331,7 @@ def retrieve_neighborhood(
     nodes = [r for r in rows if r["label"].lower() in words]
     if not nodes:
         # Fallback: partial substring containment on significant words.
-        nodes = [
-            r
-            for r in rows
-            if any(w in r["label"].lower() for w in words)
-        ]
+        nodes = [r for r in rows if any(w in r["label"].lower() for w in words)]
     if not nodes:
         return []
 
@@ -331,7 +371,14 @@ def retrieve_neighborhood(
         )
     result.extend(edges)
     result.sort(key=lambda x: x["affinity"], reverse=True)
-    return result[:max_results]
+    # A zero-affinity neighbour is not context, it is noise. Without this the
+    # graph handed back a node for "ola" that was the assistant's own previous
+    # answer about Bimby, at "afinidade 0.00" -- so every reply could quote the
+    # last reply, and a bad answer fed itself: ask about cats, get an answer
+    # about cats, that answer becomes a node, and the next unrelated question
+    # retrieves it. Threshold at the source so callers cannot forget it.
+    relevant = [it for it in result if float(it.get("affinity") or 0.0) >= MIN_AFFINITY]
+    return relevant[:max_results]
 
 
 def graph_context_text(prompt: str, max_results: int = 5) -> str:

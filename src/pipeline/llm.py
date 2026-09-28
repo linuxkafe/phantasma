@@ -125,9 +125,7 @@ class OllamaLLM:
         errors = []
         for label, client, model, host in attempts:
             try:
-                response = client.chat(
-                    model=model, messages=messages, options={"num_ctx": 8192}
-                )
+                response = client.chat(model=model, messages=messages, options={"num_ctx": 8192})
                 text = response.get("message", {}).get("content", "").strip()
                 duration_ms = (time.perf_counter() - start) * 1000
                 if label == "fallback":
@@ -135,9 +133,7 @@ class OllamaLLM:
                         f"LLM served by fallback host {host} ({model}) "
                         f"duration_ms={duration_ms:.1f}"
                     )
-                logger.info(
-                    f"LLM response: '{text[:100]}...' (duration_ms={duration_ms:.1f})"
-                )
+                logger.info(f"LLM response: '{text[:100]}...' (duration_ms={duration_ms:.1f})")
                 return Result.ok(text, duration_ms=duration_ms)
             except Exception as e:
                 errors.append(str(e))

@@ -15,7 +15,6 @@ Design notes
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 DEFAULT_LANGUAGE = "pt"

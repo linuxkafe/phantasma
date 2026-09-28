@@ -1,13 +1,51 @@
+# SearXNG configuration for pHantasma.
+#
+# Mounted into the `searxng` container as /etc/searxng/settings.yml by
+# docker-compose.yml. The copy under /opt/phantasma/searxng/ is a DEAD copy:
+# the running container is created from /home/seyon/dev/pHantasma/docker-compose.yml
+# and binds THIS file (verified with `docker inspect searxng`). Editing the
+# /opt copy changes nothing.
+#
+# WHAT WAS ACTUALLY WRONG (diagnosed 2026-09-28, all measured from this host):
+#
+#   duckduckgo  0 results, unresponsive_engines: [["duckduckgo", "CAPTCHA"]]
+#   brave       0 results, "demasiados pedidos" / "Suspenso: demasiados pedidos"
+#   startpage   0 results, CAPTCHA
+#   google      0 results, no error reported at all
+#   bing        10 results on some queries, 0 on others (sampled 5 of 7)
+#
+# So the engines this host's IP reaches are a small and flaky set, and
+# `duckduckgo` -- which was first in `keep_only` -- blocked every search while
+# also being the one the assistant waited on: with its 5s timeout multiplied by
+# SearXNG's retries, a single `/comando` question took over 150s to fail. The
+# web search looked "wired up but silent" for as long as that lasted.
+#
+# Two engines that are NOT usable here are deliberately absent:
+#   - duckduckgo, CAPTCHA-blocked
+#   - wikidata, raises `KeyError: 'wikidata'` at search time: it is a special
+#     engine with no PROCESSORS entry, so listing it turns every query into a
+#     500. That one is a config trap, not a block.
+#
+# The list stays wider than one engine on purpose: a single flaky upstream must
+# not be able to decide whether the assistant can search. `bing` is first
+# because it is the only one that measurably answers.
 use_default_settings:
   engines:
     keep_only:
-      - duckduckgo
-      - google
       - bing
+      - mojeek
+      - qwant
+      - wikipedia
+      - seznam
+      - yep
+      - mwmbl
+      - yacy
 server:
   bind_address: "0.0.0.0"
   port: 8080
-  secret_key: "changeme"
+  # Replaces the literal "changeme" this file carried. A predictable secret
+  # means anyone who can reach the port can forge limiter tokens.
+  secret_key: "9f4c1a7e2b8d6053ca71fe4d8390b6e1527cd83a4f60b1e93c7d25a84f0e6b13"
 redis:
   enabled: false
 ui:
@@ -18,21 +56,52 @@ search:
     - html
     - json
   safe_search: 1
-  autocomplete: "duckduckgo"
+  # Was "duckduckgo", the CAPTCHA-blocked engine, so suggestions were always
+  # empty. Re-pointing it at "bing" made the container refuse to start -- bing is
+  # a search engine, not an autocomplete backend. Empty disables it honestly.
+  autocomplete: ""
   default_lang: "pt"
 engines:
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddu
-    use_http: true
-    timeout: 5.0
-  - name: google
-    engine: google
-    shortcut: gg
-    use_http: true
-    timeout: 5.0
   - name: bing
     engine: bing
     shortcut: bng
     use_http: true
-    timeout: 5.0
+    # 5.0 was the original value. Lowering it to 4.0 made bing time out, and an
+    # engine that times out is NOT listed in unresponsive_engines -- it returns
+    # zero results silently, which is indistinguishable from "blocked".
+    timeout: 8.0
+  - name: mojeek
+    engine: mojeek
+    shortcut: mjk
+    use_http: true
+    timeout: 4.0
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    use_http: true
+    timeout: 4.0
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    use_http: true
+    timeout: 4.0
+  - name: seznam
+    engine: seznam
+    shortcut: szn
+    use_http: true
+    timeout: 4.0
+  - name: yep
+    engine: yep
+    shortcut: yep
+    use_http: true
+    timeout: 4.0
+  - name: mwmbl
+    engine: mwmbl
+    shortcut: mwm
+    use_http: true
+    timeout: 4.0
+  - name: yacy
+    engine: yacy
+    shortcut: ya
+    use_http: true
+    timeout: 4.0

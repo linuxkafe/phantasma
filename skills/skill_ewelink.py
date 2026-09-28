@@ -5,10 +5,14 @@ import threading
 import time
 
 import config
+from pathlib import Path
 
 # --- CONFIGURAÇÃO ---
 # ALTERADO: Caminho da cache para a pasta correta
-CACHE_FILE = "/opt/phantasma/cache/ewelink_cache.json"
+# Resolved through config.CACHE_DIR instead of a literal /opt/phantasma path.
+# A host path in code cannot be overridden, so these caches had to be forked
+# per host. In production the resolved path is byte-identical to the old one.
+CACHE_FILE = str(Path(config.CACHE_DIR) / "ewelink_cache.json")
 POLL_INTERVAL = 60
 
 TRIGGER_TYPE = "contains"

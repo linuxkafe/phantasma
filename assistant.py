@@ -9,6 +9,7 @@ Implements hotword-activated speech collection with
 VAD-gated silence detection.
 """
 
+import logging
 import os
 import random
 import re
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from typing import Optional
 
 import numpy as np
@@ -36,6 +38,7 @@ from src.pipeline.audio import (
 from src.pipeline.stt import transcribe as stt_transcribe
 from src.pipeline.tts import synthesize as tts_synthesize
 from src.pipeline.utils import Result, log_stage, logger
+from src.settings_store import get_persona
 from tools import search_with_searxng
 
 
@@ -49,12 +52,8 @@ def sanitize_llm_context(context: str) -> str:
         return ""
 
     # Remove technical RAG instructions
-    context = re.sub(
-        r"MEMÓRIAS PESSOAIS.*?\n\n", "", context, flags=re.DOTALL | re.IGNORECASE
-    )
-    context = re.sub(
-        r"NOTA: Se houver contradições.*?\n", "", context, flags=re.IGNORECASE
-    )
+    context = re.sub(r"MEMÓRIAS PESSOAIS.*?\n\n", "", context, flags=re.DOTALL | re.IGNORECASE)
+    context = re.sub(r"NOTA: Se houver contradições.*?\n", "", context, flags=re.IGNORECASE)
 
     # Remove timestamps and technical IDs
     context = re.sub(r"\[\d{4}-\d{2}-\d{2}.*?\]", "", context)
@@ -125,8 +124,14 @@ class PhantasmaPipeline:
             models=config.hotword.models,
             threshold=config.hotword.threshold,
             sample_rate=config.audio.sample_rate,
-            chunk_size=config.audio.block_size,
+            chunk_size=1280,  # openWakeWord expects 1280 samples (80ms at 16kHz)
         )
+        # Log every model's top score periodically, including below-threshold
+        # ones. Logging only detections made a model that never fires invisible:
+        # hey_fantasma sat under its threshold throughout one test and read as
+        # "no reaction" rather than "scoring 0.09", which cost a full
+        # diagnosis cycle. One INFO line per 5s.
+        self._last_score_log = 0.0
 
         self._running = False
         self._worker_thread: Optional[threading.Thread] = None
@@ -140,6 +145,14 @@ class PhantasmaPipeline:
 
         self._fly_brain_store = FlyBrainStore(config_module.BRAIN_DB_PATH)
         self._fly_brain = FlyBrain(store=self._fly_brain_store)
+        # Register as the canonical instance so reactions from Discord and
+        # from the web chat step THIS brain, not a rival over the same store.
+        try:
+            from src.brain.fly_brain import register_shared_fly_brain
+
+            register_shared_fly_brain(self._fly_brain)
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            logging.getLogger(__name__).warning("Could not register the shared FlyBrain: %s", exc)
         self._skill_loader = SkillLoader(
             skills_dir=config_module.SKILLS_DIR,
             context=SkillContext(fly_brain=self._fly_brain),
@@ -170,9 +183,7 @@ class PhantasmaPipeline:
 
         try:
             music_dir = config.audio_feedback.music_dir
-            music_files = [
-                f for f in os.listdir(music_dir) if f.endswith((".mp3", ".wav", ".ogg"))
-            ]
+            music_files = [f for f in os.listdir(music_dir) if f.endswith((".mp3", ".wav", ".ogg"))]
 
             if music_files:
                 music_file = os.path.join(music_dir, random.choice(music_files))
@@ -241,9 +252,13 @@ class PhantasmaPipeline:
                 novelty=0.1,
                 reward=reward,
             )
+            # Feedback is a deliberate, user-authored correction. step() only
+            # auto-saves every 10 steps, so without this the reinforcement is
+            # lost whenever the process restarts before the interval elapses.
+            if self._fly_brain.persist():
+                logger.info("FlyBrain state persisted after feedback")
             logger.info(
-                "FlyBrain updated: "
-                f"reward={reward}, affinity={self._fly_brain.mb.affinity:.3f}"
+                f"FlyBrain updated: reward={reward}, affinity={self._fly_brain.mb.affinity:.3f}"
             )
         else:
             logger.debug(f"No feedback keyword in: '{text}'")
@@ -253,31 +268,28 @@ class PhantasmaPipeline:
         self._feedback_start_time = None
 
     def _process_audio_frame(self, frame: np.ndarray):
-        """Process single audio frame through VAD and hotword detection.
+        """Process single audio frame through hotword detection and VAD.
 
-        Implements the main state machine:
-        - IDLE: Run hotword detection on VAD frames
-        - COLLECTING: Accumulate speech frames, count silence frames
-          Transition to PROCESSING when silence_frames >= max_silence_frames
-        - FEEDBACK: After response, collect user feedback for configured window
+        Implements the main state machine (matching working legacy):
+        - IDLE: Run hotword detection on raw 1280-sample frames (NO VAD)
+        - COLLECTING: Accumulate speech frames using VAD for silence detection
+        - FEEDBACK: After response, collect user feedback using VAD
 
         Args:
-            frame: Raw audio frame from AudioCapture (int16, block_size samples).
+            frame: Raw audio frame from AudioCapture (int16, 1280 samples at 16kHz).
         """
-        # Run VAD on frame
-        vad_frames = self.vad.process_chunk(frame)
+        # Check feedback window timeout
+        if self._collecting_feedback and self._feedback_start_time:
+            elapsed = time.time() - self._feedback_start_time
+            if elapsed >= self._feedback_window_seconds:
+                logger.debug("Feedback window expired")
+                self._collecting_feedback = False
+                self._feedback_start_time = None
 
-        for vad_frame in vad_frames:
-            # Check feedback window timeout
-            if self._collecting_feedback and self._feedback_start_time:
-                elapsed = time.time() - self._feedback_start_time
-                if elapsed >= self._feedback_window_seconds:
-                    logger.debug("Feedback window expired")
-                    self._collecting_feedback = False
-                    self._feedback_start_time = None
-
-            if self._collecting_feedback:
-                # Feedback collection mode - accumulate speech for STT
+        if self._collecting_feedback:
+            # Feedback collection mode - use VAD for speech segmentation
+            vad_frames = self.vad.process_chunk(frame)
+            for vad_frame in vad_frames:
                 self._speech_frames.append(vad_frame.data)
 
                 if vad_frame.is_speech:
@@ -295,20 +307,36 @@ class PhantasmaPipeline:
                     self._speech_frames = []
                     self._silence_frames = 0
 
-            elif not self._collecting_speech:
-                # Hotword detection mode (IDLE)
-                detected, model = self.hotword.process(vad_frame.data)
-                if detected:
-                    logger.info(f"Hotword detected: {model}")
-                    self._hotword_detected = True
-                    self._collecting_speech = True
-                    self._speech_frames = []
-                    self._silence_frames = 0
+        elif not self._collecting_speech:
+            # Hotword detection mode (IDLE) - PASS RAW FRAME DIRECTLY (no VAD)
+            # frame comes from AudioCapture at config.audio.block_size;
+            # HotwordDetector buffers to its own 80ms window internally.
+            detected, model = self.hotword.process(frame)
+            scores = getattr(self.hotword, "last_predictions", {}) or {}
+            now = time.time()
+            if now - self._last_score_log > 5.0:
+                self._last_score_log = now
+                ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
+                logger.info(
+                    "🔬 Wake scores: " + (" ".join(f"{n}={v:.4f}" for n, v in ranked) or "n/a")
+                )
+            if detected:
+                logger.info(f"Hotword detected: {model}")
+                self._hotword_detected = True
+                self._collecting_speech = True
+                self._speech_frames = []
+                self._silence_frames = 0
+                # The wake word is itself speech: the incoming partial VAD
+                # frame belongs to the phrase that is being collected, so it
+                # must not be treated as leading silence.
+                self.vad.reset()
 
-                    # Play audio feedback (music + greeting)
-                    self._play_audio_feedback()
-            else:
-                # Speech collection mode
+                # Play audio feedback (music + greeting)
+                self._play_audio_feedback()
+        else:
+            # Speech collection mode - use VAD for silence detection
+            vad_frames = self.vad.process_chunk(frame)
+            for vad_frame in vad_frames:
                 self._speech_frames.append(vad_frame.data)
 
                 if vad_frame.is_speech:
@@ -321,6 +349,25 @@ class PhantasmaPipeline:
                     self._process_speech()
                     self._collecting_speech = False
                     self._hotword_detected = False
+                    # _process_speech blocks this thread for the whole
+                    # STT+LLM+TTS cycle (measured 55s for one utterance), and
+                    # skills additionally stop/start the capture stream to free
+                    # the USB PCM. Both leave openWakeWord's rolling mel buffer
+                    # describing a timeline the model never received, which is
+                    # what produced the phantom 0.09-0.49 scores. Reset here --
+                    # after the block, before the worker consumes again -- so
+                    # the first frame back is scored against silence-primed
+                    # state. This is the invariant _prime_buffer documents but
+                    # nothing was calling to maintain it. The working legacy
+                    # did call it (engine.reset() after each detection); it was
+                    # lost in the port, and its absence is what let the phantom
+                    # scores fire.
+                    self.hotword.reset()
+                    # Same reasoning for the VAD's partial frame: the audio
+                    # withheld during the block belongs to neither the wake
+                    # word nor the next utterance, so it must not be carried
+                    # into either.
+                    self.vad.reset()
 
     def respond_to_text(self, text: str) -> Optional[str]:
         """Route text through skills then FlyBrain + LLM.
@@ -374,6 +421,200 @@ class PhantasmaPipeline:
                 if not resume.success:
                     logger.error(f"Could not resume hotword capture: {resume.error}")
 
+    @staticmethod
+    def _build_messages(prompt: str) -> list:
+        """The message list for Ollama, with the persona as a system turn.
+
+        THE PERSONA WAS DEAD HERE. This called `ollama.Client(...).chat()` with
+        `messages=[{"role": "user", ...}]` and no system turn at all, while
+        `config.SYSTEM_PROMPT` was loaded from prompts/system.txt and validated
+        at startup ("refusing to start beats serving an empty or wrong prompt").
+        The Phantom's ethical core, its tone and its "respond only in European
+        Portuguese" rule therefore never reached the model: every reply was a
+        plain user turn. `src/pipeline/llm.py` did build the system role, but
+        this path bypasses that module and used the SDK directly.
+
+        If the persona is empty the user turn is sent alone, with a warning --
+        a visible degradation rather than the silent one this was.
+        """
+        # `config` inside this module is the Config INSTANCE (line 24 imports
+        # the module as `config_module`), and SYSTEM_PROMPT is a module-level
+        # export -- so reading it off `config` yields "" and the persona is
+        # dropped again, which is precisely the bug this is fixing. The
+        # instance attribute is the reliable one; the module export is the
+        # fallback.
+        # The store first: this is the persona the owner set in /admin/persona
+        # and it must win, per request, over the value frozen at import. The
+        # config attribute and the module export are only the shipped default.
+        # Reading the config here (and not get_persona) is what made the admin
+        # page cosmetic: the save succeeded and the model never saw it.
+        system_prompt = str(
+            get_persona()
+            or getattr(getattr(config, "llm", None), "system_prompt", "")
+            or getattr(config_module, "SYSTEM_PROMPT", "")
+            or ""
+        ).strip()
+        if not system_prompt:
+            logger.warning("SYSTEM_PROMPT is empty: replying without a persona turn")
+            return [{"role": "user", "content": prompt}]
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+
+    @staticmethod
+    def _is_factual_lookup(text: str) -> bool:
+        """Decide if this is a factual lookup rather than open conversation.
+
+        One temperature cannot serve both. The persona asks for "gloomy,
+        melancholic" prose, which is right when talking and wrong when the
+        answer is a fact sitting in the knowledge base: at temperature 0.6 an
+        8B model embellishes instead of reporting. Asked what the Capuchinho
+        Verde is, with "a pastelaria vegan" in the context, it answered at
+        length about a residential security module.
+        """
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        # Compare without diacritics. "e'" in text may be U+00E9 or "e" plus
+        # a combining acute, and "sao" may be "sao" or "sa~" -- enumerating
+        # spellings loses to one of them. Folding first cannot.
+        t = (text or "").strip().lower()
+        t = "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn")
+        if not t:
+            return False
+        openers = (
+            "o que e",
+            "o que foi",
+            "o que sao",
+            "quem foi",
+            "quem e",
+            "quando",
+            "onde",
+            "quanto",
+            "qual",
+            "quais",
+            "que ano",
+            "em que ano",
+            "como era",
+            "quantos",
+            "qual foi",
+            "define",
+            "o que significa",
+            "o que quer dizer",
+        )
+        if t.startswith(openers):
+            return True
+        return t.rstrip("?.").endswith(
+            (
+                "o que e",
+                "quem foi",
+                "quando foi",
+                "onde fica",
+                "quanto custa",
+            )
+        )
+
+    @staticmethod
+    def _render_memory(raw: str) -> str:
+        """Turn a stored memory into something a reader can actually use.
+
+        49 of the 61 stored memories are graph fragments -- raw JSON like
+        {"tags": ["Vegan", "Pastelaria"], "mermaid": "graph TD; ..."} -- and
+        they were handed to the model verbatim. A model handed a JSON blob
+        under a heading that says "knowledge" either ignores it or, worse,
+        refuses the question: asked what the Capuchinho Verde is, with this
+        exact fragment in context, it answered "I cannot provide information
+        about it". The knowledge was there and unusable.
+
+        Rendered as plain relational lines it reads as what it is -- a set of
+        connected concepts -- which is the knowledge the store actually holds.
+        Non-JSON text is passed through untouched.
+        """
+        import json as _json
+
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        # retrieve_from_rag joins several memories with newlines, so this can
+        # be many JSON documents, not one. Rendering the whole blob failed to
+        # parse and fell through to the raw text -- the original sin. Render
+        # each object on its own and keep prose lines as they are.
+        if raw.startswith("{") and raw.count("{") > 1:
+            chunks, buf, depth = [], [], 0
+            for ch in raw:
+                buf.append(ch)
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        chunks.append("".join(buf))
+                        buf = []
+            if buf and "".join(buf).strip():
+                chunks.append("".join(buf))
+            rendered = [PhantasmaPipeline._render_memory(c) for c in chunks]
+            rendered = [r for r in rendered if r]
+            if len(rendered) > 1:
+                return "\n".join(f"- {r}" for r in rendered)
+        if not raw.startswith("{"):
+            return raw
+        try:
+            data = _json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
+        if not isinstance(data, dict):
+            return raw
+
+        lines: list = []
+        tags = data.get("tags") or []
+        if isinstance(tags, str):
+            tags = [tags]
+        if tags:
+            lines.append("Conceitos: " + ", ".join(str(t) for t in tags))
+        mermaid = str(data.get("mermaid") or "")
+        if mermaid:
+            # "A --> B" or "A[Label]-->B[Label]" -> "A relaciona-se com B"
+            for edge in mermaid.split("\n"):
+                edge = edge.strip()
+                if not edge or "-->" not in edge:
+                    continue
+                edge = edge.split("-->", 1)
+                left = re.sub(r"[\[\]\(\){}]", "", edge[0]).strip()
+                right = re.sub(r"[\[\]\(\){}]", "", edge[1]).strip()
+                if left and right:
+                    lines.append(f"{left} relaciona-se com {right}")
+        # Facts, relations, everything else. The first version of this only
+        # kept scalars, so a memory like
+        #   {"tags": ["gato","Bimby"], "facts": ["gato -> has name -> Bimby"]}
+        # rendered to "Conceitos: gato, Bimby" and the fact was dropped. The
+        # model was then asked "quem e o bimby?" holding nothing but the word
+        # "Bimby" and answered it had no knowledge. The knowledge was in the
+        # store; the renderer threw it away.
+        for key, value in data.items():
+            if key in ("tags", "mermaid"):
+                continue
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                lines.append(f"{key}: {value}")
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    item = str(item).strip()
+                    if not item:
+                        continue
+                    if "->" in item:
+                        parts = [x.strip() for x in item.split("->") if x.strip()]
+                        if len(parts) >= 2:
+                            lines.append(f"  {' -> '.join(parts)}")
+                            continue
+                    lines.append(f"  {item}")
+            elif isinstance(value, dict):
+                for k2, v2 in value.items():
+                    if str(v2).strip():
+                        lines.append(f"  {k2}: {v2}")
+        if not lines:
+            return raw
+        return "\n".join(lines)
+
     def _respond_with_llm(self, text: str) -> Optional[str]:
         """LLM fallback for text that no skill handled.
 
@@ -386,18 +627,29 @@ class PhantasmaPipeline:
         Returns:
             Response text, or None on failure/empty response.
         """
+        # Step FlyBrain for conversation turn.
+        #
+        # This MUST run before the cache check. It used to sit below it, so a
+        # cache hit returned at line 437 and never stepped -- meaning the brain
+        # only ever saw the *first* time something was asked, and FlyBrain
+        # state (0 rows in flybrain_state after 61 memories) was starved of
+        # turns. There is no documented intent to skip repeats: novelty and
+        # reward are hardcoded to the same values on both paths, and
+        # topic_angle is a pure function of the text. The response cache is a
+        # response cache, not an interaction filter. Batching the write is
+        # already handled by maybe_auto_save(); skipping the step entirely
+        # loses the turn, not just the write.
+        topic_angle = (hash(text) % 3600) / 10.0
+        self._fly_brain.step(topic_angle_deg=topic_angle, novelty=0.5, reward=0.0)
+
         # Check cache first
         cached = get_cached_response(text)
         if cached:
             logger.info("Cache hit for prompt")
             return cached
 
-        # Step FlyBrain for conversation turn
-        topic_angle = (hash(text) % 3600) / 10.0
-        self._fly_brain.step(topic_angle_deg=topic_angle, novelty=0.5, reward=0.0)
-
         # Retrieve RAG memories
-        rag = sanitize_llm_context(retrieve_from_rag(text))
+        rag = sanitize_llm_context(self._render_memory(retrieve_from_rag(text)))
         logger.debug(f"RAG context length: {len(rag)}")
 
         # Retrieve memory-graph context (FlyBrain affinity-weighted topics)
@@ -414,52 +666,71 @@ class PhantasmaPipeline:
         # Web search via SearXNG (only if no skill context yet)
         web = sanitize_llm_context(search_with_searxng(text))
         logger.debug(f"Web context length: {len(web)}")
+        # Say so when the search found nothing. Measured 2026-09-28: from this
+        # host every engine refuses us (duckduckgo CAPTCHA, brave/startpage
+        # 429+CAPTCHA, mojeek/qwant/yep access denied, seznam 429), so search
+        # returns an empty list and the answer was built as if the web had been
+        # consulted. The user could not tell that the model was answering from
+        # memory alone, which is how a confident wrong answer about an unfamiliar
+        # subject looked like a working search.
+        web_empty = not (web or "").strip()
 
         # Build full prompt with context injection
-        sys_prompt = getattr(config, "llm", None) and getattr(
-            config.llm, "system_prompt", ""
+        # Only inject a section when it has something in it. An unconditional
+        # "### CONHECIMENTO LOCAL DO PHANTASMA (fonte primaria)" header, sent
+        # with an empty body, made the model narrate the scaffolding instead of
+        # replying: asked "ola" it answered "Estou aqui para ajudar com
+        # qualquer coisa que precise saber sobre o conhecimento local do
+        # Phantasma", losing the Phantom entirely, because the prompt told it
+        # local knowledge was "a fonte primaria e chega para responder" while
+        # there was none. The scaffolding is the model's raw material for
+        # talking about the scaffolding.
+        local = "\n".join(x for x in (rag, graph_ctx) if (x or "").strip())
+        parts = []
+        if local:
+            parts.append(
+                "### CONHECIMENTO LOCAL DO PHANTASMA (fonte primaria):\n"
+                "Isto e o que o Phantasma guardou. Usa estes factos.\n"
+                f"{local}\n"
+            )
+        if (web or "").strip():
+            parts.append(f"### PESQUISA WEB\n{web}\n")
+        if web_empty and local:
+            parts.append(
+                "### COMO RESPONDER\n"
+                "Nao ha pesquisa web disponivel, mas o conhecimento local acima e\n"
+                "a fonte primaria e chega para responder. Responde a partir dele\n"
+                "com confianca. So dizes que nao sabes quando o conhecimento\n"
+                "local tambem nao cobrir o assunto.\n"
+            )
+        elif web_empty:
+            parts.append(
+                "### PESQUISA WEB INDISPONIVEL\n"
+                "Nao ha pesquisa web nem conhecimento guardado para esta pergunta.\n"
+                "Responde a partir do que sabes e tem cuidado para nao inventar\n"
+                "fontes nem factos.\n"
+            )
+        parts.append(
+            "### INSTRUCAO DE RESPOSTA:\n"
+            "Responde de forma fluida e natural em portugues europeu. "
+            "NAO uses cabecalhos ou marcacoes.\n"
         )
-        if not sys_prompt:
-            sys_prompt = getattr(config, "SYSTEM_PROMPT", "")
-
-        full_prompt = (
-            f"{sys_prompt}\n\n"
-            "### CONHECIMENTO DISPONÍVEL (Usa apenas para factos):\n"
-            f"{rag}\n"
-            f"{graph_ctx}\n"
-            f"{web}\n\n"
-            "### INSTRUÇÃO DE RESPOSTA:\n"
-            "Responde de forma fluida e natural em português. "
-            "NÃO uses cabeçalhos ou marcações. Sê um assistente útil.\n\n"
-            f"Utilizador: {text}"
-        )
+        full_prompt = "\n".join(parts) + f"\nUtilizador: {text}"
 
         # Try Ollama with primary and fallback hosts
-        primary_host = getattr(config, "llm", None) and getattr(
-            config.llm, "host", None
-        )
-        primary_model = getattr(config, "llm", None) and getattr(
-            config.llm, "model", None
-        )
-        fallback_host = getattr(config, "llm", None) and getattr(
-            config.llm, "host_fallback", None
-        )
+        primary_host = getattr(config, "llm", None) and getattr(config.llm, "host", None)
+        primary_model = getattr(config, "llm", None) and getattr(config.llm, "model", None)
+        fallback_host = getattr(config, "llm", None) and getattr(config.llm, "host_fallback", None)
         fallback_model = getattr(config, "llm", None) and getattr(
             config.llm, "model_fallback", None
         )
 
         if not primary_host:
             primary_host = getattr(config, "OLLAMA_HOST_PRIMARY", None)
-            primary_model = primary_model or getattr(
-                config, "OLLAMA_MODEL_PRIMARY", "llama3.1:8b"
-            )
+            primary_model = primary_model or getattr(config, "OLLAMA_MODEL_PRIMARY", "llama3.1:8b")
         if not fallback_host:
-            fallback_host = getattr(
-                config, "OLLAMA_HOST_FALLBACK", "http://localhost:11434"
-            )
-            fallback_model = fallback_model or getattr(
-                config, "OLLAMA_MODEL_FALLBACK", "llama3"
-            )
+            fallback_host = getattr(config, "OLLAMA_HOST_FALLBACK", "http://localhost:11434")
+            fallback_model = fallback_model or getattr(config, "OLLAMA_MODEL_FALLBACK", "llama3")
 
         inference_targets = []
         if primary_host:
@@ -473,16 +744,28 @@ class PhantasmaPipeline:
 
         import ollama
 
+        # Ground the answer first, loosen it only when there is nothing to
+        # ground it on. A factual lookup with context in hand is reported, not
+        # performed.
+        grounded = bool((rag or "").strip() or (graph_ctx or "").strip())
+        factual = self._is_factual_lookup(text)
+        temperature = 0.15 if (factual or grounded) else 0.6
+        logger.info(
+            f"LLM temperature {temperature} (factual={factual}, "
+            f"grounded={grounded}, rag={len(rag or '')}, "
+            f"graph={len(graph_ctx or '')}, web={len(web or '')})"
+        )
+
         for host, model in inference_targets:
             try:
                 logger.info(f"Trying Ollama: {host} (model: {model})")
                 client = ollama.Client(host=host)
                 response = client.chat(
                     model=model,
-                    messages=[{"role": "user", "content": full_prompt}],
+                    messages=self._build_messages(full_prompt),
                     options={
                         "repeat_penalty": 1.4,
-                        "temperature": 0.6,
+                        "temperature": temperature,
                         "num_ctx": 8192,
                         "top_p": 0.9,
                     },
@@ -519,14 +802,10 @@ class PhantasmaPipeline:
         speech_audio = np.concatenate(self._speech_frames)
 
         # Limit max duration
-        max_samples = int(
-            config.pipeline.stt_max_audio_seconds * config.audio.sample_rate
-        )
+        max_samples = int(config.pipeline.stt_max_audio_seconds * config.audio.sample_rate)
         if len(speech_audio) > max_samples:
             speech_audio = speech_audio[:max_samples]
-            logger.warning(
-                f"Speech truncated to {config.pipeline.stt_max_audio_seconds}s"
-            )
+            logger.warning(f"Speech truncated to {config.pipeline.stt_max_audio_seconds}s")
 
         logger.info(
             f"Processing speech: {len(speech_audio)} samples "
@@ -534,6 +813,12 @@ class PhantasmaPipeline:
         )
 
         # STT
+        # NOTE: this blocks the audio worker for 15-55s (measured). While
+        # blocked the PortAudio callback overflows and the queue drops frames.
+        # The damage is contained by hotword.reset() at the end of the cycle;
+        # see _process_audio_frame. Measured: 9 dropped frames produced a next
+        # score of 0.0009 (the noise floor), not the 0.09-0.49 phantoms seen
+        # before the reset existed.
         stt_result = stt_transcribe(speech_audio)
         log_stage(logger, "stt", stt_result)
         if not stt_result.success:
@@ -654,35 +939,26 @@ class PhantasmaPipeline:
 
 
 def _start_api_server(pipeline: PhantasmaPipeline) -> None:
-    """Start the Flask REST API in a background daemon thread.
+    """Expose the legacy Discord/UI contract (POST /comando) on port 5000,
+    plus the /api/* endpoints from src.api.routes.
 
-    Exposes the legacy Discord/UI contract (POST /comando) on port 5000,
-    plus the /api/* endpoints from src.api.routes. Failure is non-fatal:
-    the voice assistant keeps running, only the HTTP bridge is absent.
+    Served by a production WSGI server (waitress), not werkzeug's development
+    server. gunicorn was evaluated and rejected: it forks, which would force the
+    pipeline into the forked worker and break the /comando contract, since a
+    command arriving at the API would be enqueued into a copy that never reaches
+    the loop owning the microphone. waitress serves in-thread, so the API keeps
+    holding the same pipeline object the voice loop owns. The full reasoning is
+    in src/api/serve.py; do not "upgrade" this without reading it.
+
+    Failure is non-fatal: the voice assistant keeps running, only the HTTP
+    bridge is absent.
 
     Args:
         pipeline: Running PhantasmaPipeline to route commands through.
     """
-    try:
-        from src.api.routes import create_app
+    from src.api.serve import start_http_server
 
-        app = create_app(pipeline=pipeline)
-        thread = threading.Thread(
-            target=app.run,
-            kwargs={
-                "host": "0.0.0.0",
-                "port": int(os.getenv("PHANTASMA_API_PORT", "5000")),
-                "debug": False,
-                "use_reloader": False,
-                "threaded": True,
-            },
-            daemon=True,
-            name="api-server",
-        )
-        thread.start()
-        logger.info("REST API started on 0.0.0.0:5000 (Discord/UI bridge)")
-    except Exception as e:
-        logger.warning(f"REST API failed to start (non-fatal): {e}")
+    start_http_server(lambda: pipeline)
 
 
 def run():
@@ -714,9 +990,7 @@ def run():
 
     # Report the wake words actually configured (PT custom .onnx basenames
     # when present, else model names) — not a hardcoded English phrase.
-    hotword_words = [
-        os.path.splitext(os.path.basename(m))[0] for m in config.hotword.models
-    ]
+    hotword_words = [os.path.splitext(os.path.basename(m))[0] for m in config.hotword.models]
     hotword_words = [w for w in hotword_words if w]
     if hotword_words:
         say_words = ", ".join(f"'{w}'" for w in hotword_words)

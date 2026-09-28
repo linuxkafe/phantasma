@@ -38,9 +38,7 @@ def test_store_save_load_roundtrip():
 
         # Verify state restored
         assert brain2.mb.affinity == pytest.approx(original_affinity, rel=1e-6)
-        assert brain2.ring.orientation_deg == pytest.approx(
-            original_orientation, rel=1e-6
-        )
+        assert brain2.ring.orientation_deg == pytest.approx(original_orientation, rel=1e-6)
         assert brain2.steps == original_steps
         assert np.allclose(brain2.mb.wkc, original_wkc)
 
@@ -139,9 +137,7 @@ def test_schema_version_in_db():
         import sqlite3
 
         with sqlite3.connect(db_path) as conn:
-            cursor = conn.execute(
-                "SELECT schema_version FROM flybrain_state WHERE id=1"
-            )
+            cursor = conn.execute("SELECT schema_version FROM flybrain_state WHERE id=1")
             row = cursor.fetchone()
             assert row is not None
             assert row[0] == 1

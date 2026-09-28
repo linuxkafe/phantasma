@@ -12,33 +12,53 @@ re‑authenticate.
 
 from __future__ import annotations
 
-import secrets
-import time
+import json
+import logging
 import os
+import secrets
 import smtplib
+import sqlite3
+import time
+from datetime import datetime
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
 from typing import Optional
-import sqlite3
-import bcrypt
-from datetime import datetime
 
+import bcrypt
 from flask import (
     Blueprint,
+    abort,
     flash,
+    jsonify,
+    make_response,
     redirect,
     render_template_string,
     request,
     session,
     url_for,
-    jsonify,
-    abort,
 )
 
+import config
+from src.settings_store import (
+    REACTION_WEIGHTS_KEY,
+    clear_setting,
+    get_persona,
+    get_reaction_weights,
+    persona_is_overridden,
+    reset_persona,
+    set_persona,
+    set_reaction_weights,
+)
+
+logger = logging.getLogger("phantasma.api")
+
+from . import ratelimit as _ratelimit
 from .design import design_css, design_js
 from .i18n import (
     COOKIE_NAME as LANG_COOKIE,
+)
+from .i18n import (
     DEFAULT_LANGUAGE,
     LANGUAGES,
     normalize_language,
@@ -75,11 +95,16 @@ def get_language() -> str:
         header = None
     return parse_accept_language(header) or DEFAULT_LANGUAGE
 
+
 # ----------------------------------------------------------------------
 # Database connection
 # ----------------------------------------------------------------------
-CONFIG_DB_PATH = Path("/opt/phantasma/data/config.db")
-BRAIN_DB_PATH = Path("/opt/phantasma/data/brain.db")
+# Resolved through config so that a dev checkout uses ITS OWN databases. These
+# used to be hardcoded to /opt/phantasma/data/..., which meant a dev process
+# opened -- and wrote to -- the PRODUCTION database. In production the resolved
+# paths are identical to the old literals, so behaviour is unchanged there.
+CONFIG_DB_PATH = Path(config.CONFIG_DB_PATH)
+BRAIN_DB_PATH = Path(config.BRAIN_DB_PATH)
 
 
 def get_db_connection():
@@ -87,16 +112,73 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+
 # ----------------------------------------------------------------------
 # User authentication
 # ----------------------------------------------------------------------
 
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(stored_hash: str, password: str) -> bool:
-    return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+    """Verify a password against EITHER supported hash format.
+
+    Two formats exist in the wild and they are not interchangeable:
+
+    * ``$2b$...``          -- bcrypt, what :func:`hash_password` writes.
+    * ``scrypt:N:r:p$salt$key`` -- passlib-style scrypt.
+
+    The production store held scrypt hashes, so ``bcrypt.checkpw`` on one did
+    not return False -- it RAISED ``ValueError: Invalid salt``. Nothing caught
+    that, so authenticating the pre-existing administrator produced a 500
+    instead of a clean rejection. A verification helper that raises on a
+    malformed or foreign hash is a denial-of-service on your own user store.
+
+    A hash in an unrecognised format is a verification FAILURE, never an
+    exception: an unknown encoding must not be able to take a request down.
+    """
+    if not stored_hash:
+        return False
+    encoded = password.encode("utf-8")
+    try:
+        if stored_hash.startswith("scrypt:"):
+            return _verify_scrypt(stored_hash, encoded)
+        return bcrypt.checkpw(encoded, stored_hash.encode("utf-8"))
+    except (ValueError, TypeError) as exc:
+        # Unknown or corrupt encoding. Refuse the login; do not propagate.
+        logger.warning("Unverifiable password hash format: %s", type(exc).__name__)
+        return False
+
+
+def _verify_scrypt(stored_hash: str, encoded: bytes) -> bool:
+    """Check a passlib-style ``scrypt:N:r:p$salt$key`` hash."""
+    import base64
+    import hashlib
+    import hmac
+
+    try:
+        params, salt_b64, key_b64 = stored_hash.split("$")
+        n, r, p = (int(x) for x in params.split(":")[1:4])
+    except (ValueError, IndexError):
+        return False
+    try:
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(key_b64)
+        derived = hashlib.scrypt(
+            encoded,
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
+            maxmem=(128 * n * r * p) + (1 << 20),
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(derived, expected)
+
 
 # ----------------------------------------------------------------------
 # In‑memory OTP store (replace with Redis / DB in production)
@@ -128,6 +210,7 @@ def _send_mail(to: str, subject: str, body: str, otp: str = None) -> None:
 
     # Build HTML email using template
     from flask import render_template_string
+
     html_body = render_template_string(EMAIL_TEMPLATE, subject=subject, body=body, otp=otp)
 
     try:
@@ -174,6 +257,10 @@ def _verify_otp(email: str, otp: str) -> bool:
 # Session helpers
 # ----------------------------------------------------------------------
 SESSION_KEY = "admin_user"
+# Last sleep/dream cycle, shared between the trigger and the status
+# route: the worker is a daemon thread and the request has
+# already returned, so this is the only place they can meet.
+_LAST_SLEEP_CYCLE: dict = {}
 SESSION_EXPIRY_DAYS = 30
 
 
@@ -192,10 +279,34 @@ def _current_user() -> Optional[str]:
     return session.get(SESSION_KEY)
 
 
+def _bypass_or_none():
+    """Loopback admin identity, when the bypass is enabled for this request.
+
+    Logs every use at WARNING. An authentication exception that leaves no trace
+    is indistinguishable from a compromise, which is the opposite of what an
+    exception is for.
+    """
+    from . import localauth
+
+    ident = localauth.bypass_identity(request.remote_addr)
+    if ident is None:
+        return None
+    logger.warning(
+        "LOCAL AUTH BYPASS used by %s for %s -- loopback admin granted",
+        request.remote_addr,
+        request.path,
+    )
+    return ident
+
+
 def _current_user_data() -> Optional[dict]:
     email = _current_user()
     if not email:
-        return None
+        # The loopback bypass is a first-class identity here, not only a gate in
+        # the decorators: templates render `user` and the nav reads the role, and
+        # a bypassed request that reached the view with user=None and role="user"
+        # would render a half-authenticated page.
+        return _bypass_or_none()
     conn = get_db_connection()
     try:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
@@ -209,7 +320,14 @@ def login_required(view):
 
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not _current_user():
+        # Validate the RESOLVED identity, not the cookie contents.
+        #
+        # _current_user() returns whatever string the session holds, so a stale
+        # cookie naming an address that was deleted from the store used to pass
+        # this gate and render the full admin area: /admin/brain returned 200 for
+        # an address that no longer existed. An identity that cannot be resolved
+        # is not an identity.
+        if _current_user_data() is None and _bypass_or_none() is None:
             return redirect(url_for("admin.login", next=request.path))
         return view(*args, **kwargs)
 
@@ -222,9 +340,28 @@ def admin_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         user = _current_user_data()
-        if not user or user['role'] != 'admin':
-            abort(403)
-        return view(*args, **kwargs)
+        if user is None:
+            # Fall back to the loopback bypass rather than 403ing, so a bypassed
+            # request passes both gates instead of failing the second one.
+            user = _bypass_or_none()
+        if user is not None and user.get("role") == "admin":
+            return view(*args, **kwargs)
+
+        # A session naming an address that is not in the store, or one that has
+        # been deactivated or demoted, is not a permissions failure to show the
+        # browser: it is an expired identity. login_required already sends a
+        # visitor with no session to the login page, so a stale one deserves the
+        # same treatment. A bare 403 here was reported by the owner as "Forbidden"
+        # on /admin/users while /admin/brain rendered normally in the same
+        # session -- the two routes disagreeing about the same identity.
+        #
+        # The test is on the RESOLVED user, not on the session cookie. A session
+        # whose email is absent from the store still yields a non-empty
+        # _current_user(), so checking that would send a genuinely-unknown
+        # identity straight back to 403 -- the exact bug this fixes.
+        if _current_user_data() is None and _current_user() is not None:
+            return redirect(url_for("admin.login", next=request.path))
+        abort(403)
 
     return wrapped
 
@@ -232,6 +369,7 @@ def admin_required(view):
 # ----------------------------------------------------------------------
 # Template context processors
 # ----------------------------------------------------------------------
+
 
 def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
     """Build the top navigation.
@@ -243,15 +381,27 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
     lang = get_language()
 
     # (endpoint, i18n key, fallback label, url)
+    # .env was removed from the nav on 2026-09-27 by owner decision: a raw
+    # env-file editor is a maintenance tool, not primary navigation, and
+    # /admin/config already covers configuration. The page stays reachable at
+    # /admin/env by URL.
     links = [
-        ('admin.dashboard', 'nav.dashboard', 'Dashboard', '/admin/dashboard'),
-        ('admin.config_manager', 'nav.config', 'Configuração', '/admin/config'),
-        ('admin.user_manager', 'nav.users', 'Utilizadores', '/admin/users'),
-        ('admin.env_editor', 'nav.env', '.env', '/admin/env'),
+        ("admin.persona_editor", "nav.persona", "Persona e reacções", "/admin/persona"),
+        (
+            "admin.knowledge_editor",
+            "nav.knowledge",
+            "Editar conhecimento",
+            "/admin/brain/knowledge",
+        ),
+        ("admin.config_manager", "nav.config", "Configuração", "/admin/config"),
+        ("admin.user_manager", "nav.users", "Utilizadores", "/admin/users"),
     ]
     brain_endpoints = {
-        'admin.brain_hub', 'admin.memory_viewer', 'rag_viewer',
-        'admin.flybrain_manager', 'admin.explorer_3d',
+        "admin.brain_hub",
+        "admin.memory_viewer",
+        "rag_viewer",
+        "admin.flybrain_manager",
+        "admin.explorer_3d",
     }
     brain_active = current_endpoint in brain_endpoints
 
@@ -260,22 +410,26 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         # button that stays visible while .nav-menu becomes a full-screen
         # overlay below 900px, so it cannot live *inside* the collapsing menu.
         '<div class="nav-bar">',
+        # data-label-* feed the shared design.js(), which would otherwise label
+        # this Portuguese UI in English.
         '<button type="button" class="nav-toggle" aria-controls="nav-menu" '
-        'aria-expanded="false" aria-label="Open menu">'
-        '<span></span><span></span><span></span></button>',
+        'aria-expanded="false" aria-label="Abrir menu" '
+        'data-label-open="Abrir menu" data-label-close="Fechar menu">'
+        "<span></span><span></span><span></span></button>",
         '<nav class="nav-menu" id="nav-menu">',
-        '  <a class="nav-brand" href="/admin/dashboard">'
-        '<span class="mark">P</span><span>Phantasma</span></a>',
+        # The brand is the way home, and home is the device UI at "/", not the
+        # admin dashboard.
+        '  <a class="nav-brand" href="/"><span class="mark">P</span><span>Phantasma</span></a>',
         '  <div class="nav-group">',
         f'    <a href="/admin/brain" class="nav-link{" active" if brain_active else ""}">'
-        f'🧠 {t("nav.brain", lang)}</a>',
+        f"🧠 {t('nav.brain', lang)}</a>",
     ]
     for endpoint, key, fallback, url in links:
-        active = ' active' if endpoint == current_endpoint else ''
+        active = " active" if endpoint == current_endpoint else ""
         parts.append(
             f'    <a href="{url}" class="nav-link{active}">{t(key, lang, _fallback=fallback)}</a>'
         )
-    parts.append('  </div>')
+    parts.append("  </div>")
     parts.append('  <div class="nav-spacer"></div>')
     parts.append('  <div class="nav-sep"></div>')
     parts.append(_build_language_switch(lang))
@@ -283,8 +437,8 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         f'  <a href="/admin/logout" class="nav-link" '
         f'style="color:var(--destructive)">{t("nav.logout", lang)}</a>'
     )
-    parts.append('</nav>')
-    parts.append('</div>')
+    parts.append("</nav>")
+    parts.append("</div>")
     return "\n".join(parts)
 
 
@@ -292,10 +446,10 @@ def _build_language_switch(lang: str) -> str:
     """Segmented PT/EN control, mirroring the reference SegmentedControl."""
     buttons = []
     for code, label in LANGUAGES.items():
-        pressed = 'true' if code == lang else 'false'
+        pressed = "true" if code == lang else "false"
         buttons.append(
             f'<button type="button" aria-pressed="{pressed}" '
-            f'onclick="location.href=\'/admin/lang/{code}\'">{label}</button>'
+            f"onclick=\"location.href='/admin/lang/{code}'\">{label}</button>"
         )
     return (
         f'<div class="segmented" role="group" '
@@ -317,9 +471,9 @@ def inject_globals():
     """Inject common template variables, including the active language."""
     lang = get_language()
     return {
-        '_current_user_data': _current_user_data,
-        'lang': lang,
-        't': lambda key, **kw: t(key, lang, **kw),
+        "_current_user_data": _current_user_data,
+        "lang": lang,
+        "t": lambda key, **kw: t(key, lang, **kw),
     }
 
 
@@ -327,14 +481,15 @@ def inject_globals():
 # User management
 # ----------------------------------------------------------------------
 
-def create_user(email: str, password: str, role: str = 'user') -> dict:
+
+def create_user(email: str, password: str, role: str = "user") -> dict:
     conn = get_db_connection()
     try:
         password_hash = hash_password(password)
         now = datetime.now().isoformat()
         conn.execute(
             "INSERT INTO users (email, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (email, password_hash, role, now, now)
+            (email, password_hash, role, now, now),
         )
         conn.commit()
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
@@ -348,8 +503,10 @@ def create_user(email: str, password: str, role: str = 'user') -> dict:
 def authenticate_user(email: str, password: str) -> Optional[dict]:
     conn = get_db_connection()
     try:
-        user = conn.execute("SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)).fetchone()
-        if user and verify_password(user['password_hash'], password):
+        user = conn.execute(
+            "SELECT * FROM users WHERE email = ? AND is_active = 1", (email,)
+        ).fetchone()
+        if user and verify_password(user["password_hash"], password):
             return dict(user)
         return None
     finally:
@@ -359,7 +516,9 @@ def authenticate_user(email: str, password: str) -> Optional[dict]:
 def get_all_users() -> list[dict]:
     conn = get_db_connection()
     try:
-        users = conn.execute("SELECT id, email, role, is_active, created_at, updated_at FROM users ORDER BY created_at").fetchall()
+        users = conn.execute(
+            "SELECT id, email, role, is_active, created_at, updated_at FROM users ORDER BY created_at"
+        ).fetchall()
         return [dict(u) for u in users]
     finally:
         conn.close()
@@ -369,7 +528,10 @@ def update_user_role(user_id: int, role: str) -> bool:
     conn = get_db_connection()
     try:
         now = datetime.now().isoformat()
-        conn.execute("UPDATE users SET role = ?, updated_at = ? WHERE id = ?", (role, now, user_id))
+        conn.execute(
+            "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+            (role, now, user_id),
+        )
         conn.commit()
         return conn.rowcount > 0
     finally:
@@ -390,13 +552,14 @@ def delete_user(user_id: int) -> bool:
 # Config management
 # ----------------------------------------------------------------------
 
+
 def get_configs_by_category() -> dict:
     conn = get_db_connection()
     try:
         configs = conn.execute("SELECT * FROM config ORDER BY category, key").fetchall()
         result = {}
         for c in configs:
-            cat = c['category']
+            cat = c["category"]
             if cat not in result:
                 result[cat] = []
             result[cat].append(dict(c))
@@ -452,7 +615,10 @@ def _write_env(data: dict[str, str]) -> None:
 # ----------------------------------------------------------------------
 # Routes
 # ----------------------------------------------------------------------
-BASE_STYLE = "<style>" + design_css() + """
+BASE_STYLE = (
+    "<style>"
+    + design_css()
+    + """
 .auth-shell {
     display:flex; align-items:center; justify-content:center;
     min-height:100vh; padding:2rem;
@@ -466,11 +632,23 @@ BASE_STYLE = "<style>" + design_css() + """
 label { display:block; font-size:var(--fs-small); font-weight:600;
        margin-bottom:var(--sp-1); color:var(--text-secondary); }
 </style>
-<script>""" + design_js() + """</script>"""
-LOGIN_TEMPLATE = BASE_STYLE + """
+<script>"""
+    + design_js()
+    + """</script>"""
+)
+LOGIN_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Admin Login | pHantasma</title>
 <div class="container">
+    {{ nav_menu | safe }}
     <h1>Admin Login</h1>
     <p class="subtitle">Insira o seu e-mail para receber o código de acesso</p>
     {% with messages = get_flashed_messages() %}
@@ -488,10 +666,20 @@ LOGIN_TEMPLATE = BASE_STYLE + """
       <button type="submit">Enviar código</button>
     </form>
 </div>
+</html>
 """
+)
 
-OTP_TEMPLATE = BASE_STYLE + """
+OTP_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Código de acesso | pHantasma</title>
 <div class="container">
     <h1>Código enviado</h1>
@@ -511,12 +699,24 @@ OTP_TEMPLATE = BASE_STYLE + """
       <button type="submit">Entrar</button>
     </form>
 </div>
+</body>
+</html>
 """
+)
 
-ADMIN_TEMPLATE = BASE_STYLE + """
+ADMIN_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Admin – Configuração | pHantasma</title>
 <div class="container">
+    {{ nav_menu | safe }}
     <div class="header">
         <h1>Configuração (.env)</h1>
         <div class="user-info">
@@ -533,10 +733,21 @@ ADMIN_TEMPLATE = BASE_STYLE + """
       <button type="submit">Guardar</button>
     </form>
 </div>
+</body>
+</html>
 """
+)
 
-EMAIL_TEMPLATE = BASE_STYLE + """
+EMAIL_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>{{ subject }}</title>
 <div class="container" style="max-width: 560px;">
     <h1 style="text-align: center; color: var(--accent);">pHantasma</h1>
@@ -557,12 +768,23 @@ EMAIL_TEMPLATE = BASE_STYLE + """
         </p>
     </div>
 </div>
+</body>
+</html>
 """
+)
 
-DASHBOARD_TEMPLATE = BASE_STYLE + """
+DASHBOARD_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Painel de Administração | pHantasma</title>
-<div class="container" style="max-width: 960px; margin-top: 6rem;">
+<div class="container" style="max-width: 1200px;">
     {{ nav_menu | safe }}
     <div class="header">
         <h1>Painel de Administração</h1>
@@ -592,7 +814,7 @@ DASHBOARD_TEMPLATE = BASE_STYLE + """
             <div style="color: var(--muted); font-size: 0.875rem; margin-top: 0.25rem;">Nós do Grafo</div>
         </div>
     </div>
-    
+
     <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;">
         <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0;">FlyBrain - Estado de Reforço</h2>
         <p style="color: var(--muted); font-size: 0.875rem;">Última atualização: {{ flybrain_state.updated_at if flybrain_state else 'Sem registo' }}</p>
@@ -612,12 +834,23 @@ DASHBOARD_TEMPLATE = BASE_STYLE + """
         </ul>
     </div>
 </div>
+</body>
+</html>
 """
+)
 
-CONFIG_TEMPLATE = BASE_STYLE + """
+CONFIG_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Gestão de Configurações | pHantasma</title>
-<form method="post" class="container" style="max-width: 960px; margin-top: 6rem;">
+<form method="post" class="container" style="max-width: 1200px;">
     {{ nav_menu | safe }}
     <div class="header">
         <h1>Gestão de Configurações</h1>
@@ -632,26 +865,26 @@ CONFIG_TEMPLATE = BASE_STYLE + """
         </ul>
       {% endif %}
     {% endwith %}
-    
+
     {% for category in categories %}
     <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;">
         <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 0.5rem;">{{ category.name }}</h2>
         <p style="color: var(--muted); font-size: 0.875rem; margin-bottom: 1.5rem;">{{ category.description }}</p>
-        
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem;">
+
+        <div class="cfg-grid">
             {% for config in configs.get(category.name, []) %}
-            <div style="background: var(--bg-color); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; display: flex; flex-direction: column; justify-content: space-between;">
+            <div class="cfg-card">
                 <div style="margin-bottom: 1rem;">
-                    <label style="font-weight: 600; font-size: 0.875rem; color: var(--text); word-break: break-all;">{{ config.key }}</label>
+                    <label for="cfg-{{ config.key }}" style="font-weight: 600; font-size: 0.875rem; color: var(--text); word-break: break-all;">{{ config.key }}</label>
                     {% if config.description %}
-                    <p style="color: var(--muted); font-size: 0.75rem; margin: 0.25rem 0 0;">{{ config.description }}</p>
+                    <p id="cfg-desc-{{ config.key }}" style="color: var(--muted); font-size: 0.75rem; margin: 0.25rem 0 0;">{{ config.description }}</p>
                     {% endif %}
                 </div>
                 <div>
                     {% if config.is_sensitive %}
-                    <input type="password" name="config_{{ config.key }}" value="{{ config.value }}" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
+                    <input type="password" id="cfg-{{ config.key }}" name="config_{{ config.key }}" value="{{ config.value }}"{% if config.description %} aria-describedby="cfg-desc-{{ config.key }}"{% endif %} class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
                     {% else %}
-                    <input type="text" name="config_{{ config.key }}" value="{{ config.value }}" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
+                    <input type="text" id="cfg-{{ config.key }}" name="config_{{ config.key }}" value="{{ config.value }}"{% if config.description %} aria-describedby="cfg-desc-{{ config.key }}"{% endif %} class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
                     {% endif %}
                 </div>
             </div>
@@ -660,13 +893,63 @@ CONFIG_TEMPLATE = BASE_STYLE + """
     </div>
     {% endfor %}
     <button type="submit" name="config_submit">Atualizar Configurações</button>
-</form>
-"""
 
-USERS_TEMPLATE = BASE_STYLE + """
+    <section style="background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1.5rem; margin-top: 2rem;">
+      <h2 style="color: var(--accent); font-size: 1.25rem; margin: 0 0 .5rem;">
+        Persona e reacções</h2>
+      <p style="color: var(--muted); font-size: .875rem; margin-bottom: 1.25rem;">
+        Como o Phantasma fala, e quanto cada reacção o reforça. Vale no chat e
+        no Discord, e aplica-se à próxima mensagem sem reiniciar.
+      </p>
+      <label for="persona" style="font-weight: 600; font-size: .875rem;">Persona</label>
+      <textarea name="persona" id="persona" rows="16"
+        style="width: 100%; font-family: monospace;">{{ persona }}</textarea>
+      <p style="margin-top: 1rem; display: flex; gap: .75rem; flex-wrap: wrap;">
+        <button type="submit" name="action" value="save_persona">Guardar persona</button>
+        <button type="submit" name="action" value="reset_persona">Voltar ao original</button>
+      </p>
+      <p style="color: var(--muted); font-size: .8rem;">
+        {% if persona_overridden %}Personalizada.{% else %}Estás a usar o original.{% endif %}
+      </p>
+      <h3 style="font-size: 1rem; margin: 2rem 0 .5rem;">Peso das reacções</h3>
+      <p style="color: var(--muted); font-size: .875rem; margin-bottom: .75rem;">
+        Positivo ensina, negativo afasta.
+      </p>
+      <table style="width: 100%; border-collapse: collapse;">
+        {% for emoji, weight in weights.items() %}
+        <tr>
+          <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
+          <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
+                     value="{{ weight }}" style="width: 6rem;"></td>
+          <td style="padding-left: 1rem; color: var(--muted);">
+            {% if weight > 0 %}reforça{% elif weight < 0 %}enfraquece{% else %}neutro{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      <p style="margin-top: 1rem; display: flex; gap: .75rem;">
+        <button type="submit" name="action" value="save_weights">Guardar pesos</button>
+        <button type="submit" name="action" value="reset_weights">Voltar aos originais</button>
+      </p>
+    </section>
+
+    </form>
+"""
+)
+
+USERS_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Gestão de Utilizadores | pHantasma</title>
-<div class="container" style="max-width: 960px; margin-top: 6rem;">
+<div class="container" style="max-width: 1200px;">
     {{ nav_menu | safe }}
     <div class="header">
         <h1>Gestão de Utilizadores</h1>
@@ -745,9 +1028,14 @@ USERS_TEMPLATE = BASE_STYLE + """
         </div>
     </div>
 </div>
+</body>
+</html>
 """
+)
 
-BRAIN_TEMPLATE = BASE_STYLE + """
+BRAIN_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head>
@@ -755,7 +1043,7 @@ BRAIN_TEMPLATE = BASE_STYLE + """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% if lang == 'en' %}Brain{% else %}Cérebro{% endif %} | pHantasma</title>
 </head>
-<body>
+<body class="brain-fullscreen">
 {{ nav_menu|safe }}
 <main class="page">
   <div class="page-head">
@@ -764,6 +1052,47 @@ BRAIN_TEMPLATE = BASE_STYLE + """
   </div>
   {{ subnav|safe }}
 
+
+  <!-- HUB ------------------------------------------------------------------
+       The 3D graph is the stage and it owns the full height; RAG, FlyBrain,
+       Memory, pending issues and the summary are panels the submenu swaps
+       underneath it. Previously the graph was a 560px iframe with a link to
+       open it elsewhere, so the other views were siblings in a second column
+       rather than destinations -- on a laptop they were squeezed. Nothing is
+       dropped: every counter and list below is the same real payload. -->
+  <div class="brain-hub">
+    <nav class="brain-tabs" role="tablist">
+      <span class="brain-titlebar">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</span>
+      <button type="button" class="brain-tab is-active" data-tab="graph" role="tab" aria-selected="true">
+        {% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}
+      </button>
+      <button type="button" class="brain-tab" data-tab="summary" role="tab" aria-selected="false">
+        {% if lang == 'en' %}Summary{% else %}Resumo{% endif %}
+      </button>
+      <button type="button" class="brain-tab" data-tab="rag" role="tab" aria-selected="false">RAG</button>
+      <button type="button" class="brain-tab" data-tab="fly" role="tab" aria-selected="false">FlyBrain</button>
+      <button type="button" class="brain-tab" data-tab="mem" role="tab" aria-selected="false">
+        {% if lang == 'en' %}Memory{% else %}Memória{% endif %}
+      </button>
+      <button type="button" class="brain-tab" data-tab="prob" role="tab" aria-selected="false">
+        {% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}
+        {% if stats.gmif_total_gaps or stats.unresolved_edges %}
+        <span class="badge">{{ stats.gmif_total_gaps + stats.unresolved_edges }}</span>
+        {% endif %}
+      </button>
+      <a class="brain-link brain-more" href="/memory/3d" target="_blank" rel="noopener">
+        {% if lang == 'en' %}Full screen{% else %}Ecrã inteiro{% endif %} ↗
+      </a>
+    </nav>
+
+    <div class="brain-stage">
+      <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
+        <iframe class="brain-frame" src="/memory/3d?embed=1"
+                title="{% if lang == 'en' %}3D memory graph{% else %}Grafo 3D de memória{% endif %}"
+                loading="lazy"></iframe>
+      </section>
+
+      <section class="brain-panel" data-panel="summary" role="tabpanel">
   <div class="grid grid-stats" style="margin-bottom:1.5rem;">
     <div class="card stat">
       <span class="stat-label">{% if lang == 'en' %}Memories{% else %}Memórias{% endif %}</span>
@@ -794,102 +1123,276 @@ BRAIN_TEMPLATE = BASE_STYLE + """
     {% endif %}
   </div>
 
-  <div class="brain-grid">
-    <!-- 3D explorer: same real payload the standalone page renders -->
-    <section class="card brain-3d">
-      <div class="brain-head">
-        <h2 class="brain-title">{% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}</h2>
-        <a class="brain-link" href="/memory/3d" target="_blank" rel="noopener">
-          {% if lang == 'en' %}Open full screen{% else %}Abrir em ecrã inteiro{% endif %} ↗
-        </a>
-      </div>
-      <iframe class="brain-frame" src="/memory/3d?embed=1" title="{% if lang == 'en' %}3D memory graph{% else %}Grafo 3D da memória{% endif %}"></iframe>
-    </section>
+  {% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %}
 
-    <div class="brain-side">
-      <section class="card">
+  <div class="sleep-bar" style="margin-bottom:1.5rem; padding:var(--sp-3); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;">
+    <div style="flex:1; min-width:200px;">
+      <strong>{% if lang == 'en' %}Pending issues detected{% else %}Problemas pendentes detectados{% endif %}</strong>
+      <span class="muted" style="margin-left:var(--sp-2); font-size:var(--fs-small);">
+        {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
+        {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
+        {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
+      </span>
+    </div>
+    <button data-sleep class="btn btn--primary" style="white-space:nowrap;"
+            onclick="triggerSleep()">
+      🌙 {% if lang == 'en' %}Sleep & Dream{% else %}Dormir e Sonhar{% endif %}
+    </button>
+  </div>
+  {% endif %}
+        <div class="brain-cards">
+          <div class="card">
+            <h3 class="brain-title">RAG</h3>
+            <div class="brain-kv"><span>{% if lang == 'en' %}Chunks{% else %}Chunks{% endif %}</span><b>{{ chunks|length }}</b></div>
+            <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
+          </div>
+          <div class="card">
+            <h3 class="brain-title">FlyBrain</h3>
+            {% if flybrain and flybrain.steps is defined %}
+            <div class="brain-kv"><span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b></div>
+            <div class="brain-kv"><span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ flybrain.affinity if flybrain.affinity is defined else '—' }}</b></div>
+            {% else %}
+            <p class="brain-empty">{% if lang == 'en' %}No reinforcement yet.{% else %}Sem reforço ainda.{% endif %}</p>
+            {% endif %}
+            <a class="brain-link" href="/admin/flybrain">{% if lang == 'en' %}Manage{% else %}Gerir{% endif %} →</a>
+          </div>
+          <div class="card">
+            <h3 class="brain-title">{% if lang == 'en' %}Memory{% else %}Memória{% endif %}</h3>
+            <div class="brain-kv"><span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memory_rows if memory_rows is defined else '—' }}</b></div>
+            {% if topic and topic.current_topic %}
+            <div class="brain-kv"><span>{% if lang == 'en' %}Topic{% else %}Tópico{% endif %}</span><b>{{ topic.current_topic }}</b></div>
+            {% endif %}
+            <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
+          </div>
+          <div class="card">
+            <h3 class="brain-title">{% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}</h3>
+            <div class="brain-kv"><span>{% if lang == 'en' %}GMIF gaps{% else %}Lacunas GMIF{% endif %}</span><b>{{ stats.gmif_total_gaps }}</b></div>
+            <div class="brain-kv"><span>{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span><b>{{ stats.unresolved_edges }}</b></div>
+            <button class="brain-tab brain-jump" data-jump="prob">{% if lang == 'en' %}Inspect{% else %}Inspeccionar{% endif %} →</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="brain-panel" data-panel="rag" role="tabpanel">
         <div class="brain-head">
           <h2 class="brain-title">RAG</h2>
-          <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todas{% endif %} →</a>
+          <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
         </div>
-        <p class="brain-note">{% if lang == 'en' %}{{ chunks|length }} most recent retrievable chunks{% else %}{{ chunks|length }} chunks recuperáveis mais recentes{% endif %}</p>
+        <p class="brain-note">{% if lang == 'en' %}{{ chunks|length }} most recent retrievable chunks.
+          {% else %}{{ chunks|length }} chunks recuperáveis mais recentes.{% endif %}</p>
         <ul class="brain-list">
-          {% for c in chunks[:6] %}
+          {% for c in chunks[:20] %}
           <li class="brain-item">
             <span class="brain-item-id">#{{ c.id }}</span>
             <span class="brain-item-text">{{ (c.summary or '')[:160] }}</span>
-            {% if c.tags %}<span class="badge">{% for tg in c.tags[:3] %}{{ tg }}{% if not loop.last %} {% endif %}{% endfor %}</span>{% endif %}
+            {% if c.tags %}<span class="badge">{% for tg in c.tags[:3] %}{{ tg }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
           </li>
           {% else %}
-          <li class="brain-empty">{% if lang == 'en' %}No retrievable chunks parsed yet.{% else %}Ainda não há chunks analisáveis.{% endif %}</li>
+          <li class="brain-empty">{% if lang == 'en' %}No retrievable chunks parsed yet.{% else %}Ainda não há chunks parseados.{% endif %}</li>
           {% endfor %}
         </ul>
       </section>
 
-      <section class="card">
+      <section class="brain-panel" data-panel="fly" role="tabpanel">
         <div class="brain-head">
           <h2 class="brain-title">FlyBrain</h2>
           <a class="brain-link" href="/admin/flybrain">{% if lang == 'en' %}Manage{% else %}Gerir{% endif %} →</a>
         </div>
         {% if flybrain and flybrain.steps is defined %}
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b>
-        </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ '%.4f'|format(flybrain.affinity) if flybrain.affinity is defined else '–' }}</b>
-        </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Octopamine{% else %}Octopamina{% endif %}</span><b>{{ '%.4f'|format(flybrain.octopamine) if flybrain.octopamine is defined else '–' }}</b>
-        </div>
-        <p class="brain-note">{% if lang == 'en' %}Real reinforcement state read from flybrain_state.{% else %}Estado de reforço real lido de flybrain_state.{% endif %}</p>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b></div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ flybrain.affinity if flybrain.affinity is defined else '—' }}</b></div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Octopamine{% else %}Octopamina{% endif %}</span><b>{{ flybrain.octopamine if flybrain.octopamine is defined else '—' }}</b></div>
+        <p class="brain-note">{% if lang == 'en' %}Real reinforcement state read from fly_brain.{% else %}Estado real de reforço lido de fly_brain.{% endif %}</p>
         {% else %}
-        <p class="brain-empty">{% if lang == 'en' %}No reinforcement recorded yet. Feedback given in conversation is persisted immediately, so the first entry appears after the first rated response.{% else %}Ainda sem reforço registado. O feedback dado em conversa é persistido de imediato, por isso a primeira entrada aparece após a primeira resposta avaliada.{% endif %}</p>
+        <p class="brain-empty">{% if lang == 'en' %}No reinforcement recorded yet. Feedback teaches the graph.{% else %}Ainda sem reforço registado. O feedback ensina o grafo.{% endif %}</p>
         {% endif %}
       </section>
 
-      <section class="card">
+      <section class="brain-panel" data-panel="mem" role="tabpanel">
         <div class="brain-head">
           <h2 class="brain-title">{% if lang == 'en' %}Memory{% else %}Memória{% endif %}</h2>
-          <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Tudo{% endif %} →</a>
+          <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
         </div>
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memories_total }}</b>
-        </div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memory_rows if memory_rows is defined else '—' }}</b></div>
         {% if topic and topic.current_topic %}
-        <div class="brain-kv">
-          <span>{% if lang == 'en' %}Current topic{% else %}Tópico atual{% endif %}</span><b>{{ topic.current_topic }}</b>
-        </div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Current topic{% else %}Tópico atual{% endif %}</span><b>{{ topic.current_topic }}</b></div>
         {% endif %}
-        <p class="brain-note">{% if lang == 'en' %}Sampled from the live brain.db.{% else %}Amostra do brain.db em direto.{% endif %}</p>
+        <p class="brain-note">{% if lang == 'en' %}Sampled from the live brain.db.{% else %}Amostrado do brain.db real.{% endif %}</p>
+      </section>
+
+      <section class="brain-panel" data-panel="prob" role="tabpanel">
+        <div class="brain-head">
+          <h2 class="brain-title">{% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}</h2>
+          {% if stats.gmif_total_gaps or stats.unresolved_edges %}
+          <button data-sleep class="btn btn--primary" style="white-space:nowrap;" onclick="triggerSleep()">
+            🌙 {% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}
+          </button>
+          {% endif %}
+        </div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}GMIF gaps{% else %}Lacunas GMIF{% endif %}</span><b>{{ stats.gmif_total_gaps }}</b></div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Weak edges{% else %}Arestas fracas{% endif %}</span><b>{{ stats.gmif_weak_edges }}</b></div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Causal gaps{% else %}Lacunas causais{% endif %}</span><b>{{ stats.gmif_causal_gaps }}</b></div>
+        <div class="brain-kv"><span>{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span><b>{{ stats.unresolved_edges }}</b></div>
+        {% if not (stats.gmif_total_gaps or stats.unresolved_edges) %}
+        <p class="brain-empty">{% if lang == 'en' %}Nothing pending.{% else %}Nada pendente.{% endif %}</p>
+        {% endif %}
       </section>
     </div>
   </div>
 </main>
 <style>
-.brain-grid { display:grid; grid-template-columns: minmax(0,1.35fr) minmax(320px,1fr); gap:var(--sp-4); align-items:start; }
-.brain-3d { padding:0; overflow:hidden; }
-.brain-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); padding:var(--sp-3) var(--sp-4); border-bottom:1px solid var(--border); }
+/* ===========================================================================
+   BRAIN HUB -- layout contract, measured rather than guessed.
+     - The 3D graph is the page: mounted once, never unmounted, filling the
+       whole stage. The other views are drawers that slide OVER it, so changing
+       view costs nothing and the graph never refetches.
+     - .brain-stage is an absolutely positioned layer covering the whole hub, so
+       the submenu has to sit above it (z-index 6) or the iframe swallows every
+       click on the menu.
+     - The stage is `inset:0` inside a relatively positioned hub whose height
+       comes from the viewport, so the graph is always exactly as tall as the
+       space left over, whatever the drawer on top of it contains.
+   =========================================================================== */
+/* ===========================================================================
+   FULLSCREEN. Scoped to .brain-fullscreen (set on <body> of this page only),
+   so none of it leaks to the other admin pages.
+   The graph is the whole viewport: the hub is a fixed layer at inset:0, and
+   the page chrome (title, submenu) floats over the graph instead of pushing it
+   down. Before this the header took 120px of a 900px window and the graph also
+   produced a 110px document scroll -- on a laptop that is a graph in a panel.
+   =========================================================================== */
+html:has(body.brain-fullscreen), body.brain-fullscreen { overflow:hidden; height:100%; }
+body.brain-fullscreen .page { padding:0; margin:0; height:100dvh; max-width:none; }
+/* The title now lives in the floating bar; the static block would otherwise
+   reserve 83px of flow above the graph. */
+body.brain-fullscreen .page-head { display:none; }
+body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-height:0; }
+.brain-titlebar {
+  font-weight:var(--fw-h2); font-size:var(--fs-h3); color:var(--text);
+  padding:0 var(--sp-2) 0 var(--sp-1); white-space:nowrap; }
+.brain-tabs {
+  /* top:45px clears the admin nav-bar, which is 45px tall and z-index 50 --
+     leaving the menu at top:0 put the two bars on top of each other and every
+     click on the menu hit the nav instead. z-index 60 keeps the menu above it. */
+  position:absolute; top:45px; left:0; right:0; z-index:60;
+  display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2); border:1px solid var(--border); border-radius:var(--radius-md);
+  background:color-mix(in srgb, var(--surface,#161616) 90%, transparent);
+  backdrop-filter:blur(6px); }
+.brain-stage { position:absolute; inset:0; }
+.brain-panel {
+  display:none; height:100%; min-height:0; overflow-y:auto; padding:var(--sp-3);
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); }
+.brain-panel[data-panel="graph"] { display:block !important; padding:0; overflow:hidden; }
+/* The submenu floats over the stage, so a drawer must leave room for it:
+   52px measured nav height + the panel's own gap, otherwise the first row of
+   content (the Sleep & Dream button, the panel titles) sits UNDER the menu and
+   cannot be clicked. */
+.brain-panel:not([data-panel="graph"]) {
+  /* 45 nav-bar + 52 menu + gap: the drawer's first row must clear BOTH bars. */
+  position:absolute; inset:0; z-index:5; padding-top:calc(45px + 52px + var(--sp-3)); }
+.brain-panel:not([data-panel="graph"]).is-active { display:block; }
+.brain-tab {
+  padding:6px 12px; font-size:var(--fs-small); font-family:inherit; cursor:pointer;
+  color:var(--text-secondary); background:transparent;
+  border:1px solid transparent; border-radius:var(--radius-sm); }
+.brain-tab:hover { color:var(--text); background:rgba(255,255,255,.04); }
+.brain-tab.is-active { color:var(--brand-400); border-color:var(--brand-500); background:rgba(255,255,255,.05); }
+.brain-jump { border-color:var(--border); }
+.brain-more { margin-left:auto; white-space:nowrap; }
+.brain-frame { display:block; width:100%; height:100%; border:0; background:var(--bg-color,#0b0b0b); }
+.brain-cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:var(--sp-3); }
+.brain-cards .card { display:flex; flex-direction:column; gap:var(--sp-2); }
+.brain-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2); margin-bottom:var(--sp-2); }
 .brain-title { margin:0; font-size:var(--fs-h3); font-weight:var(--fw-h2); }
 .brain-link { font-size:var(--fs-small); color:var(--brand-400); text-decoration:none; white-space:nowrap; }
 .brain-link:hover { text-decoration:underline; }
-.brain-frame { display:block; width:100%; height:560px; border:0; background:var(--bg-color); }
-.brain-side { display:flex; flex-direction:column; gap:var(--sp-4); }
 .brain-note { margin:0 0 var(--sp-2); font-size:var(--fs-small); color:var(--muted); }
 .brain-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:var(--sp-2); }
-.brain-item { display:flex; flex-direction:column; gap:2px; padding:var(--sp-2); background:var(--surface-2); border-radius:var(--radius-sm); font-size:var(--fs-small); }
-.brain-item-id { color:var(--brand-400); font-variant-numeric:tabular-nums; font-size:var(--fs-tiny); }
+.brain-item { display:flex; flex-direction:column; gap:2px; padding:var(--sp-2); background:var(--bg-color,#0b0b0b); border-radius:var(--radius-sm); }
+.brain-item-id { color:var(--brand-400); font-size:var(--fs-small); font-variant-numeric:tabular-nums; }
 .brain-item-text { color:var(--text-secondary); }
 .brain-empty { margin:0; font-size:var(--fs-small); color:var(--muted); font-style:italic; }
-.brain-kv { display:flex; justify-content:space-between; gap:var(--sp-2); padding:6px 0; border-bottom:1px solid var(--border); font-size:var(--fs-small); color:var(--muted); }
+.brain-kv { display:flex; justify-content:space-between; gap:var(--sp-2); padding:6px 0; border-bottom:1px solid var(--border); }
 .brain-kv b { color:var(--text); font-variant-numeric:tabular-nums; }
-@media (max-width:1080px) { .brain-grid { grid-template-columns:1fr; } .brain-frame { height:440px; } }
-@media (max-width:640px)  { .brain-frame { height:360px; } }
+@media (max-width:1080px) { .brain-hub { height:calc(100dvh - 150px); } }
+@media (max-width:640px)  { .brain-tabs { gap:4px; } .brain-tab { padding:6px 9px; } .brain-more { margin-left:0; } }
 </style>
-</body>
+<script>
+// Submenu for the brain hub. Panels are toggled by class, never removed, so the
+// graph iframe is never torn down and refetched when the view changes.
+(function () {
+  const tabs = document.querySelectorAll('.brain-tab[data-tab]:not(.brain-jump)');
+  const panels = document.querySelectorAll('.brain-panel');
+  function select(name) {
+    tabs.forEach(t => {
+      const on = t.dataset.tab === name;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach(p => p.classList.toggle('is-active', p.dataset.panel === name));
+  }
+  tabs.forEach(t => t.addEventListener('click', () => select(t.dataset.tab)));
+  // Shortcut buttons inside a panel reuse the submenu without being tabs
+  // themselves, so they must not light up when their target is selected.
+  document.querySelectorAll('[data-jump]').forEach(b =>
+    b.addEventListener('click', () => select(b.dataset.jump)));
+  if (!document.querySelector('.brain-tab.is-active') && tabs.length) select(tabs[0].dataset.tab);
+})();
+</script>
+
+    <section style="background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1.5rem; margin-top: 2.5rem;">
+      <h2 style="color: var(--accent); font-size: 1.25rem; margin: 0 0 .5rem;">
+        Corrigir o que ele acredita</h2>
+      <p style="color: var(--muted); font-size: .875rem; margin-bottom: 1.25rem;">
+        Um nó com afinidade 0.00, ou que é apenas uma resposta do assistente,
+        não é conhecimento. Apaga-o. Corrigir um facto errado é teu.
+      </p>
+      <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Nós do grafo</h3>
+      <form method="post" style="margin-bottom: 2rem;">
+        <input type="hidden" name="op" value="delete_node">
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr><th style="text-align:left;">id</th><th style="text-align:left;">rótulo</th>
+              <th>origem</th><th>afinidade</th><th></th></tr>
+          {% for n in nodes %}
+          <tr>
+            <td>{{ n.id }}</td>
+            <td style="max-width: 400px;">{{ (n.label or '')[:150] }}</td>
+            <td>{{ n.source or '?' }}</td>
+            <td>{{ n.affinity if n.affinity is not none else 0 }}</td>
+            <td><button type="submit" name="node_id" value="{{ n.id }}">Apagar</button></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </form>
+      <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Memórias</h3>
+      <form method="post">
+        <input type="hidden" name="op" value="save_memory">
+        <select name="mem_id" style="width: 100%; margin-bottom: .75rem;">
+          {% for m in memories %}
+          <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:88] }}</option>
+          {% endfor %}
+        </select>
+        <textarea name="text" rows="6"
+          style="width: 100%; font-family: monospace;">{{ selected_text or '' }}</textarea>
+        <p style="margin-top: .75rem;"><button type="submit">Guardar texto</button></p>
+      </form>
+      <form method="post" style="margin-top: 1.25rem;">
+        <input type="hidden" name="op" value="delete_memory">
+        <input type="number" name="mem_id" placeholder="id"
+               style="width: 7rem; margin-right: .5rem;">
+        <button type="submit">Apagar memória</button>
+      </form>
+    </section>
+    </body>
 </html>
 """
+)
 
-RAG_TEMPLATE = BASE_STYLE + """
+RAG_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
 <html lang="{{ lang }}">
 <title>{{ t('rag.title') }} | pHantasma</title>
@@ -956,11 +1459,20 @@ RAG_TEMPLATE = BASE_STYLE + """
 </div>
 </html>
 """
+)
 
-MEMORY_TEMPLATE = BASE_STYLE + """
+MEMORY_TEMPLATE = (
+    BASE_STYLE
+    + """
 <!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>Memória do pHantasma | pHantasma</title>
-<div class="container" style="max-width: 960px; margin-top: 6rem;">
+<div class="container" style="max-width: 1200px;">
     {{ nav_menu | safe }}
     <div class="header">
         <h1>Memória do pHantasma</h1>
@@ -983,7 +1495,7 @@ MEMORY_TEMPLATE = BASE_STYLE + """
         {% endif %}
     </div>
 
-    <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 2rem; margin-bottom: 2rem;">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 2rem; margin-bottom: 2rem;">
         <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem;">
             <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem;">{{ t('rag.title') }} <a class="btn btn--ghost btn--sm" href="/admin/rag">{{ t('brain.rag') }} →</a></h2>
             <div style="max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem;">
@@ -1020,11 +1532,73 @@ MEMORY_TEMPLATE = BASE_STYLE + """
         </div>
     </div>
 </div>
-"""
 
-FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
+    </div>
+        </div>
+    </div>
+</div>
+
+    <section style="background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1.5rem; margin-top: 2.5rem;">
+      <h2 style="color: var(--accent); font-size: 1.25rem; margin: 0 0 .5rem;">
+        Corrigir o que ele acredita</h2>
+      <p style="color: var(--muted); font-size: .875rem; margin-bottom: 1.25rem;">
+        Um nó com afinidade 0.00, ou que é apenas uma resposta do assistente,
+        não é conhecimento. Apaga-o. Corrigir um facto errado é teu.
+      </p>
+      <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Nós do grafo</h3>
+      <form method="post" style="margin-bottom: 2rem;">
+        <input type="hidden" name="op" value="delete_node">
+        <table style="width: 100%; border-collapse: collapse;">
+          <tr><th style="text-align:left;">id</th><th style="text-align:left;">rótulo</th>
+              <th>origem</th><th>afinidade</th><th></th></tr>
+          {% for n in nodes %}
+          <tr>
+            <td>{{ n.id }}</td>
+            <td style="max-width: 400px;">{{ (n.label or '')[:150] }}</td>
+            <td>{{ n.source or '?' }}</td>
+            <td>{{ n.affinity if n.affinity is not none else 0 }}</td>
+            <td><button type="submit" name="node_id" value="{{ n.id }}">Apagar</button></td>
+          </tr>
+          {% endfor %}
+        </table>
+      </form>
+      <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Memórias</h3>
+      <form method="post">
+        <input type="hidden" name="op" value="save_memory">
+        <select name="mem_id" style="width: 100%; margin-bottom: .75rem;">
+          {% for m in memories %}
+          <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:88] }}</option>
+          {% endfor %}
+        </select>
+        <textarea name="text" rows="6"
+          style="width: 100%; font-family: monospace;">{{ selected_text or '' }}</textarea>
+        <p style="margin-top: .75rem;"><button type="submit">Guardar texto</button></p>
+      </form>
+      <form method="post" style="margin-top: 1.25rem;">
+        <input type="hidden" name="op" value="delete_memory">
+        <input type="number" name="mem_id" placeholder="id"
+               style="width: 7rem; margin-right: .5rem;">
+        <button type="submit">Apagar memória</button>
+      </form>
+    </section>
+
+    </body>
+</html>
+"""
+)
+
+FLYBRAIN_TEMPLATE = (
+    BASE_STYLE
+    + """<!doctype html>
+<!-- lang em <html> e WCAG 3.1.1 (nivel A). Sem isto o leitor de
+     ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
+<html lang="{{ lang if lang is defined else 'pt' }}">
+<head><meta charset="utf-8">
+</head>
+<body>
 <title>FlyBrain - Aprendizagem por Reforço | pHantasma</title>
-<div class="container" style="max-width: 960px; margin-top: 6rem;">
+<div class="container" style="max-width: 1200px;">
     {{ nav_menu | safe }}
     <div class="header">
         <h1>{{ t('flybrain.title') }}</h1>
@@ -1034,7 +1608,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
     </div>
 
     {{ subnav | safe }}
-    
+
     <!-- Brain Graph Section -->
     <div class="brain-graph">
         <div class="brain-graph-title">
@@ -1050,7 +1624,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
     <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;">
         <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 1rem;">Definição de Parâmetros</h2>
         <p style="color: var(--muted); font-size: 0.875rem; margin-bottom: 1.5rem;">Ajuste os parâmetros de reforço cognitivo e as respetivas associações inteligentes:</p>
-        
+
         <form id="flybrain-form" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; margin-bottom: 1.5rem;">
             <div class="form-group">
                 <label for="learning_rate">Taxa de Aprendizagem (Alpha)</label>
@@ -1083,7 +1657,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
                 { id: 'nucleus_accumbens', label: 'Núcleo Accumbens', reinforcement: 0.9 },
                 { id: 'cerebellum', label: 'Cérebro', reinforcement: 0.3 }
             ];
-            
+
             const edges = [
                 { source: 'cortex', target: 'hippocampus', strength: 0.7 },
                 { source: 'cortex', target: 'amygdala', strength: 0.5 },
@@ -1091,7 +1665,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
                 { source: 'amygdala', target: 'nucleus_accumbens', strength: 0.6 },
                 { source: 'nucleus_accumbens', target: 'cerebellum', strength: 0.4 }
             ];
-            
+
             // Initialize Cytoscape.js or use mermaid
             // For now, render mermaid flowchart
             const mermaidContent = \\`graph TD
@@ -1099,7 +1673,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
     hippocampus -->|reinforcement| nucleus_accumbens
     amygdala -->|reinforcement| nucleus_accumbens
     nucleus_accumbens -->|reinforcement| cerebellum\\`;
-            
+
             // Initialize Cytoscape for interactive graph
             const cy = cytoscape({
                 container: document.querySelector('.brain-graph-svg'),
@@ -1140,7 +1714,7 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
                     padding: 10
                 }
             });
-            
+
             // Tooltip functionality
             const tooltip = document.querySelector('.brain-tooltip');
             cy.nodes().forEach(node => {
@@ -1158,25 +1732,192 @@ FLYBRAIN_TEMPLATE = BASE_STYLE + """<!doctype html>
                 });
             });
         });
+    // Sleep & Dream trigger for admin brain page
+    // Sleep & Dream trigger for the admin brain page.
+    //
+    // The endpoint answers 202 with status "started": every step calls the LLM,
+    // so the cycle takes minutes and cannot be waited out in the request. The
+    // old version treated anything that was not "ok" as an error and alerted
+    // "Error: Sleep/dream cycle started in background" -- the user saw a failure
+    // for a cycle that was in fact running. So: start, then follow
+    // /admin/brain/sleep/status until the run actually reports a terminal state.
+    const SLEEP_STEP_LABELS = {
+      classify_edges: 'classificar arestas',
+      classify_nodes: 'classificar nos',
+      consolidate_memories: 'consolidar memorias',
+      gmif_dream: 'sonhar (GMIF)'
+    };
+    function sleepStatusLine() {
+      let line = document.getElementById('sleep-status-line');
+      if (!line) {
+        line = document.createElement('div');
+        line.id = 'sleep-status-line';
+        line.className = 'brain-note';
+        const host = document.querySelector('.brain-panel.is-active');
+        (host || document.body).appendChild(line);
+      }
+      return line;
+    }
+    function renderSleepStatus(d) {
+      const line = sleepStatusLine();
+      const steps = (d && d.steps) || {};
+      const names = Object.keys(steps);
+      const done = names.length;
+      const failed = names.filter(n => steps[n] && steps[n].ok === false);
+      const parts = names.map(n => {
+        const ok = steps[n] && steps[n].ok;
+        const mark = ok === true ? 'ok' : (ok === false ? 'FALHOU' : 'a correr');
+        return (SLEEP_STEP_LABELS[n] || n) + ': ' + mark;
+      });
+      line.textContent = 'Ciclo em curso - ' + done + ' passo(s): ' + (parts.join(' | ') || 'a iniciar');
+      if (failed.length) line.style.color = 'var(--destructive)';
+    }
+    function triggerSleep() {
+      if (!confirm('Iniciar o ciclo de sono/sonho? Cada passo chama o LLM e demora minutos.')) return;
+      const btns = document.querySelectorAll('.brain-panel.is-active [data-sleep]');
+      btns.forEach(b => { b.disabled = true; b.textContent = 'A dormir...'; });
+      fetch('/admin/brain/sleep', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin'
+      })
+        .then(r => r.json().then(d => ({http: r.status, data: d})))
+        .then(({http, data}) => {
+          if (http !== 202 && data.status !== 'started') {
+            // A real refusal: not allowlisted, already running, or a crash.
+            sleepStatusLine().textContent = 'Erro: ' + (data.message || ('HTTP ' + http));
+            btns.forEach(b => { b.disabled = false; b.textContent = 'Dormir e Sonhar'; });
+            return;
+          }
+          sleepStatusLine().textContent = 'Ciclo iniciado. Acompanhando...';
+          pollSleep();
+        })
+        .catch(err => {
+          sleepStatusLine().textContent = 'Erro de rede: ' + err;
+          btns.forEach(b => { b.disabled = false; b.textContent = 'Dormir e Sonhar'; });
+        });
+    }
+    function pollSleep() {
+      fetch('/admin/brain/sleep/status', {credentials: 'same-origin'})
+        .then(r => r.json())
+        .then(d => {
+          if (d.status === 'running') { renderSleepStatus(d); setTimeout(pollSleep, 3000); return; }
+          // Terminal: done, error, or idle. Done means the brain changed, so the
+          // counters on the page are stale until it is reloaded.
+          if (d.status === 'done') { location.reload(); return; }
+          sleepStatusLine().textContent = 'Ciclo terminou com estado: ' + (d.status || 'desconhecido');
+          document.querySelectorAll('.brain-panel.is-active [data-sleep]')
+            .forEach(b => { b.disabled = false; b.textContent = 'Dormir e Sonhar'; });
+        })
+        .catch(err => {
+          sleepStatusLine().textContent = 'Erro ao consultar o estado: ' + err;
+        });
+    }
+            })
+            .catch(error => alert('Network error: ' + error));
+        }
+    }
     </script>
 </div>"""
+)
+
+
+def _email_is_allowed(email: str) -> bool:
+    """Is this address permitted to request an admin OTP?
+
+    Access is allowlist-only. Before this, `login()` accepted any address at
+    all: it generated an OTP, stored it and mailed it, so a stranger could
+    start an admin login. The OTP then landed in the journal (see below), which
+    made the allowlist necessary but not sufficient.
+
+    Two sources authorise an address:
+      1. An ACTIVE row in the `users` table. These are the users configured
+         through /admin/users. `is_active = 0` revokes access without deleting
+         the row, so the check honours it.
+      2. ADMIN_EMAILS in .env, for the principal admin to stay reachable if
+         the users table is ever lost. Comma separated.
+
+    Args:
+        email: Candidate address, already lowercased.
+
+    Returns:
+        True if the address may receive an OTP.
+    """
+    extra = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+    if email in extra:
+        return True
+
+    conn = None
+    try:
+        # get_db_connection() itself can raise, so it must be inside the guard.
+        # An allowlist that fails open on a database error is not an allowlist.
+        conn = get_db_connection()
+        row = conn.execute("SELECT is_active FROM users WHERE email = ?", (email,)).fetchone()
+    except Exception:
+        # A database error must fail closed, not open.
+        logger.error(f"Allowlist lookup failed for {email!r}; denying")
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if not row:
+        return False
+    # is_active is stored as an integer flag; treat anything falsy as revoked.
+    return bool(row["is_active"])
 
 
 @admin_bp.route("/login", methods=["GET", "POST"])
 def login():
-    """Step 1 – ask for e‑mail, send OTP."""
+    """Step 1 – ask for e‑mail, send OTP.
+
+    The address must be allowlisted before an OTP is generated. A rejection is
+    deliberately indistinguishable in wording from a missing address, so this
+    cannot be used to enumerate which addresses are administrators.
+    """
     if request.method == "GET":
-        nav_menu = _build_nav_menu("admin.login", 'user')
+        nav_menu = _build_nav_menu("admin.login", "user")
         return render_template_string(LOGIN_TEMPLATE, nav_menu=nav_menu)
+
+    # Rate limit BEFORE any work. Unthrottled, this endpoint mailed a fresh
+    # six-digit OTP on every call: a loop both bombs the allowlisted mailbox
+    # and hands the caller a new 1-in-1,000,000 surface each time, for free.
+    if not _ratelimit.login_limiter.allow(_ratelimit.client_key()):
+        retry = _ratelimit.login_limiter.retry_after(_ratelimit.client_key())
+        logger.warning(
+            "Rate limited admin login from %s (retry in %ss)",
+            _ratelimit.client_key(),
+            retry,
+        )
+        resp = make_response(
+            render_template_string(LOGIN_TEMPLATE, nav_menu=_build_nav_menu("admin.login", "user")),
+            429,
+        )
+        # Deliberately identical wording to the success path: a rate-limit
+        # message that says "too many attempts" is still an oracle for how many
+        # are left, and this endpoint already refuses to reveal which addresses
+        # are administrators.
+        resp.headers["Retry-After"] = str(retry)
+        return resp
 
     email = request.form.get("email", "").strip().lower()
     if not email:
         flash("E‑mail obrigatório")
         return redirect(url_for("admin.login"))
 
+    if not _email_is_allowed(email):
+        # Do not say "not allowed": that turns /admin/login into an oracle for
+        # which addresses are administrators. Same message as a success, minus
+        # the redirect, so a prober learns nothing from the response.
+        logger.warning(f"Rejected admin login for non-allowlisted {email!r}")
+        flash("Se o e‑mail estiver configurado, receberá um código.")
+        return redirect(url_for("admin.login"))
+
     otp = _generate_otp()
     _store_otp(email, otp)
-    print(f"[OTP DEBUG] Generated OTP for {email}: {otp}")
+    # NOT logged. This line printed the OTP to the journal, where anything able
+    # to read the service log could impersonate an administrator -- including
+    # the allowlisted address itself. Kept out of the log deliberately.
     _send_mail(
         to=email,
         subject="pHantasma – Código de acesso administrativo",
@@ -1198,15 +1939,35 @@ def verify_otp():
         return redirect(url_for("admin.login"))
 
     if request.method == "GET":
-        nav_menu = _build_nav_menu("admin.verify_otp", 'user')
+        nav_menu = _build_nav_menu("admin.verify_otp", "user")
         return render_template_string(OTP_TEMPLATE, nav_menu=nav_menu)
 
     otp = request.form.get("otp", "").strip()
+
+    # Budget for guessing, counted separately from the "request a code" budget
+    # so a user who mistypes their code can still ask for a fresh one without
+    # being locked out by their own typo.
+    if not _ratelimit.verify_limiter.allow(_ratelimit.client_key()):
+        retry = _ratelimit.verify_limiter.retry_after(_ratelimit.client_key())
+        logger.warning(
+            "Rate limited OTP verification from %s (retry in %ss)",
+            _ratelimit.client_key(),
+            retry,
+        )
+        resp = make_response(
+            render_template_string(
+                OTP_TEMPLATE, nav_menu=_build_nav_menu("admin.verify_otp", "user")
+            ),
+            429,
+        )
+        resp.headers["Retry-After"] = str(retry)
+        return resp
+
     if _verify_otp(email, otp):
         _login_user(email)
         session.pop("_otp_email", None)
         flash("Login bem‑sucedido.")
-        nxt = request.args.get("next") or url_for("admin.dashboard")
+        nxt = request.args.get("next") or url_for("admin.brain_hub")
         return redirect(nxt)
     else:
         flash("Código inválido ou expirado.")
@@ -1224,7 +1985,7 @@ def logout():
 @login_required
 def index():
     """Admin root: land on the interactive menu, not the .env textarea."""
-    return redirect(url_for("admin.dashboard"))
+    return redirect(url_for("admin.brain_hub"))
 
 
 @admin_bp.route("/env", methods=["GET", "POST"])
@@ -1247,14 +2008,420 @@ def env_editor():
 
     env_data = _read_env()
     env_text = "\n".join(f"{k}={v}" for k, v in sorted(env_data.items()))
-    nav_menu = _build_nav_menu("admin.env_editor", _current_user_data()['role'] if _current_user_data() else 'user')
-    return render_template_string(ADMIN_TEMPLATE, user=_current_user(), env=env_text, nav_menu=nav_menu)
+    nav_menu = _build_nav_menu(
+        "admin.env_editor",
+        _current_user_data()["role"] if _current_user_data() else "user",
+    )
+    return render_template_string(
+        ADMIN_TEMPLATE, user=_current_user(), env=env_text, nav_menu=nav_menu
+    )
+
+
+# --- Persona e reacções -------------------------------------------------
+# One page for the two things the owner kept having to edit in code: the
+# persona (which could not be changed at all) and the FlyBrain weight of each
+# reaction emoji (a hardcoded dict). Plain language, because the alternative
+# on /admin/config is an env-var editor grouped by technical category.
+
+_PERSONA_TEMPLATE = (
+    ADMIN_TEMPLATE
+    + """
+<form method="post" class="container" style="max-width: 760px;">
+  {{ nav_menu | safe }}
+  <div class="header"><h1>Persona e reacções</h1></div>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<ul class="flash-messages">
+      {% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>{% endif %}
+  {% endwith %}
+
+  <section style="margin-bottom: 2rem;">
+    <h2>Persona</h2>
+    <p style="color: var(--muted);">
+      Como o Phantasma fala. Aplica-se à próxima mensagem, sem reiniciar.
+    </p>
+    <textarea name="persona" rows="18" style="width: 100%; font-family: monospace;">{{ persona }}</textarea>
+    <p style="margin-top: 1rem;">
+      <button type="submit" name="action" value="save_persona">Guardar persona</button>
+      <button type="submit" name="action" value="reset_persona">Voltar ao original</button>
+      <button type="submit" name="action" value="test_persona">Guardar e testar</button>
+    </p>
+    {% if persona_overridden %}
+      <p style="color: var(--muted);">Personalizada. O original está em <code>prompts/system.txt</code>.</p>
+    {% else %}
+      <p style="color: var(--muted);">Estás a usar o original.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Peso das reacções</h2>
+    <p style="color: var(--muted);">
+      Quanto cada reacção reforça ou enfraquece o que o Phantasma aprendeu.
+      Positivo ensina, negativo afasta. Vale no chat e no Discord.
+    </p>
+    <table style="width: 100%; border-collapse: collapse;">
+      {% for emoji, weight in weights.items() %}
+      <tr>
+        <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
+        <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
+                   value="{{ weight }}"></td>
+        <td style="padding-left: 1rem; color: var(--muted);">
+          {% if weight > 0 %}reforça{% elif weight < 0 %}enfraquece{% else %}neutro{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p style="margin-top: 1rem;">
+      <button type="submit" name="action" value="save_weights">Guardar pesos</button>
+      <button type="submit" name="action" value="reset_weights">Voltar aos originais</button>
+    </p>
+  </section>
+</form>
+"""
+)
+
+
+@admin_bp.route("/persona", methods=["GET", "POST"])
+@login_required
+def persona_editor():
+    """View / edit the persona and the reaction weights."""
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        try:
+            if action in ("save_persona", "test_persona"):
+                set_persona(request.form.get("persona", ""), updated_by=_current_user())
+                flash("Persona guardada.")
+            elif action == "reset_persona":
+                reset_persona()
+                flash("Persona reposta no original.")
+            elif action == "save_weights":
+                raw = {k[2:]: v for k, v in request.form.items() if k.startswith("w_")}
+                set_reaction_weights(raw, updated_by=_current_user())
+                flash("Pesos guardados.")
+            elif action == "reset_weights":
+                clear_setting(REACTION_WEIGHTS_KEY)
+                flash("Pesos repostos nos originais.")
+        except ValueError as e:
+            flash(str(e))
+        return redirect(url_for("admin.persona_editor"))
+
+    nav_menu = _build_nav_menu(
+        "admin.persona_editor",
+        _current_user_data()["role"] if _current_user_data() else "user",
+    )
+    return render_template_string(
+        _PERSONA_TEMPLATE,
+        user=_current_user(),
+        nav_menu=nav_menu,
+        persona=get_persona(),
+        persona_overridden=persona_is_overridden(),
+        weights=get_reaction_weights(),
+    )
+
+
+_MEMORY_EDIT_TEMPLATE = (
+    ADMIN_TEMPLATE
+    + """
+<div class="container" style="max-width: 1000px;">
+  {{ nav_menu | safe }}
+  <div class="header"><h1>Editar conhecimento</h1></div>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<ul class="flash-messages">
+      {% for m in messages %}<li>{{ m }}</li>{% endfor %}</ul>{% endif %}
+  {% endwith %}
+
+  <h2>Nos do grafo</h2>
+  <p style="color: var(--muted);">
+    Um no com afinidade 0.00 e que parece uma resposta do assistente
+    ({"source": "assistant"}) nao e conhecimento: apaga-o.
+  </p>
+  <form method="post">
+  <input type="hidden" name="op" value="delete_node">
+  <table style="width:100%; border-collapse:collapse; margin-bottom:2rem;">
+    <tr><th style="text-align:left;">id</th><th style="text-align:left;">rotulo</th>
+        <th>origem</th><th>afinidade</th><th></th></tr>
+    {% for n in nodes %}
+    <tr>
+      <td>{{ n.id }}</td>
+      <td style="max-width:420px;">{{ (n.label or '')[:160] }}</td>
+      <td>{{ n.source or '?' }}</td>
+      <td>{{ n.affinity if n.affinity is not none else 0 }}</td>
+      <td><button type="submit" name="node_id" value="{{ n.id }}">Apagar</button></td>
+    </tr>
+    {% endfor %}
+  </table>
+  </form>
+
+  <h2>Memorias</h2>
+  <p style="color: var(--muted);">
+    Edita o texto ou apaga. A correccao de um facto errado e do dono, nao do sistema.
+  </p>
+  <form method="post">
+    <input type="hidden" name="op" value="save_memory">
+    <label for="mem_id">Memoria</label>
+    <select name="mem_id" id="mem_id" style="width:100%; margin-bottom:0.75rem;">
+      {% for m in memories %}
+      <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:90] }}</option>
+      {% endfor %}
+    </select>
+    <textarea name="text" rows="7" style="width:100%; font-family:monospace;">{{ selected_text or '' }}</textarea>
+    <p style="margin-top:0.75rem;">
+      <button type="submit" name="action" value="save">Guardar texto</button>
+    </p>
+  </form>
+
+  <form method="post" style="margin-top:1.5rem;">
+    <input type="hidden" name="op" value="delete_memory">
+    <label for="del_id">Apagar memoria pelo id</label>
+    <input type="number" name="mem_id" id="del_id" style="width:8rem;">
+    <button type="submit" name="action" value="delete">Apagar</button>
+  </form>
+</div>
+"""
+)
+
+
+@admin_bp.route("/brain/knowledge", methods=["GET", "POST"])
+@login_required
+def knowledge_editor():
+    """Edit or delete what the assistant believes.
+
+    The graph had no way to be corrected. Assistant replies were being stored
+    as knowledge nodes at affinity 0, then retrieved for the next question,
+    so one bad answer fed the next. Being able to see and delete a node is how
+    the owner stops that; without it the only fix is a database edit by hand.
+    """
+    if request.method == "POST":
+        op = request.form.get("op", "")
+        actor = _current_user()
+        conn = sqlite3.connect(BRAIN_DB_PATH)
+        try:
+            if op == "delete_node":
+                nid = request.form.get("node_id", type=int)
+                row = conn.execute("SELECT * FROM memory_graph WHERE id = ?", (nid,)).fetchone()
+                if not row:
+                    flash("No nao encontrado.")
+                else:
+                    before = dict(row)
+                    conn.execute("DELETE FROM memory_graph WHERE id = ?", (nid,))
+                    conn.execute(
+                        "INSERT INTO graph_edit_audit "
+                        "(at, actor, op, target, before_json, after_json) "
+                        "VALUES (datetime('now'), ?, 'node.delete', ?, ?, NULL)",
+                        (actor, f"node:{nid}", json.dumps(before, default=str)),
+                    )
+                    conn.commit()
+                    flash(f"No {nid} apagado.")
+            elif op == "save_memory":
+                mid = request.form.get("mem_id", type=int)
+                text = request.form.get("text", "")
+                if not (text or "").strip():
+                    flash("O texto da memoria nao pode ficar vazio.")
+                else:
+                    row = conn.execute("SELECT * FROM memories WHERE id = ?", (mid,)).fetchone()
+                    if not row:
+                        flash("Memoria nao encontrada.")
+                    else:
+                        before = dict(row)
+                        conn.execute(
+                            "UPDATE memories SET text = ? WHERE id = ?",
+                            (text, mid),
+                        )
+                        conn.execute(
+                            "INSERT INTO graph_edit_audit "
+                            "(at, actor, op, target, before_json, after_json) "
+                            "VALUES (datetime('now'), ?, 'memory.edit', ?, ?, ?)",
+                            (
+                                actor,
+                                f"memory:{mid}",
+                                json.dumps(before, default=str),
+                                json.dumps({"text": text}, ensure_ascii=False),
+                            ),
+                        )
+                        conn.commit()
+                        flash(f"Memoria {mid} guardada.")
+            elif op == "delete_memory":
+                mid = request.form.get("mem_id", type=int)
+                row = conn.execute("SELECT * FROM memories WHERE id = ?", (mid,)).fetchone()
+                if not row:
+                    flash("Memoria nao encontrada.")
+                else:
+                    conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
+                    conn.execute(
+                        "INSERT INTO graph_edit_audit "
+                        "(at, actor, op, target, before_json, after_json) "
+                        "VALUES (datetime('now'), ?, 'memory.delete', ?, NULL)",
+                        (actor, f"memory:{mid}", json.dumps(dict(row), default=str)),
+                    )
+                    conn.commit()
+                    flash(f"Memoria {mid} apagada.")
+        finally:
+            conn.close()
+        return redirect(url_for("admin.knowledge_editor"))
+
+    conn = sqlite3.connect(BRAIN_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        nodes = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, label, source, affinity FROM memory_graph ORDER BY affinity ASC, id"
+            )
+        ]
+        memories = [
+            dict(r) for r in conn.execute("SELECT id, text FROM memories ORDER BY id DESC LIMIT 60")
+        ]
+        sel = request.args.get("mem_id", type=int)
+        selected = ""
+        if sel:
+            row = conn.execute("SELECT text FROM memories WHERE id = ?", (sel,)).fetchone()
+            selected = row["text"] if row else ""
+    finally:
+        conn.close()
+
+    return render_template_string(
+        _MEMORY_EDIT_TEMPLATE,
+        nodes=nodes,
+        memories=memories,
+        selected_text=selected,
+        user=_current_user(),
+        nav_menu=_build_nav_menu(
+            "admin.knowledge_editor",
+            _current_user_data()["role"] if _current_user_data() else "user",
+        ),
+    )
+
+
+def _knowledge_conn():
+    conn = sqlite3.connect(BRAIN_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _knowledge_nodes():
+    conn = _knowledge_conn()
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, label, source, affinity FROM memory_graph ORDER BY affinity ASC, id"
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def _knowledge_memories(limit=60):
+    conn = _knowledge_conn()
+    try:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, text FROM memories ORDER BY id DESC LIMIT ?", (limit,)
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def _apply_knowledge_edit(op, req, actor):
+    """Apply one knowledge edit and record it.
+
+    A helper because the same three operations are reachable from two
+    screens, and an audit trail only one of them writes is not an audit trail.
+    """
+    import json as _json
+
+    conn = _knowledge_conn()
+    try:
+        if op == "delete_node":
+            nid = req.form.get("node_id", type=int)
+            row = conn.execute("SELECT * FROM memory_graph WHERE id = ?", (nid,)).fetchone()
+            if not row:
+                flash("Nó não encontrado.")
+                return
+            conn.execute("DELETE FROM memory_graph WHERE id = ?", (nid,))
+            _audit(
+                conn,
+                actor,
+                "node.delete",
+                f"node:{nid}",
+                _json.dumps(dict(row), default=str),
+                None,
+            )
+            flash(f"Nó {nid} apagado.")
+        elif op == "save_memory":
+            mid = req.form.get("mem_id", type=int)
+            text = req.form.get("text", "")
+            if not (text or "").strip():
+                flash("O texto da memória não pode ficar vazio.")
+                return
+            row = conn.execute("SELECT * FROM memories WHERE id = ?", (mid,)).fetchone()
+            if not row:
+                flash("Memória não encontrada.")
+                return
+            conn.execute("UPDATE memories SET text = ? WHERE id = ?", (text, mid))
+            _audit(
+                conn,
+                actor,
+                "memory.edit",
+                f"memory:{mid}",
+                _json.dumps(dict(row), default=str),
+                _json.dumps({"text": text}, ensure_ascii=False),
+            )
+            flash(f"Memória {mid} guardada.")
+        elif op == "delete_memory":
+            mid = req.form.get("mem_id", type=int)
+            row = conn.execute("SELECT * FROM memories WHERE id = ?", (mid,)).fetchone()
+            if not row:
+                flash("Memória não encontrada.")
+                return
+            conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
+            _audit(
+                conn,
+                actor,
+                "memory.delete",
+                f"memory:{mid}",
+                _json.dumps(dict(row), default=str),
+                None,
+            )
+            flash(f"Memória {mid} apagada.")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _audit(conn, actor, op, target, before, after):
+    conn.execute(
+        "INSERT INTO graph_edit_audit "
+        "(at, actor, op, target, before_json, after_json) "
+        "VALUES (datetime('now'), ?, ?, ?, ?, ?)",
+        (actor, op, target, before, after),
+    )
+
 
 @admin_bp.route("/config", methods=["GET", "POST"])
 @login_required
 def config_manager():
     """View and edit categorized configuration."""
     if request.method == "POST":
+        _act = request.form.get("action", "")
+        if _act in ("save_persona", "reset_persona", "save_weights", "reset_weights"):
+            if _act == "save_persona":
+                set_persona(request.form.get("persona", ""), updated_by=_current_user())
+                flash("Persona guardada.")
+            elif _act == "reset_persona":
+                reset_persona()
+                flash("Persona reposta no original.")
+            elif _act == "save_weights":
+                set_reaction_weights(
+                    {key[2:]: v for key, v in request.form.items() if key.startswith("w_")},
+                    updated_by=_current_user(),
+                )
+                flash("Pesos guardados.")
+            else:
+                clear_setting(REACTION_WEIGHTS_KEY)
+                flash("Pesos repostos nos originais.")
+            return redirect(url_for("admin.config_manager"))
         for key in request.form:
             if key.startswith("config_") and key != "config_submit":
                 update_config(key[7:], request.form[key])
@@ -1263,8 +2430,21 @@ def config_manager():
 
     configs = get_configs_by_category()
     categories = get_categories()
-    nav_menu = _build_nav_menu("admin.config_manager", _current_user_data()['role'] if _current_user_data() else 'user')
-    return render_template_string(CONFIG_TEMPLATE, configs=configs, categories=categories, user=_current_user(), nav_menu=nav_menu)
+    nav_menu = _build_nav_menu(
+        "admin.config_manager",
+        _current_user_data()["role"] if _current_user_data() else "user",
+    )
+    return render_template_string(
+        CONFIG_TEMPLATE,
+        persona=get_persona(),
+        persona_overridden=persona_is_overridden(),
+        weights=get_reaction_weights(),
+        configs=configs,
+        categories=categories,
+        user=_current_user(),
+        nav_menu=nav_menu,
+    )
+
 
 @admin_bp.route("/users", methods=["GET", "POST"])
 @login_required
@@ -1297,8 +2477,14 @@ def user_manager():
         return redirect(url_for("admin.user_manager"))
 
     users = get_all_users()
-    nav_menu = _build_nav_menu("admin.user_manager", _current_user_data()['role'] if _current_user_data() else 'user')
-    return render_template_string(USERS_TEMPLATE, users=users, user=_current_user(), nav_menu=nav_menu)
+    nav_menu = _build_nav_menu(
+        "admin.user_manager",
+        _current_user_data()["role"] if _current_user_data() else "user",
+    )
+    return render_template_string(
+        USERS_TEMPLATE, users=users, user=_current_user(), nav_menu=nav_menu
+    )
+
 
 @admin_bp.route("/lang/<code>")
 def set_language(code: str):
@@ -1310,12 +2496,10 @@ def set_language(code: str):
     language = normalize_language(code)
     if code and code.lower().split("-")[0] not in LANGUAGES:
         # Unknown code must not silently resolve to PT for a real choice.
-        return redirect(request.referrer or url_for("admin.dashboard"))
+        return redirect(request.referrer or url_for("admin.brain_hub"))
     session["lang"] = language
-    response = redirect(request.referrer or url_for("admin.dashboard"))
-    response.set_cookie(
-        LANG_COOKIE, language, max_age=365 * 24 * 3600, samesite="Lax"
-    )
+    response = redirect(request.referrer or url_for("admin.brain_hub"))
+    response.set_cookie(LANG_COOKIE, language, max_age=365 * 24 * 3600, samesite="Lax")
     return response
 
 
@@ -1327,8 +2511,9 @@ def rag_viewer():
     Rendered from the same ``memories`` rows the API serves. No synthetic
     scores, no invented relevance ranking.
     """
-    from .memory_graph import build_graph_from_db
     import json as _json
+
+    from .memory_graph import build_graph_from_db
 
     conn = sqlite3.connect(BRAIN_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -1348,13 +2533,15 @@ def rag_viewer():
             continue
         if not isinstance(payload, dict):
             continue
-        chunks.append({
-            "id": row["id"],
-            "timestamp": row["timestamp"],
-            "summary": payload.get("summary") or payload.get("text") or "",
-            "tags": payload.get("tags") or [],
-            "facts": payload.get("facts") or [],
-        })
+        chunks.append(
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "summary": payload.get("summary") or payload.get("text") or "",
+                "tags": payload.get("tags") or [],
+                "facts": payload.get("facts") or [],
+            }
+        )
 
     stats = build_graph_from_db(BRAIN_DB_PATH)["stats"]
     nav_menu = _build_nav_menu("rag_viewer")
@@ -1366,6 +2553,144 @@ def rag_viewer():
         nav_menu=nav_menu,
         user=_current_user(),
     )
+
+
+@admin_bp.route("/brain/sleep", methods=["POST"])
+@login_required
+def brain_sleep():
+    """Start the sleep/dream cycle in the background. Returns 202 immediately.
+
+    What it does, precisely: classifies GMIF on edges and nodes, merges
+    duplicate memories, runs the GMIF dream, and -- since T047 -- reconciles
+    dangling references, but only where online evidence justifies it. Anything
+    it cannot justify is deliberately left pending and reported in
+    /admin/brain/sleep/status, so it can be resolved by hand.
+
+    The previous wording here was "to resolve pending issues in the brain",
+    which it structurally could not do: the four original steps only write
+    `gmif_*` columns and merge memories, while `unresolved_edges` is
+    recomputed at read time and could not move however often the cycle ran.
+    The docstring was promising a capability the code did not have.
+    """
+    import sqlite3
+    import threading
+
+    # Outcome of the last run, so a failed cycle is visible instead of
+    # silent. Module-level on purpose: the worker runs in a daemon thread and
+    # the request has already returned, so this dict is the only place the
+    # two halves can meet. Without it the endpoint answered "ok" before
+    # knowing whether any step had succeeded -- which is how a cycle that
+    # blocked on the LLM looked identical to one that had finished.
+    state = {"status": "running", "started_at": time.time(), "steps": {}}
+
+    def _step(name, fn, *a, **kw):
+        """Run one step, recording success or failure instead of swallowing it."""
+        started = time.time()
+        try:
+            result = fn(*a, **kw)
+            state["steps"][name] = {
+                "ok": True,
+                "seconds": round(time.time() - started, 1),
+            }
+            return result
+        except Exception as exc:  # noqa: BLE001 - recorded, then re-raised
+            state["steps"][name] = {
+                "ok": False,
+                "seconds": round(time.time() - started, 1),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            raise
+
+    def _reconcile_refs(conn):
+        """T047: resolve what can be justified, leave the rest, report which.
+
+        Only ever WRITES when it has online evidence. Without it a pending ref
+        stays pending for a human, which is visible and recoverable; a guessed
+        relink deletes a relationship silently, which is neither.
+        """
+        from src.brain.reconcile import reconcile_refs
+
+        report = reconcile_refs(BRAIN_DB_PATH)
+        logger.info(
+            "reconcile_refs: pending=%s relinked=%s promoted=%s ambiguous=%s failed=%s skipped=%s",
+            report.get("pending"),
+            report.get("relinked"),
+            report.get("promoted"),
+            report.get("ambiguous"),
+            report.get("failed"),
+            report.get("skipped"),
+        )
+        state.setdefault("reports", {})["reconcile_refs"] = report
+        if report.get("error"):
+            raise RuntimeError(report["error"])
+        return report
+
+    def _run_sleep_cycle():
+        """Background worker for sleep/dream cycle."""
+        conn = sqlite3.connect(BRAIN_DB_PATH)
+        try:
+            from skills.skill_dream import _consolidate_memories
+            from skills.skill_gmif_dream import _gmif_dream_cycle
+            from src.pipeline.gmif_classifier import (
+                classify_all_edges,
+                classify_all_nodes,
+            )
+
+            _step("classify_edges", classify_all_edges, conn)
+            _step("classify_nodes", classify_all_nodes, conn)
+            _step("reconcile_refs", _reconcile_refs, conn)
+            _step("consolidate_memories", _consolidate_memories)
+            # A GMIF failure must not erase the classification work above, so
+            # it is recorded and swallowed rather than aborting the cycle.
+            try:
+                _step("gmif_dream", _gmif_dream_cycle)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GMIF dream cycle step failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            state["status"] = "failed"
+            state["error"] = f"{type(exc).__name__}: {exc}"
+            logger.error("Sleep/dream cycle failed at the top level: %s", exc)
+        else:
+            state["status"] = "done"
+        finally:
+            state["finished_at"] = time.time()
+            conn.close()
+
+    # Start background thread and return immediately
+    thread = threading.Thread(target=_run_sleep_cycle, daemon=True)
+    thread.start()
+    _LAST_SLEEP_CYCLE["state"] = state
+
+    return jsonify(
+        {
+            "status": "started",
+            "message": "Sleep/dream cycle started in background",
+            "note": (
+                "Each step calls the LLM, so the cycle takes minutes. "
+                "GET /admin/brain/sleep/status reports what actually happened."
+            ),
+        }
+    ), 202
+
+
+@admin_bp.route("/brain/sleep/status", methods=["GET"])
+@login_required
+def brain_sleep_status():
+    """What the last sleep/dream cycle actually did.
+
+    Added 2026-09-27 because the trigger returned "ok" the instant its
+    thread started. A cycle that blocked on the LLM, or died on a missing
+    symbol, was indistinguishable from one that had finished -- which is
+    why Sleep & Dream read as "not working" while the request had
+    succeeded and returned 200.
+    """
+    state = _LAST_SLEEP_CYCLE.get("state")
+    if not state:
+        return jsonify({"status": "never_run"})
+    payload = dict(state)
+    if state.get("started_at") and state.get("finished_at"):
+        payload["duration_seconds"] = round(state["finished_at"] - state["started_at"], 1)
+    return jsonify(payload)
 
 
 @admin_bp.route("/brain")
@@ -1384,8 +2709,29 @@ def brain_hub():
     rewrite of tested rendering code. An iframe keeps the two concerns separate
     while still putting everything on a single screen.
     """
-    from .memory_graph import build_graph_from_db
+    selected_text_brain = ""
+    _sel = request.args.get("mem_id", type=int)
+    if _sel:
+        _c = _knowledge_conn()
+        try:
+            _r = _c.execute("SELECT text FROM memories WHERE id = ?", (_sel,)).fetchone()
+            selected_text_brain = _r["text"] if _r else ""
+        finally:
+            _c.close()
+
+    if request.method == "POST":
+        # /admin/brain is where the owner corrects what the assistant believes.
+        # A form that posts to a GET-only view does nothing and looks fine.
+        _op = request.form.get("op", "")
+        if _op in ("delete_node", "save_memory", "delete_memory"):
+            _apply_knowledge_edit(_op, request, _current_user())
+        else:
+            flash("Acção desconhecida.")
+        return redirect(url_for("admin.brain_hub"))
+
     import json as _json
+
+    from .memory_graph import build_graph_from_db
 
     conn = sqlite3.connect(BRAIN_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -1395,6 +2741,12 @@ def brain_hub():
         ).fetchall()
         state_row = conn.execute("SELECT * FROM flybrain_state WHERE id = 1").fetchone()
         topic_row = conn.execute("SELECT * FROM topic_state").fetchone()
+
+        # Add GMIF gap analysis for the sleep button (inside try, before conn.close())
+        from src.pipeline.gmif_classifier import get_gmif_stats
+
+        gmif_stats = get_gmif_stats(conn)
+
     finally:
         conn.close()
 
@@ -1408,23 +2760,35 @@ def brain_hub():
             continue
         if not isinstance(payload, dict):
             continue
-        chunks.append({
-            "id": row["id"],
-            "timestamp": row["timestamp"],
-            "summary": payload.get("summary") or payload.get("text") or "",
-            "tags": payload.get("tags") or [],
-            "facts": payload.get("facts") or [],
-        })
+        chunks.append(
+            {
+                "id": row["id"],
+                "timestamp": row["timestamp"],
+                "summary": payload.get("summary") or payload.get("text") or "",
+                "tags": payload.get("tags") or [],
+                "facts": payload.get("facts") or [],
+            }
+        )
 
     graph = build_graph_from_db(BRAIN_DB_PATH)
     stats = graph["stats"]
     # build_graph_from_db already attaches the real reinforcement state here;
     # do not query it a second time.
     flybrain = stats.get("flybrain")
+    stats["gmif_weak_edges"] = sum(
+        v for k, v in gmif_stats.get("level_distribution", {}).items() if k in ("M1", "M2")
+    )
+    stats["gmif_causal_gaps"] = max(
+        0, gmif_stats.get("logical_edges", 0) - gmif_stats.get("classified_edges", 0)
+    )
+    stats["gmif_total_gaps"] = stats.get("gmif_weak_edges", 0) + stats.get("gmif_causal_gaps", 0)
 
     role = _current_user_data()["role"] if _current_user_data() else "user"
     return render_template_string(
         BRAIN_TEMPLATE,
+        nodes=_knowledge_nodes(),
+        memories=_knowledge_memories(60),
+        selected_text=selected_text_brain,
         chunks=chunks,
         stats=stats,
         memories_total=len(rows),
@@ -1441,23 +2805,43 @@ def brain_hub():
 @login_required
 def memory_viewer():
     """View pHantasma memory."""
-    import json
+
+    if request.method == "POST":
+        _op = request.form.get("op", "")
+        if _op in ("delete_node", "save_memory", "delete_memory"):
+            _apply_knowledge_edit(_op, request, _current_user())
+            return redirect(url_for("admin.memory_viewer"))
+
     conn = sqlite3.connect(BRAIN_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        memories = conn.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 100").fetchall()
+        _memories = conn.execute(
+            "SELECT * FROM memories ORDER BY timestamp DESC LIMIT 100"
+        ).fetchall()
         graph = conn.execute("SELECT * FROM memory_graph ORDER BY weight DESC").fetchall()
         topic = conn.execute("SELECT * FROM topic_state").fetchone()
-        nav_menu = _build_nav_menu("admin.memory_viewer", _current_user_data()['role'] if _current_user_data() else 'user')
-        return render_template_string(MEMORY_TEMPLATE, 
-            memories=[dict(m) for m in memories],
+        sel = request.args.get("mem_id", type=int)
+        selected_text = ""
+        if sel:
+            _r = conn.execute("SELECT text FROM memories WHERE id = ?", (sel,)).fetchone()
+            selected_text = _r["text"] if _r else ""
+        nav_menu = _build_nav_menu(
+            "admin.memory_viewer",
+            _current_user_data()["role"] if _current_user_data() else "user",
+        )
+        return render_template_string(
+            MEMORY_TEMPLATE,
             graph=[dict(g) for g in graph],
             topic=dict(topic) if topic else None,
+            selected_id=sel,
+            selected_text=selected_text,
             user=_current_user(),
             subnav=_build_subnav("admin.memory_viewer"),
-            nav_menu=nav_menu)
+            nav_menu=nav_menu,
+        )
     finally:
         conn.close()
+
 
 @admin_bp.route("/flybrain")
 @login_required
@@ -1469,53 +2853,46 @@ def flybrain_manager():
         if request.method == "POST":
             data = request.get_json()
             if data:
-                conn.execute("INSERT OR REPLACE INTO flybrain_state (id, schema_version, data, updated_at) VALUES (1, 1, ?, ?)",
-                            (json.dumps(data), datetime.now().isoformat()))
+                conn.execute(
+                    "INSERT OR REPLACE INTO flybrain_state (id, schema_version, data, updated_at) VALUES (1, 1, ?, ?)",
+                    (json.dumps(data), datetime.now().isoformat()),
+                )
                 conn.commit()
                 return jsonify({"status": "ok"})
-        
+
         state = conn.execute("SELECT * FROM flybrain_state WHERE id = 1").fetchone()
-        nav_menu = _build_nav_menu("admin.flybrain_manager", _current_user_data()['role'] if _current_user_data() else 'user')
-        return render_template_string(FLYBRAIN_TEMPLATE, 
+        nav_menu = _build_nav_menu(
+            "admin.flybrain_manager",
+            _current_user_data()["role"] if _current_user_data() else "user",
+        )
+        return render_template_string(
+            FLYBRAIN_TEMPLATE,
             state=dict(state) if state else None,
             user=_current_user(),
             subnav=_build_subnav("admin.flybrain_manager"),
-            nav_menu=nav_menu)
+            nav_menu=nav_menu,
+        )
     finally:
         conn.close()
+
 
 @admin_bp.route("/dashboard")
 @login_required
 def dashboard():
-    """Admin dashboard overview."""
-    # Query users and config from config.db
-    conn = sqlite3.connect(CONFIG_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        user_count = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()['c']
-        config_count = conn.execute("SELECT COUNT(*) as c FROM config").fetchone()['c']
-    finally:
-        conn.close()
-    
-    # Query memories, graph, and flybrain from unified brain.db
-    conn = sqlite3.connect(BRAIN_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        memory_count = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()['c']
-        graph_count = conn.execute("SELECT COUNT(*) as c FROM memory_graph").fetchone()['c']
-        flybrain_state = conn.execute("SELECT * FROM flybrain_state WHERE id = 1").fetchone()
-    finally:
-        conn.close()
-    
-    nav_menu = _build_nav_menu("admin.dashboard", _current_user_data()['role'] if _current_user_data() else 'user')
-    return render_template_string(DASHBOARD_TEMPLATE, 
-        user_count=user_count,
-        config_count=config_count,
-        memory_count=memory_count,
-        graph_count=graph_count,
-        flybrain_state=dict(flybrain_state) if flybrain_state else None,
-        user=_current_user(),
-        nav_menu=nav_menu)
+    """Permanent redirect to /admin/brain.
+
+    The dashboard used to be a separate page holding counts of memories, graph
+    nodes, FlyBrain, users and config -- all of which are state of the brain. The
+    brain hub already renders every one of those subsystems side by side from the
+    same tables, so the dashboard was a second page summarising the first: two
+    entry points to one subject, free to diverge.
+
+    A redirect rather than a removal: the dashboard is linked from bookmarks and
+    from any older cached nav, and 404ing those is worse than landing somewhere
+    correct. 301 so it is cached as permanent.
+    """
+    return redirect(url_for("admin.brain_hub"), code=301)
+
 
 @admin_bp.route("/api/stats")
 @login_required
@@ -1525,30 +2902,31 @@ def api_stats():
     conn = sqlite3.connect(CONFIG_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        users = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()['c']
-        configs = conn.execute("SELECT COUNT(*) as c FROM config").fetchone()['c']
+        users = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        configs = conn.execute("SELECT COUNT(*) as c FROM config").fetchone()["c"]
     finally:
         conn.close()
-    
+
     # Query memories, graph, and flybrain from unified brain.db
     conn = sqlite3.connect(BRAIN_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        memories = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()['c']
-        graph_nodes = conn.execute("SELECT COUNT(*) as c FROM memory_graph").fetchone()['c']
+        memories = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
+        graph_nodes = conn.execute("SELECT COUNT(*) as c FROM memory_graph").fetchone()["c"]
         flybrain_row = conn.execute("SELECT data FROM flybrain_state WHERE id = 1").fetchone()
-        flybrain_data = flybrain_row['data'] if flybrain_row else None
+        flybrain_data = flybrain_row["data"] if flybrain_row else None
     finally:
         conn.close()
-    
+
     stats = {
         "users": users,
         "configs": configs,
         "memories": memories,
         "graph_nodes": graph_nodes,
-        "flybrain": flybrain_data
+        "flybrain": flybrain_data,
     }
     return jsonify(stats)
+
 
 @admin_bp.route("/api/memory")
 @login_required
@@ -1557,16 +2935,21 @@ def api_memory():
     conn = sqlite3.connect(BRAIN_DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        memories = conn.execute("SELECT * FROM memories ORDER BY timestamp DESC LIMIT 100").fetchall()
+        memories = conn.execute(
+            "SELECT * FROM memories ORDER BY timestamp DESC LIMIT 100"
+        ).fetchall()
         graph = conn.execute("SELECT * FROM memory_graph ORDER BY weight DESC").fetchall()
         topic = conn.execute("SELECT * FROM topic_state").fetchone()
-        return jsonify({
-            "memories": [dict(m) for m in memories],
-            "graph": [dict(g) for g in graph],
-            "topic": dict(topic) if topic else None
-        })
+        return jsonify(
+            {
+                "memories": [dict(m) for m in memories],
+                "graph": [dict(g) for g in graph],
+                "topic": dict(topic) if topic else None,
+            }
+        )
     finally:
         conn.close()
+
 
 @admin_bp.route("/api/flybrain")
 @login_required
@@ -1578,31 +2961,30 @@ def api_flybrain():
         state = conn.execute("SELECT * FROM flybrain_state WHERE id = 1").fetchone()
         if state:
             state_dict = dict(state)
-            if state_dict['data']:
+            if state_dict["data"]:
                 try:
-                    state_dict['data'] = json.loads(state_dict['data'])
+                    state_dict["data"] = json.loads(state_dict["data"])
                 except json.JSONDecodeError:
-                    state_dict['data'] = state_dict['data']
-        return jsonify({
-            "state": state_dict if state else None
-        })
+                    state_dict["data"] = state_dict["data"]
+        return jsonify({"state": state_dict if state else None})
     finally:
         conn.close()
+
 
 @admin_bp.route("/api/email", methods=["POST"])
 @login_required
 def api_send_email():
     """API endpoint to send email."""
     data = request.get_json()
-    if not data or 'to' not in data or 'subject' not in data or 'body' not in data:
+    if not data or "to" not in data or "subject" not in data or "body" not in data:
         return jsonify({"error": "Missing required fields"}), 400
-    
+
     try:
         _send_mail(
-            to=data['to'],
-            subject=data['subject'],
-            body=data['body'],
-            otp=data.get('otp')
+            to=data["to"],
+            subject=data["subject"],
+            body=data["body"],
+            otp=data.get("otp"),
         )
         return jsonify({"status": "Email sent successfully"})
     except Exception as e:

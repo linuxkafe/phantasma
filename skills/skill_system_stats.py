@@ -1,4 +1,7 @@
 import json
+
+import config
+from pathlib import Path
 import os
 import threading
 import time
@@ -9,7 +12,10 @@ TRIGGER_TYPE = "contains"
 # Gatilhos de sistema
 TRIGGERS = ["estado do sistema", "cpu", "ram", "memória", "disco", "armazenamento", "status do servidor"]
 
-CACHE_FILE = "/opt/phantasma/cache/system_stats.json"
+# Resolved through config.CACHE_DIR instead of a literal /opt/phantasma path.
+# A host path in code cannot be overridden, so these caches had to be forked
+# per host. In production the resolved path is byte-identical to the old one.
+CACHE_FILE = str(Path(config.CACHE_DIR) / "system_stats.json")
 POLL_INTERVAL = 60
 
 FSTYPE_IGNORADOS = ["squashfs", "tmpfs", "devtmpfs", "loop", "overlay", "iso9660", "autofs"]

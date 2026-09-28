@@ -13,7 +13,7 @@ import config
 
 # Diretório para guardar os ficheiros de áudio gerados (config-driven,
 # fallback para o caminho histórico do deployment de host).
-TTS_CACHE_DIR = getattr(config, "TTS_CACHE_DIR", "/opt/phantasma/cache/tts")
+TTS_CACHE_DIR = config.TTS_CACHE_DIR
 
 
 def clean_old_cache(days=30):

@@ -58,9 +58,7 @@ class WhisperSTT:
                 cls._model = whisper.load_model(model_size, device="cpu")
                 cls._model_size = model_size
                 load_time = (time.perf_counter() - start) * 1000
-                logger.info(
-                    f"Whisper model loaded: {model_size} (load_time_ms={load_time:.1f})"
-                )
+                logger.info(f"Whisper model loaded: {model_size} (load_time_ms={load_time:.1f})")
                 return Result.ok(cls._model)
             except Exception as e:
                 logger.error(f"Failed to load Whisper model: {e}")

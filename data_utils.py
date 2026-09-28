@@ -37,6 +37,57 @@ def setup_database():
 
 
 # --- RAG (MEMÓRIA DE LONGO PRAZO) ---
+# Above this, what is stored is a transcript, not a fact. The largest
+# memories in the store were 2170 chars of tagged JSON; retrieval OR-ed their
+# keywords together, so a short question matched half the store and the model
+# answered with whatever ranked first.
+MEMORY_DISTIL_THRESHOLD = 400
+
+
+def _distil_for_memory(text: str) -> str:
+    """Reduce a long capture to the part worth remembering.
+
+    Distilled with the local LLM, because the whole problem is that the
+    assistant itself produced the rambling. If the model is unavailable the
+    original is kept: losing a memory is worse than storing a long one, and
+    the threshold above means the short common case is untouched.
+    """
+    if len(text) <= MEMORY_DISTIL_THRESHOLD:
+        return text
+    try:
+        import ollama
+
+        from config import config as cfg
+
+        client = ollama.Client(host=cfg.llm.host)
+        resp = client.chat(
+            model=cfg.llm.model,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Reduz este texto a no maximo 3 frases com os factos "
+                    "essenciais que devem ser lembrados. Sem introducoes, "
+                    "sem repeticoes, sem commentarios, sem markdown. Se nao "
+                    "contiver factos a guardar, responde apenas: VAZIO\n\n"
+                    f"{text[:6000]}"
+                ),
+            }],
+            options={"temperature": 0.1, "num_ctx": 8192},
+        )
+        out = (resp.get("message", {}).get("content") or "").strip()
+        if not out or out.upper().startswith("VAZIO"):
+            return ""
+        if len(out) >= len(text):
+            # The model padded it back to the original size: no gain, so keep
+            # the source of truth rather than a lossy copy.
+            return text
+        return out
+    except Exception as e:
+        print(f"RAG: distilacao falhou, guarda o original ({e})")
+        return text
+
+
+
 def save_to_rag(text):
     """Guarda texto simples ou JSON estruturado pelas skills no RAG.
 
@@ -46,6 +97,9 @@ def save_to_rag(text):
         return
     clean_text = text.strip()
     if len(clean_text) > 5:
+        clean_text = _distil_for_memory(clean_text)
+        if not clean_text:
+            return
         try:
             conn = sqlite3.connect(config.DB_PATH)
             cursor = conn.cursor()
@@ -72,8 +126,34 @@ def retrieve_from_rag(prompt, max_results=5):
     confundir o LLM externo. O assistant.py trata da sanitização final.
     """
     try:
-        # Filtro de palavras curtas para evitar ruído
-        keywords = [word for word in prompt.lower().split() if len(word) > 3]
+        # The question's punctuation must not end up inside the SQL pattern.
+        # "quem e o bimby?" yields the token "bimby?", and in SQL LIKE only
+        # "%" and "_" are wildcards -- "?" is a literal, so the query became
+        # LIKE '%bimby?%', which matches nothing. Measured: '%bimby?%' -> 0
+        # memories, '%bimby%' -> 4. The knowledge was in the store and the
+        # search could not see it, so the assistant answered it had none.
+        # Normalise, keep words of 4+ characters, and escape LIKE wildcards.
+        cleaned = "".join(
+            c if c.isalnum() or c.isspace() else " " for c in prompt.lower()
+        )
+        # Question words are not subjects. Keywords are OR-ed, so "quem" in
+        # "quem e o bimby?" matched every memory that happened to contain it and
+        # the real Bimby rows lost the LIMIT 5 race -- the answer degraded to
+        # "uma referencia a gatos que tem nomes proprios". Filter them, and
+        # ignore a token that is only a question word.
+        stop = {
+            "quem", "qual", "quais", "quando", "onde", "porque", "porque",
+            "como", "para", "sobre", "fala", "diz", "diz-me", "conta",
+            "faz", "esta", "estao", "isso", "isto", "aquilo", "aqui",
+            "obrigado", "obrigada", "ola", "bom", "boa", "dia", "noite",
+            # NOT stopping subjects: "gato" must stay searchable, or
+            # "como e o gato?" would retrieve nothing.
+        }
+        keywords = [w for w in cleaned.split() if len(w) > 3 and w not in stop]
+        if not keywords:
+            return ""
+        keywords = [w.replace("%", "").replace("_", "") for w in keywords]
+        keywords = [w for w in keywords if w]
         if not keywords:
             return ""
 

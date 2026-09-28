@@ -206,6 +206,14 @@ def create_app(pipeline=None) -> Flask:
         Configured Flask application.
     """
     app = Flask(__name__)
+    # (actor, emoji, message_id) -> monotonic timestamps, for replay
+    # suppression on the reaction endpoint.
+    _REACTION_SEEN: dict = {}
+    # Access logging is attached to the WSGI layer, not by replacing `app`, so
+    # the Flask object (and therefore test_client()/config) survives intact.
+    from src.api.access_log import install as _install_access_log
+
+    app = _install_access_log(app)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
     # Secret key for sessions (set via env var SECRET_KEY in production)
     app.secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
@@ -222,12 +230,8 @@ def create_app(pipeline=None) -> Flask:
     @app.after_request
     def after_request(response):
         response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add(
-            "Access-Control-Allow-Headers", "Content-Type,Authorization"
-        )
-        response.headers.add(
-            "Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS"
-        )
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
         return response
 
     # ============ Legacy Discord/UI contract ============
@@ -279,9 +283,7 @@ def create_app(pipeline=None) -> Flask:
             toggles, status = [], []
 
             def keys(attr: str):
-                return (
-                    list(getattr(config, attr).keys()) if hasattr(config, attr) else []
-                )
+                return list(getattr(config, attr).keys()) if hasattr(config, attr) else []
 
             # Config instance uses lowercase attribute names
             for n in keys("tuya_devices"):
@@ -344,9 +346,7 @@ def create_app(pipeline=None) -> Flask:
             device = data.get("device", "")
             action = data.get("action", "")
             if not device or not action:
-                return jsonify(
-                    {"status": "error", "message": "device e action obrigatórios"}
-                ), 400
+                return jsonify({"status": "error", "message": "device e action obrigatórios"}), 400
 
             prompt = f"{action} o {device}"
             response = pipeline.respond_to_text(prompt) if pipeline else None
@@ -366,9 +366,7 @@ def create_app(pipeline=None) -> Flask:
             if pipeline and hasattr(pipeline, "_skill_loader"):
                 for skill in pipeline._skill_loader.skills:
                     triggers = getattr(skill, "TRIGGERS", [])
-                    cmds[skill.NAME] = (
-                        ", ".join(triggers[:3]) + "..." if triggers else "Ativo"
-                    )
+                    cmds[skill.NAME] = ", ".join(triggers[:3]) + "..." if triggers else "Ativo"
             return jsonify({"status": "ok", "commands": cmds})
         except Exception as e:
             logger.error(f"/help error: {e}")
@@ -455,6 +453,297 @@ def create_app(pipeline=None) -> Flask:
 
     # ============ Voice Commands ============
 
+    # ------------------------------------------------------------------
+    # Graph editing. Mutating a brain, so gated like the admin surface: an
+    # admin session OR the loopback bypass. Read routes above stay open.
+    # ------------------------------------------------------------------
+    def _may_edit():
+        """Is this requester allowed to mutate the graph?
+
+        Same contract as the admin pages: a resolved admin identity, or the
+        loopback bypass. Returns None when permitted, else the refusal.
+        """
+        from src.api import admin as _admin
+
+        user = _admin._current_user_data()
+        if user is None:
+            user = _admin._bypass_or_none()
+        if user is not None and user.get("role") == "admin":
+            return None
+        return {"ok": False, "error": "admin required"}, (403 if user is not None else 401)
+
+    def _db():
+        import config as _c
+
+        return _c.BRAIN_DB_PATH
+
+    @app.route("/api/graph/edge", methods=["POST"])
+    def graph_edge_edit():
+        """Update, create, relink or delete an edge.
+
+        One route with an explicit ``op`` rather than four URLs: the audit
+        record, the validation and the permission check are identical for all
+        four, and four routes would be four places to keep them in step.
+        """
+        refused = _may_edit()
+        if refused:
+            body, status = refused
+            return jsonify(body), status
+        from src.brain import graph_edit as _ge
+
+        data = request.get_json(silent=True) or {}
+        op = str(data.get("op", "update"))
+        key = str(data.get("node_key", "") or "")
+        actor = str(data.get("actor", "local"))[:64]
+        try:
+            if op == "update":
+                changes = {f: data[f] for f in ("weight", "affinity", "label") if f in data}
+                out = _ge.update_edge(_db(), key, changes, actor=actor)
+            elif op == "create":
+                out = _ge.create_edge(
+                    _db(),
+                    str(data.get("source", "")),
+                    str(data.get("target", "")),
+                    weight=data.get("weight", 1.0),
+                    affinity=data.get("affinity", 0.0),
+                    label=str(data.get("label", "")),
+                    actor=actor,
+                )
+            elif op == "delete":
+                out = _ge.delete_edge(_db(), key, actor=actor)
+            elif op == "node":
+                # The editable set comes from graph_edit.NODE_COLUMNS, not from a
+                # list repeated here. Repeating it is what made node weight
+                # unsaveable: `weight` was added to NODE_COLUMNS and to the UI,
+                # but this hardcoded tuple was never updated, so the field was
+                # silently dropped and the POST still answered 200. update_node
+                # already rejects anything outside NODE_COLUMNS, so passing
+                # through needs no second allowlist.
+                changes = {f: data[f] for f in _ge.NODE_COLUMNS if f in data}
+                out = _ge.update_node(_db(), key, changes, actor=actor)
+            elif op == "node.delete":
+                out = _ge.delete_node(_db(), key, actor=actor)
+            else:
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": f"unknown op {op!r}",
+                        "supported": ["update", "create", "delete", "node"],
+                    }
+                ), 400
+        except _ge.EditError as exc:
+            # 422: well-formed, semantically wrong. Distinct from 400 so the
+            # caller can tell "you asked for nonsense" from "that is not an edge".
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        return jsonify({"ok": True, "op": op, "result": out})
+
+    @app.route("/api/graph/resolve", methods=["POST"])
+    def graph_resolve_dangling():
+        """Resolve one dangling edge endpoint. Human-initiated (T046).
+
+        Deliberately NOT wired into the sleep cycle. Relinking and promoting are
+        opposite judgements about the same observation -- same concept under
+        another name, or a genuine new concept -- and picking one automatically
+        either loses an edge or duplicates a concept. The automatic path is
+        T047, and it goes through this same endpoint with a recorded rationale.
+
+        `side` is mandatory: an edge can dangle on both ends and resolving the
+        wrong one is a silent no-op on the number the operator is watching.
+        """
+        refused = _may_edit()
+        if refused:
+            body, status = refused
+            return jsonify(body), status
+        from src.brain import graph_edit as _ge
+
+        data = request.get_json(silent=True) or {}
+        edge_key = str(data.get("edge_key", "") or "")
+        side = str(data.get("side", "") or "")
+        action = str(data.get("action", "") or "")
+        target_label = data.get("target_label")
+        actor = str(data.get("actor", "local"))[:64]
+        rationale = data.get("rationale")
+        if not edge_key or not side or not action:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "edge_key, side and action are required",
+                }
+            ), 400
+        try:
+            out = _ge.resolve_dangling(
+                _db(),
+                edge_key,
+                side,
+                action,
+                target_label=str(target_label) if target_label else None,
+                actor=actor,
+                rationale=str(rationale)[:500] if rationale else None,
+            )
+        except _ge.EditError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        return jsonify({"ok": True, "op": "resolve", "result": out})
+
+    @app.route("/api/graph/node", methods=["POST"])
+    def graph_node_from_text():
+        """Create a node from a piece of text the operator chose to keep.
+
+        Not reachable automatically. A reaction whose reply names no node leaves
+        the graph alone and the UI offers this as a deliberate press, so the
+        graph gains a concept because someone decided it should, not because
+        something was said.
+        """
+        refused = _may_edit()
+        if refused:
+            body, status = refused
+            return jsonify(body), status
+        from src.brain import graph_edit as _ge
+
+        data = request.get_json(silent=True) or {}
+        label = str(data.get("label", "") or "")
+        text = str(data.get("text", "") or "")
+        if not label.strip():
+            return jsonify({"ok": False, "error": "label is required"}), 400
+        try:
+            out = _ge.create_node_from_text(
+                _db(),
+                label,
+                text,
+                actor=str(data.get("actor", "ui"))[:64],
+                rationale=str(data.get("rationale", ""))[:500] or None,
+            )
+        except _ge.EditError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        return jsonify({"ok": True, "op": "node.from_text", "result": out})
+
+    @app.route("/api/graph/rag", methods=["POST"])
+    def graph_rag_edit():
+        """Correct a RAG entry stored on a memory row."""
+        refused = _may_edit()
+        if refused:
+            body, status = refused
+            return jsonify(body), status
+        from src.brain import graph_edit as _ge
+
+        data = request.get_json(silent=True) or {}
+        try:
+            out = _ge.update_rag(
+                _db(),
+                str(data.get("key", "")),
+                {f: data[f] for f in ("summary", "tags", "facts", "mermaid") if f in data},
+                actor=str(data.get("actor", "local"))[:64],
+            )
+        except _ge.EditError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
+        return jsonify({"ok": True, "result": out})
+
+    @app.route("/api/graph/audit", methods=["GET"])
+    def graph_audit():
+        """Recent graph edits. Readable, because an audit nobody can read is
+        not an audit."""
+        from src.brain import graph_edit as _ge
+
+        return jsonify(
+            {
+                "edits": _ge.list_audit(_db(), int(request.args.get("limit", 50))),
+            }
+        )
+
+    @app.route("/api/graph/flybrain", methods=["GET"])
+    def graph_flybrain_state():
+        """The live ring state, for the explorer's inspector.
+
+        Read-only on purpose. Training stays on the reaction path; exposing a
+        write here would let a slider drag become a learning event, which the
+        owner explicitly ruled out.
+        """
+        from src.brain import graph_edit as _ge
+
+        return jsonify({"state": _ge.flybrain_state(_db())})
+
+    @app.route("/api/reaction", methods=["POST"])
+    def reaction():
+        """Record a FlyBrain reward from a chat reaction.
+
+        Exposes the reward path that already worked over Discord, so the web
+        chat and Discord train the same brain through one implementation
+        (src/brain/reactions.py).
+
+        Guarded because a reaction is a TRAINING SIGNAL, not a like. Unbounded,
+        a loop of POSTs would drive the ring state anywhere, and the browser is
+        an untrusted client. The limits are deliberately generous for a human
+        tapping a message and deliberately tight for a script.
+        """
+        from src.brain import reactions as _reactions
+
+        try:
+            data = request.get_json(silent=True) or {}
+        except Exception:
+            data = {}
+        emoji = str(data.get("emoji", "")).strip()
+        source = str(data.get("source", "web"))[:24]
+        actor = str(data.get("actor", "local"))[:64]
+
+        if not emoji:
+            return jsonify({"ok": False, "error": "missing emoji"}), 400
+        # Pick up weights the owner changed in /admin before validating, so an
+        # emoji the owner just re-weighted is accepted this very next click.
+        _reactions.reload_reaction_weights()
+        if emoji not in _reactions.REACTION_REWARD:
+            # 422, not 400: the request was well-formed but the value is not
+            # supported. Distinct codes because they need distinct fixes.
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "unsupported emoji",
+                    "supported": list(_reactions.SUPPORTED_EMOJI),
+                }
+            ), 422
+
+        # Replay guard: one reward per (message, emoji) per client, for a
+        # window. Without it, holding down a tap is a training signal.
+        key = (actor[:32], emoji, str(data.get("message_id", ""))[:64])
+        now = time.monotonic()
+        bucket = [t for t in _REACTION_SEEN.get(key, ()) if now - t < 30]
+        if bucket:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "already reacted to this message",
+                    "retry_after": round(30 - (now - bucket[0]), 1),
+                }
+            ), 429
+        bucket.append(now)
+        _REACTION_SEEN[key] = bucket[-4:]
+        if len(_REACTION_SEEN) > 500:  # bound memory under key spraying
+            for k in list(_REACTION_SEEN):
+                if not [t for t in _REACTION_SEEN[k] if now - t < 30]:
+                    _REACTION_SEEN.pop(k, None)
+
+        # The message text travels with the reaction so the graph reward can
+        # resolve the node THAT reply is about, instead of the ambient topic.
+        message_text = data.get("message_text")
+        report = _reactions.record(
+            emoji,
+            source=source,
+            actor=actor,
+            message_text=str(message_text)[:4000] if message_text else None,
+        )
+        status = 200 if report.get("applied") else 202
+        return jsonify({"ok": report.get("applied", False), **report}), status
+
+    @app.route("/api/reactions", methods=["GET"])
+    def reaction_map():
+        """Which emojis carry a reward, and how much.
+
+        The UI renders its buttons from this, so the UI and the training
+        behaviour cannot drift apart: adding an emoji server-side makes it
+        appear, and removing one removes it.
+        """
+        from src.brain import reactions as _reactions
+
+        return jsonify(_reactions.describe())
+
     @app.route("/api/command", methods=["POST"])
     def command():
         """Execute a voice/text command.
@@ -468,9 +757,7 @@ def create_app(pipeline=None) -> Flask:
             data = request.get_json()
             if not data:
                 return jsonify(
-                    CommandResponse(
-                        success=False, error="No JSON body provided"
-                    ).model_dump()
+                    CommandResponse(success=False, error="No JSON body provided").model_dump()
                 ), 400
 
             cmd = CommandRequest(**data)
@@ -478,9 +765,7 @@ def create_app(pipeline=None) -> Flask:
 
             if not pipeline:
                 return jsonify(
-                    CommandResponse(
-                        success=False, error="Pipeline not available"
-                    ).model_dump()
+                    CommandResponse(success=False, error="Pipeline not available").model_dump()
                 ), 503
 
             # For text/voice commands, use LLM directly
@@ -539,9 +824,7 @@ def create_app(pipeline=None) -> Flask:
             data = request.get_json()
             if not data:
                 return jsonify(
-                    STTResponse(
-                        success=False, error="No JSON body provided"
-                    ).model_dump()
+                    STTResponse(success=False, error="No JSON body provided").model_dump()
                 ), 400
 
             stt_req = STTRequest(**data)
@@ -588,9 +871,7 @@ def create_app(pipeline=None) -> Flask:
             data = request.get_json()
             if not data:
                 return jsonify(
-                    TTSResponse(
-                        success=False, error="No JSON body provided"
-                    ).model_dump()
+                    TTSResponse(success=False, error="No JSON body provided").model_dump()
                 ), 400
 
             tts_req = TTSRequest(**data)
@@ -600,9 +881,7 @@ def create_app(pipeline=None) -> Flask:
             if not result.success:
                 elapsed = (time.perf_counter() - start) * 1000
                 return jsonify(
-                    TTSResponse(
-                        success=False, error=result.error, duration_ms=elapsed
-                    ).model_dump()
+                    TTSResponse(success=False, error=result.error, duration_ms=elapsed).model_dump()
                 )
 
             audio_data, sample_rate = result.data
@@ -622,9 +901,7 @@ def create_app(pipeline=None) -> Flask:
             logger.error(f"TTS error: {e}")
             elapsed = (time.perf_counter() - start) * 1000
             return jsonify(
-                TTSResponse(
-                    success=False, error=str(e), duration_ms=elapsed
-                ).model_dump()
+                TTSResponse(success=False, error=str(e), duration_ms=elapsed).model_dump()
             ), 500
 
     # ============ Devices ============
@@ -642,18 +919,14 @@ def create_app(pipeline=None) -> Flask:
             for name, cfg in config.tuya_devices.items():
                 dtype = "tuya_light" if "luz" in name.lower() else "tuya_switch"
                 devices.append(
-                    DeviceInfo(
-                        name=name, type=dtype, state={"online": True}
-                    ).model_dump()
+                    DeviceInfo(name=name, type=dtype, state={"online": True}).model_dump()
                 )
 
             # Xiaomi devices
             for name, cfg in config.miio_devices.items():
                 dtype = "xiaomi_vacuum" if "robot" in name.lower() else "xiaomi_light"
                 devices.append(
-                    DeviceInfo(
-                        name=name, type=dtype, state={"online": True}
-                    ).model_dump()
+                    DeviceInfo(name=name, type=dtype, state={"online": True}).model_dump()
                 )
 
             return jsonify({"devices": devices})
@@ -706,9 +979,7 @@ def create_app(pipeline=None) -> Flask:
         except Exception as e:
             logger.error(f"Device control error: {e}")
             return jsonify(
-                DeviceControlResponse(
-                    success=False, device_name=name, error=str(e)
-                ).model_dump()
+                DeviceControlResponse(success=False, device_name=name, error=str(e)).model_dump()
             ), 500
 
     # ============ Memory ============
@@ -724,9 +995,7 @@ def create_app(pipeline=None) -> Flask:
             entries = []  # Placeholder
             return jsonify(MemoryResponse(success=True, entries=entries).model_dump())
         except Exception as e:
-            return jsonify(
-                MemoryResponse(success=False, error=str(e)).model_dump()
-            ), 500
+            return jsonify(MemoryResponse(success=False, error=str(e)).model_dump()), 500
 
     @app.route("/api/memory", methods=["POST"])
     def add_memory():
@@ -744,14 +1013,10 @@ def create_app(pipeline=None) -> Flask:
 
             mem_req = MemoryRequest(**data)
             # Would store in SQLite
-            entry = MemoryEntry(
-                key=mem_req.key, value=mem_req.value, created_at=datetime.now()
-            )
+            entry = MemoryEntry(key=mem_req.key, value=mem_req.value, created_at=datetime.now())
             return jsonify(MemoryResponse(success=True, entry=entry).model_dump())
         except Exception as e:
-            return jsonify(
-                MemoryResponse(success=False, error=str(e)).model_dump()
-            ), 500
+            return jsonify(MemoryResponse(success=False, error=str(e)).model_dump()), 500
 
     @app.route("/api/memory/<key>", methods=["GET"])
     def get_memory(key: str):
@@ -761,13 +1026,9 @@ def create_app(pipeline=None) -> Flask:
         """
         try:
             # Would query SQLite
-            return jsonify(
-                MemoryResponse(success=False, error="Not implemented").model_dump()
-            ), 501
+            return jsonify(MemoryResponse(success=False, error="Not implemented").model_dump()), 501
         except Exception as e:
-            return jsonify(
-                MemoryResponse(success=False, error=str(e)).model_dump()
-            ), 500
+            return jsonify(MemoryResponse(success=False, error=str(e)).model_dump()), 500
 
     @app.route("/api/memory/graph", methods=["GET"])
     def api_memory_graph():
@@ -783,25 +1044,25 @@ def create_app(pipeline=None) -> Flask:
             return jsonify(build_graph_from_db())
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(f"memory graph failed: {exc}")
-            return jsonify(
-                {"nodes": [], "links": [], "stats": {"error": str(exc)}}
-            ), 500
+            return jsonify({"nodes": [], "links": [], "stats": {"error": str(exc)}}), 500
 
     @app.route("/memory/3d", methods=["GET"])
     def view_3d_memory():
         """Serves the HTML5 3D Memory & Connectome Explorer."""
         from flask import send_from_directory
-        return send_from_directory("/opt/phantasma/public", "memory_3d.html")
+
+        return send_from_directory(config.public_dir, "memory_3d.html")
 
     @app.route("/public/<path:filename>")
     def public_files(filename: str):
         """Serve the explorer's vendored libraries and ES modules.
 
         ``send_from_directory`` refuses path traversal, so requests cannot
-        escape /opt/phantasma/public.
+        escape the configured public directory.
         """
         from flask import send_from_directory
-        return send_from_directory("/opt/phantasma/public", filename)
+
+        return send_from_directory(config.public_dir, filename)
 
     @app.route("/api/memory/<key>", methods=["DELETE"])
     def delete_memory(key: str):
@@ -813,8 +1074,6 @@ def create_app(pipeline=None) -> Flask:
             # Would delete from SQLite
             return jsonify(MemoryResponse(success=True).model_dump())
         except Exception as e:
-            return jsonify(
-                MemoryResponse(success=False, error=str(e)).model_dump()
-            ), 500
+            return jsonify(MemoryResponse(success=False, error=str(e)).model_dump()), 500
 
     return app

@@ -1,40 +1,69 @@
-node_modules/
-__pycache__/
-*.pyc
+# Segredos. O .env tem chaves de API, tokens do Discord, palavras-passe de
+# Tuya/MIIO/Ewelink/Chacon e o token do bot. Nao deve nunca ser versionado.
+.env
+.env.*
+*.env
+!config-example.py
+aes
+.aes
+# Dados em runtime
+data/
+*.db
+*.sqlite
+*.sqlite3
+brain.db
+memory.db
+cache/
 .coverage
 coverage.xml
-coverage.out
-target/
-dist/
-build/
-.venv/
+htmlcov/
+.pytest_cache/
+
+# Ambiente Python
 venv/
-env/
+.pyenv/
+__pycache__/
+*.py[cod]
 *.egg-info/
-.idea/
-.vscode/
+
+# Ferramentas / editores
+.cache/
+.config/
+.viminfo
+.bash_history
+*.bak
+*.bak-*
+assistant.py.bak-*
+
+# Node (playwright esta em node_modules/)
+node_modules/
+.pv/
+
+# Temporarios
+tmp/
 *.log
-.DS_Store
-.tmp/
-aes/verification/
-.llm_venv/
-.aes
-aes
-models/
-config.py
-memory.db
-.env
-# runtime data + model caches (memory DBs, Whisper/Piper weights registered at deploy time)
-data/
+*.pid
+.assistant.pid
+
+# Incident debris that must never be deployed. A .corrupt-.bak file was found
+# inside src/api/ in production: the deploy rsync propagates anything in src/,
+# so anything untracked here ends up served. Backups belong in /tmp, not the tree.
+*.corrupt*
 *.orig
+*.rej
+*~
+# .env.example is a template, not a secret: it must stay tracked.
+!.env.example
 
-# Ollama local models (bind-mounted ./ollama-data:/root/.ollama) — 9.3G weights, never versioned
+# 9.3 GB of pulled model weights plus an ed25519 PRIVATE KEY. Committing this
+# would push a secret and 9 GB of blobs to a remote. Found while preparing the
+# first real publish: the tree was 68 files "ready" and this sat in it.
 ollama-data/
+*.gguf
+id_ed25519
+id_ed25519.pub
 
-# Deployment scripts and logs (generated at deploy time)
-deployment-log-*.txt
-.deployment-backup-*/
-audit-log-*.txt
-
-# Per-run artifacts (already covered by existing entries, but explicit)
-*.log
+# Third-party Piper TTS voices, 62 MB each. Downloaded artefacts, not source;
+# the project's own wakeword models (models/*.onnx) stay tracked.
+models/tts/pt_PT-dii-high.onnx
+models/tts/en_US-glados-medium.onnx

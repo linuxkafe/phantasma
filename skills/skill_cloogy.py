@@ -6,11 +6,15 @@ import time
 import httpx
 
 import config
+from pathlib import Path
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
 BASE_TRIGGERS = ["cloogy", "kiome", "lista", "listar", "consumo", "gastar", "leitura", "quanto"]
-CACHE_FILE = "/opt/phantasma/cache/cloogy_cache.json"
+# Resolved through config.CACHE_DIR instead of a literal /opt/phantasma path.
+# A host path in code cannot be overridden, so these caches had to be forked
+# per host. In production the resolved path is byte-identical to the old one.
+CACHE_FILE = str(Path(config.CACHE_DIR) / "cloogy_cache.json")
 
 def _get_triggers():
     if hasattr(config, 'CLOOGY_DEVICES') and isinstance(config.CLOOGY_DEVICES, dict):

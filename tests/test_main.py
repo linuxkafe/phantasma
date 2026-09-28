@@ -13,9 +13,7 @@ def test_main_output(caplog):
     """
     # Create mock pipeline
     mock_pipeline = MagicMock()
-    mock_pipeline.start.return_value = MagicMock(
-        success=False, error="no audio device in test"
-    )
+    mock_pipeline.start.return_value = MagicMock(success=False, error="no audio device in test")
 
     # Mock all modules that assistant.py imports BEFORE importing src.main
     mock_modules = {

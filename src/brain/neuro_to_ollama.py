@@ -16,8 +16,7 @@ AVERSIVE_AFFINITY = -0.3
 # System prompt notes (injected when conditions met)
 NOTA_INTERNA = "[Nota interna: O utilizador mudou subitamente de tema]"
 CAUTION_NOTE = (
-    "[Nota interna: o utilizador está a reagir negativamente; "
-    "responde com moderação e cuidado.]"
+    "[Nota interna: o utilizador está a reagir negativamente; responde com moderação e cuidado.]"
 )
 
 # Ollama parameter bounds
