@@ -32,6 +32,21 @@ def clean_old_cache(days=30):
         print(f"ERRO ao limpar cache: {e}")
 
 
+def _ghost_effects():
+    """Audio effects applied to the synthesised voice, or none.
+
+    The flanger and the tempo drag were there to make the voice sound eerie.
+    They are a comb filter and a resampler, so they smear the fine spectral
+    detail that separates an open vowel from a closed one -- which is exactly
+    what a listener is judging when they say the accentuation is wrong. They
+    are now opt-out via TTS_GHOST_EFFECTS, so the voice can be heard on its
+    own terms before deciding whether the character is worth the clarity.
+    """
+    if os.getenv("TTS_GHOST_EFFECTS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return []
+    return ["flanger", "1", "1", "5", "50", "1", "sin", "tempo", "0.9"]
+
+
 def play_tts(text, use_cache=True):
     """Converte texto em voz (Lógica restaurada com Cache e SoX)."""
     if not text:
@@ -81,15 +96,7 @@ def play_tts(text, use_cache=True):
                     "1",
                     "-",
                     cache_path,
-                    "flanger",
-                    "1",
-                    "1",
-                    "5",
-                    "50",
-                    "1",
-                    "sin",
-                    "tempo",
-                    "0.9",
+                    *_ghost_effects(),
                 ],
                 stdin=p1.stdout,
             )
