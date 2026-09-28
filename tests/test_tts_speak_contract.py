@@ -110,3 +110,47 @@ class TestSpeechSeconds:
         short = assistant._speech_seconds("Sim.")
         long = assistant._speech_seconds("Luz da sala ligada. " * 10)
         assert long > short * 5
+
+
+class _FailingStopCapture(_FakeCapture):
+    """A capture whose stop() fails -- the device the owner actually hit."""
+
+    def stop(self):
+        self.stops += 1
+        return _FakeResult(success=False, error="PortAudio -9998")
+
+
+class TestListeningAlwaysComesBack:
+    def test_returns_to_listening_when_stop_fails(self, monkeypatch):
+        """The owner's bug: a failed stop left the device deaf for good.
+
+        Restart used to be gated on "did stop() succeed". When it failed --
+        which is exactly what happens while a skill still holds the PCM --
+        nothing was ever restarted, the wake word never woke again, and no
+        error pointed at the cause. Listening is the default state, so it is
+        now restored unconditionally.
+        """
+        obj, _ = _pipeline_with_speak(monkeypatch)
+        obj.audio_capture = _FailingStopCapture()
+        obj._speak("Luz da sala ligada.")
+        assert obj.audio_capture.starts >= 1, "must return to listening even if stop failed"
+        assert obj._speaking is False
+
+    def test_restart_failure_is_logged_not_swallowed(self, monkeypatch, caplog):
+        obj, _ = _pipeline_with_speak(monkeypatch)
+
+        def boom():
+            raise RuntimeError("device busy")
+
+        obj.audio_capture.start = boom
+        with caplog.at_level("ERROR"):
+            obj._speak("oi")
+        assert any("resume listening" in r.message for r in caplog.records), (
+            "a capture that will not restart must be loud, not silent"
+        )
+
+    def test_speak_works_without_a_capture(self, monkeypatch):
+        obj, played = _pipeline_with_speak(monkeypatch)
+        obj.audio_capture = None
+        assert obj._speak("ola").success
+        assert played == ["ola"]

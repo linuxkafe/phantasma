@@ -709,9 +709,8 @@ class PhantasmaPipeline:
 
         Holding the mic costs a moment of silence. The loop cost the device.
         """
-        was_capturing = False
         if self.audio_capture:
-            was_capturing = self.audio_capture.stop().success
+            self.audio_capture.stop()
         self._speaking = True
         try:
             from audio_utils import play_tts
@@ -725,8 +724,16 @@ class PhantasmaPipeline:
             # exactly where a confirmation is still intelligible as a command.
             time.sleep(_speech_seconds(text) + 0.8)
             self._speaking = False
-            if was_capturing and self.audio_capture:
-                self.audio_capture.start()
+            # Come back to listening whatever happened above. Gating this on
+            # "did the stop succeed" was the bug the owner described: a stop
+            # that failed left the capture down and the device deaf for good,
+            # with no error anywhere to point at. Listening is the default
+            # state, so it is restored unconditionally.
+            if self.audio_capture is not None:
+                try:
+                    self.audio_capture.start()
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Could not resume listening: %s", exc)
         return Result.ok(None)
 
     def _respond_with_llm(self, text: str) -> Optional[str]:
