@@ -72,6 +72,29 @@ def sanitize_llm_context(context: str) -> str:
     return context.strip()
 
 
+def _prewarm_stt():
+    """Load Whisper in the background while the device is still booting.
+
+    The class-level cache in WhisperSTT was never the problem: it holds the
+    model and the second command reuses it. The 33 seconds land on the first
+    command after a start, because that is the first time anything asks for
+    the model. Paying it here takes it off the owner's first request.
+    """
+    def _load():
+        try:
+            from src.pipeline.stt import WhisperSTT
+
+            result = WhisperSTT.load_model(config.stt.model_size)
+            if result.success:
+                logger.info("STT prewarmed: %s ready", config.stt.model_size)
+            else:
+                logger.warning("STT prewarm failed: %s", result.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("STT prewarm skipped: %s", exc)
+
+    threading.Thread(target=_load, name="stt-prewarm", daemon=True).start()
+
+
 def _speech_seconds(text: str) -> float:
     """Rough spoken length, used to keep the mic shut while we are talking.
 
@@ -1118,6 +1141,7 @@ def run():
     starts pipeline, blocks until signal received.
     """
     pipeline = PhantasmaPipeline()
+    _prewarm_stt()
 
     # Signal handling
     def signal_handler(signum, frame):
