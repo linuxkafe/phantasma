@@ -982,10 +982,12 @@ class PhantasmaPipeline:
             logger.info(f"Skill '{text}' handled: {skill_response}")
             # Speak skill response via TTS, served from the cache when the
             # same answer has been spoken before.
-            tts_result = self._speak(skill_response)
-            if tts_result.success:
-                audio_data, sample_rate = tts_result.data
-                self.audio_playback.play(audio_data)
+            # _speak has already played it, through the cache, with the mic
+            # shut. Unpacking .data here killed the listener thread: the
+            # Result carries no samples, so every skill response ended in
+            # "TypeError: cannot unpack non-iterable NoneType" and the wake
+            # word never woke again.
+            self._speak(skill_response)
             return
 
         # LLM fallback shares the response. If None (LLM failure), _process_speech
@@ -1004,13 +1006,8 @@ class PhantasmaPipeline:
             logger.error(f"TTS failed: {tts_result.error}")
             return
 
-        audio_data, sample_rate = tts_result.data
-
-        # Playback
-        playback_result = self.audio_playback.play(audio_data)
-        log_stage(logger, "playback", playback_result)
-        if not playback_result.success:
-            logger.error(f"Playback failed: {playback_result.error}")
+        # No unpacking and no second play: _speak reads the cache, plays, and
+        # keeps the mic shut while it talks. See the note on the skill path.
 
         # Start feedback collection window after response
         logger.info(f"Feedback window opened for {self._feedback_window_seconds}s")
