@@ -1148,25 +1148,6 @@ BRAIN_TEMPLATE = (
       <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
       <span class="stat-value">{{ stats.concepts or 0 }}</span>
     </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Links{% else %}Ligações{% endif %}</span>
-      <span class="stat-value">{{ stats.links or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}With Mermaid{% else %}Com Mermaid{% endif %}</span>
-      <span class="stat-value">{{ stats.memories_with_mermaid or 0 }}</span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">FlyBrain</span>
-      <span class="stat-value">{% if flybrain and flybrain.steps is defined %}{{ flybrain.steps }}{% else %}–{% endif %}</span>
-      <span class="stat-hint">{% if flybrain and flybrain.steps is defined %}{% if lang == 'en' %}steps{% else %}passos{% endif %}{% else %}{% if lang == 'en' %}no reinforcement yet{% else %}sem reforço{% endif %}{% endif %}</span>
-    </div>
-    {% if stats.unresolved_edges %}
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span>
-      <span class="stat-value" style="color:var(--warning);">{{ stats.unresolved_edges }}</span>
-    </div>
-    {% endif %}
   </div>
     <div class="brain-stage">
       <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
@@ -1251,6 +1232,10 @@ BRAIN_TEMPLATE = (
           <div class="card stat">
             <span class="stat-label">{% if lang == 'en' %}Unresolved{% else %}Por resolver{% endif %}</span>
             <span class="stat-value">{{ stats.unresolved_edges or 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}With Mermaid{% else %}Com Mermaid{% endif %}</span>
+            <span class="stat-value">{{ stats.memories_with_mermaid or 0 }}</span>
           </div>
         </div>
 
