@@ -4,8 +4,12 @@
 .env.*
 *.env
 !config-example.py
-aes
-.aes
+# Project lifecycle dirs. These WERE tracked (8 files under aes/) and the
+# patterns below were already here -- .gitignore does not untrack, so the
+# removal needed a separate `git rm -r --cached` commit. Anchored to the root
+# so a same-named file in a subdir is still seen.
+/aes/
+/.aes/
 # Dados em runtime
 data/
 *.db
