@@ -132,6 +132,7 @@ class PhantasmaPipeline:
         # "no reaction" rather than "scoring 0.09", which cost a full
         # diagnosis cycle. One INFO line per 5s.
         self._last_score_log = 0.0
+        self._last_level_log = 0.0
 
         self._running = False
         self._worker_thread: Optional[threading.Thread] = None
@@ -314,6 +315,24 @@ class PhantasmaPipeline:
             detected, model = self.hotword.process(frame)
             scores = getattr(self.hotword, "last_predictions", {}) or {}
             now = time.time()
+            # Input level, sampled ten times more often than the wake score.
+            # A wake word lasts about a second and the score line prints every
+            # 5 s, so a 5 s sample of silence says nothing about what the
+            # microphone captured while someone was speaking. Without this,
+            # "it did not fire" cannot be told apart from "the microphone
+            # heard nothing", which are opposite problems with opposite fixes.
+            if now - self._last_level_log > 0.5 and len(frame):
+                self._last_level_log = now
+                _a = frame.astype("float64")
+                # debug, not info: at 0.5 s this was two thirds of every log
+                # line the service wrote. It is the diagnostic that made the
+                # wake word measurable, and it stays -- but it does not belong
+                # in a journal nobody asked to fill.
+                logger.debug(
+                    "Input level: peak=%.1f%% rms=%.1f%% of scale",
+                    100.0 * float(np.abs(_a).max()) / 32768.0,
+                    100.0 * float(np.sqrt((_a ** 2).mean())) / 32768.0,
+                )
             if now - self._last_score_log > 5.0:
                 self._last_score_log = now
                 ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
