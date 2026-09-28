@@ -72,6 +72,17 @@ def sanitize_llm_context(context: str) -> str:
     return context.strip()
 
 
+def _speech_seconds(text: str) -> float:
+    """Rough spoken length, used to keep the mic shut while we are talking.
+
+    Portuguese at the ghost tempo runs near 13 characters a second. Being
+    generous costs silence; being tight costs the loop.
+    """
+    return max(0.6, len(text) / 13.0 + 0.4)
+
+
+
+
 class PhantasmaPipeline:
     """Main voice pipeline orchestrator.
 
@@ -169,6 +180,8 @@ class PhantasmaPipeline:
         self._collecting_feedback = False
         self._feedback_start_time: Optional[float] = None
         self._feedback_window_seconds = config_module.FEEDBACK_WINDOW_SECONDS
+        # True while the speakers are talking, so the listener can stay shut.
+        self._speaking = False
         self._positive_keywords = config_module.FEEDBACK_POSITIVE_KEYWORDS
         self._negative_keywords = config_module.FEEDBACK_NEGATIVE_KEYWORDS
 
@@ -330,6 +343,11 @@ class PhantasmaPipeline:
                 logger.debug("Feedback window expired")
                 self._collecting_feedback = False
                 self._feedback_start_time = None
+
+        # Our own voice must never become a command. _speak already stops
+        # the capture; this catches a device a skill reopened underneath us.
+        if self._ignore_while_speaking():
+            return
 
         if self._collecting_feedback:
             # Feedback collection mode - use VAD for speech segmentation
@@ -679,19 +697,36 @@ class PhantasmaPipeline:
         return "\n".join(lines)
 
     def _speak(self, text: str, use_cache: bool = True):
-        """Speak text, going through the TTS cache unless told not to.
+        """Speak, with the microphone held shut for as long as we are talking.
 
-        play_tts reads the cache first and writes the result back; this
-        wraps it in the Result shape the pipeline logs, so the cache and the
-        direct synthesizer are indistinguishable to the caller.
+        The skill path pauses the shared capture so the skill can open the
+        PCM, then resumes it in a `finally` -- but the response is spoken
+        after that, so the mic was live while the speakers were talking. The
+        capture transcribed our own voice, matched it against the skills, and
+        re-armed itself: "Liga a luz da sala" turned the light on, the
+        spoken confirmation turned it off, and the loop left nobody able to
+        get a word in afterwards. Volume at 100% made the bleed certain.
+
+        Holding the mic costs a moment of silence. The loop cost the device.
         """
-        from audio_utils import play_tts
-
+        was_capturing = False
+        if self.audio_capture:
+            was_capturing = self.audio_capture.stop().success
+        self._speaking = True
         try:
+            from audio_utils import play_tts
+
             play_tts(text, use_cache=use_cache)
         except Exception as exc:  # noqa: BLE001
             logger.warning("TTS failed: %s", exc)
             return Result.fail(str(exc))
+        finally:
+            # The room keeps ringing after the last sample, and the tail is
+            # exactly where a confirmation is still intelligible as a command.
+            time.sleep(_speech_seconds(text) + 0.8)
+            self._speaking = False
+            if was_capturing and self.audio_capture:
+                self.audio_capture.start()
         return Result.ok(None)
 
     def _respond_with_llm(self, text: str) -> Optional[str]:
@@ -875,6 +910,18 @@ class PhantasmaPipeline:
 
         logger.error("All Ollama hosts failed")
         return None
+
+    def _ignore_while_speaking(self) -> bool:
+        """True when a chunk arrived while we were talking, so drop it.
+
+        Stopping the capture is the real guard; this is the belt to its
+        braces, because the shared capture can be restarted by a skill that
+        opens the PCM, and a half-open device leaks.
+        """
+        if not getattr(self, "_speaking", False):
+            return False
+        logger.debug("Dropped audio chunk: we were speaking")
+        return True
 
     def _process_speech(self):
         """Process collected speech through STT -> LLM -> TTS -> Playback.
