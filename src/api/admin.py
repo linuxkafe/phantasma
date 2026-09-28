@@ -105,6 +105,13 @@ def get_language() -> str:
 # opened -- and wrote to -- the PRODUCTION database. In production the resolved
 # paths are identical to the old literals, so behaviour is unchanged there.
 CONFIG_DB_PATH = Path(config.CONFIG_DB_PATH)
+# Kept on config.BRAIN_DB_PATH, which the .env points at data/brain.db -- the
+# same file src/brain/memory_graph.py opens, and the one holding memory_graph,
+# memories and graph_edit_audit. Reading it without the .env loaded resolves to
+# data/flybrain.db, which has none of those tables, so the knowledge editor and
+# the dangling-ref list found nothing to work on. The lesson is that this
+# constant is only meaningful inside a process that has loaded the .env, which
+# is why the helpers below take a path rather than trusting an import-time one.
 BRAIN_DB_PATH = Path(config.BRAIN_DB_PATH)
 
 
@@ -1070,6 +1077,25 @@ BRAIN_TEMPLATE = (
         position: sticky; top: 0; z-index: 5;
     }
     .sleep-bar strong { font-size: var(--fs-small); }
+    /* The graph stays mounted; the unified panel slides over it, so the
+       relationship between what is on screen and what the counters say is
+       never broken. */
+    #brain-inspect {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        overflow-y: auto;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        background: rgba(20, 20, 24, 0.92);
+        -webkit-backdrop-filter: blur(6px);
+        backdrop-filter: blur(6px);
+        display: none;
+    }
+    #brain-inspect.is-active { display: block; }
+    .brain-sub {
+        font-size: 1rem; margin: 1.5rem 0 .5rem; color: var(--accent);
+    }
+    .brain-note { color: var(--muted); font-size: .875rem; margin: 0 0 .75rem; }
     @media (prefers-reduced-transparency: reduce) {
         .sleep-bar { background: var(--surface);
                      -webkit-backdrop-filter: none; backdrop-filter: none; }
@@ -1096,16 +1122,10 @@ BRAIN_TEMPLATE = (
       <button type="button" class="brain-tab is-active" data-tab="graph" role="tab" aria-selected="true">
         {% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}
       </button>
-      <button type="button" class="brain-tab" data-tab="summary" role="tab" aria-selected="false">
-        {% if lang == 'en' %}Summary{% else %}Resumo{% endif %}
-      </button>
-      <button type="button" class="brain-tab" data-tab="rag" role="tab" aria-selected="false">RAG</button>
-      <button type="button" class="brain-tab" data-tab="fly" role="tab" aria-selected="false">FlyBrain</button>
-      <button type="button" class="brain-tab" data-tab="mem" role="tab" aria-selected="false">
-        {% if lang == 'en' %}Memory{% else %}Memória{% endif %}
-      </button>
-      <button type="button" class="brain-tab" data-tab="prob" role="tab" aria-selected="false">
-        {% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}
+      <button type="button" class="brain-tab" id="brain-inspect-toggle"
+              aria-expanded="false" aria-controls="brain-inspect"
+              role="button">
+        {% if lang == 'en' %}Everything{% else %}Tudo{% endif %}
         {% if stats.gmif_total_gaps or stats.unresolved_edges %}
         <span class="badge">{{ stats.gmif_total_gaps + stats.unresolved_edges }}</span>
         {% endif %}
@@ -1155,114 +1175,94 @@ BRAIN_TEMPLATE = (
                 loading="lazy"></iframe>
       </section>
 
-      <section class="brain-panel" data-panel="summary" role="tabpanel">
-  <div class="grid grid-stats" style="margin-bottom:1.5rem;">
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Memories{% else %}Memórias{% endif %}</span>
-      <span class="stat-value">{{ stats.memories or 0 }}</span>
-    </div>
-
-    <button data-sleep class="btn btn--primary" style="white-space:nowrap;"
-            onclick="triggerSleep()">
-      🌙 {% if lang == 'en' %}Sleep & Dream{% else %}Dormir e Sonhar{% endif %}
-    </button>
-  </div>
-        <div class="brain-cards">
-          <div class="card">
-            <h3 class="brain-title">RAG</h3>
-            <div class="brain-kv"><span>{% if lang == 'en' %}Chunks{% else %}Chunks{% endif %}</span><b>{{ chunks|length }}</b></div>
-            <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
-          </div>
-          <div class="card">
-            <h3 class="brain-title">FlyBrain</h3>
-            {% if flybrain and flybrain.steps is defined %}
-            <div class="brain-kv"><span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b></div>
-            <div class="brain-kv"><span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ flybrain.affinity if flybrain.affinity is defined else '—' }}</b></div>
-            {% else %}
-            <p class="brain-empty">{% if lang == 'en' %}No reinforcement yet.{% else %}Sem reforço ainda.{% endif %}</p>
-            {% endif %}
-            <a class="brain-link" href="/admin/flybrain">{% if lang == 'en' %}Manage{% else %}Gerir{% endif %} →</a>
-          </div>
-          <div class="card">
-            <h3 class="brain-title">{% if lang == 'en' %}Memory{% else %}Memória{% endif %}</h3>
-            <div class="brain-kv"><span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memory_rows if memory_rows is defined else '—' }}</b></div>
-            {% if topic and topic.current_topic %}
-            <div class="brain-kv"><span>{% if lang == 'en' %}Topic{% else %}Tópico{% endif %}</span><b>{{ topic.current_topic }}</b></div>
-            {% endif %}
-            <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
-          </div>
-          <div class="card">
-            <h3 class="brain-title">{% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}</h3>
-            <div class="brain-kv"><span>{% if lang == 'en' %}GMIF gaps{% else %}Lacunas GMIF{% endif %}</span><b>{{ stats.gmif_total_gaps }}</b></div>
-            <div class="brain-kv"><span>{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span><b>{{ stats.unresolved_edges }}</b></div>
-            <button class="brain-tab brain-jump" data-jump="prob">{% if lang == 'en' %}Inspect{% else %}Inspeccionar{% endif %} →</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="brain-panel" data-panel="rag" role="tabpanel">
+      <section class="brain-panel" id="brain-inspect" data-panel="inspect"
+               aria-label="Tudo">
         <div class="brain-head">
-          <h2 class="brain-title">RAG</h2>
-          <a class="brain-link" href="/admin/rag">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
-        </div>
-        <p class="brain-note">{% if lang == 'en' %}{{ chunks|length }} most recent retrievable chunks.
-          {% else %}{{ chunks|length }} chunks recuperáveis mais recentes.{% endif %}</p>
-        <ul class="brain-list">
-          {% for c in chunks[:20] %}
-          <li class="brain-item">
-            <span class="brain-item-id">#{{ c.id }}</span>
-            <span class="brain-item-text">{{ (c.summary or '')[:160] }}</span>
-            {% if c.tags %}<span class="badge">{% for tg in c.tags[:3] %}{{ tg }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
-          </li>
-          {% else %}
-          <li class="brain-empty">{% if lang == 'en' %}No retrievable chunks parsed yet.{% else %}Ainda não há chunks parseados.{% endif %}</li>
-          {% endfor %}
-        </ul>
-      </section>
-
-      <section class="brain-panel" data-panel="fly" role="tabpanel">
-        <div class="brain-head">
-          <h2 class="brain-title">FlyBrain</h2>
-          <a class="brain-link" href="/admin/flybrain">{% if lang == 'en' %}Manage{% else %}Gerir{% endif %} →</a>
-        </div>
-        {% if flybrain and flybrain.steps is defined %}
-        <div class="brain-kv"><span>{% if lang == 'en' %}Steps{% else %}Passos{% endif %}</span><b>{{ flybrain.steps }}</b></div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Affinity{% else %}Afinidade{% endif %}</span><b>{{ flybrain.affinity if flybrain.affinity is defined else '—' }}</b></div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Octopamine{% else %}Octopamina{% endif %}</span><b>{{ flybrain.octopamine if flybrain.octopamine is defined else '—' }}</b></div>
-        <p class="brain-note">{% if lang == 'en' %}Real reinforcement state read from fly_brain.{% else %}Estado real de reforço lido de fly_brain.{% endif %}</p>
-        {% else %}
-        <p class="brain-empty">{% if lang == 'en' %}No reinforcement recorded yet. Feedback teaches the graph.{% else %}Ainda sem reforço registado. O feedback ensina o grafo.{% endif %}</p>
-        {% endif %}
-      </section>
-
-      <section class="brain-panel" data-panel="mem" role="tabpanel">
-        <div class="brain-head">
-          <h2 class="brain-title">{% if lang == 'en' %}Memory{% else %}Memória{% endif %}</h2>
-          <a class="brain-link" href="/admin/memory">{% if lang == 'en' %}All{% else %}Todos{% endif %} →</a>
-        </div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Rows read{% else %}Linhas lidas{% endif %}</span><b>{{ memory_rows if memory_rows is defined else '—' }}</b></div>
-        {% if topic and topic.current_topic %}
-        <div class="brain-kv"><span>{% if lang == 'en' %}Current topic{% else %}Tópico atual{% endif %}</span><b>{{ topic.current_topic }}</b></div>
-        {% endif %}
-        <p class="brain-note">{% if lang == 'en' %}Sampled from the live brain.db.{% else %}Amostrado do brain.db real.{% endif %}</p>
-      </section>
-
-      <section class="brain-panel" data-panel="prob" role="tabpanel">
-        <div class="brain-head">
-          <h2 class="brain-title">{% if lang == 'en' %}Pending issues{% else %}Problemas pendentes{% endif %}</h2>
-          {% if stats.gmif_total_gaps or stats.unresolved_edges %}
-          <button data-sleep class="btn btn--primary" style="white-space:nowrap;" onclick="triggerSleep()">
+          <h2 class="brain-title">{% if lang == 'en' %}Everything{% else %}Tudo{% endif %}</h2>
+          <button data-sleep class="btn btn--primary" style="white-space:nowrap;"
+                  onclick="triggerSleep()">
             🌙 {% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}
           </button>
-          {% endif %}
         </div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}GMIF gaps{% else %}Lacunas GMIF{% endif %}</span><b>{{ stats.gmif_total_gaps }}</b></div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Weak edges{% else %}Arestas fracas{% endif %}</span><b>{{ stats.gmif_weak_edges }}</b></div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Causal gaps{% else %}Lacunas causais{% endif %}</span><b>{{ stats.gmif_causal_gaps }}</b></div>
-        <div class="brain-kv"><span>{% if lang == 'en' %}Unresolved refs{% else %}Refs por resolver{% endif %}</span><b>{{ stats.unresolved_edges }}</b></div>
-        {% if not (stats.gmif_total_gaps or stats.unresolved_edges) %}
-        <p class="brain-empty">{% if lang == 'en' %}Nothing pending.{% else %}Nada pendente.{% endif %}</p>
+
+        <h3 class="brain-sub">{% if lang == 'en' %}Unresolved references{% else %}Referências por resolver{% endif %}</h3>
+        <p class="brain-note">
+          {% if lang == 'en' %}An edge pointing at a node that does not exist.
+            Choose where each end belongs:{% else %}Uma aresta aponta para um nó que
+            não existe. Diz para onde cada extremidade deve ligar:{% endif %}
+        </p>
+        {% if refs %}
+        <table style="width:100%; border-collapse:collapse; margin-bottom:1.5rem;">
+          {% for r in refs %}
+          <tr>
+            <td style="padding: .4rem; font-family: monospace; font-size: .8rem;">
+              {{ r['label'] }} &mdash; {{ r['side'] }}
+            </td>
+            <td style="padding: .4rem;">
+              <select data-ref="{{ r['edge_key'] }}"
+                      data-side="{{ r['side'] }}"
+                      style="width: 100%; min-width: 12rem;">
+                <option value="">{% if lang == 'en' %}-- pick a node --{% else %}-- escolher nó --{% endif %}</option>
+                {% for n in nodes %}
+                <option value="{{ n.label }}">{{ n.label }}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td style="padding: .4rem;">
+              <select data-ref-edge="{{ r['edge_key'] }}" data-ref-side="{{ r['side'] }}"
+                      style="width: 7rem;">
+                <option value="relink">{% if lang == 'en' %}relink{% else %}relacionar{% endif %}</option>
+                <option value="promote">{% if lang == 'en' %}promote{% else %}promover{% endif %}</option>
+              </select>
+              <button class="btn" data-resolve-btn>{% if lang == 'en' %}Apply{% else %}Aplicar{% endif %}</button>
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+        <p class="brain-note" id="ref-status" role="status"></p>
+        {% else %}
+        <p class="brain-note" style="color: var(--success);">
+          {% if lang == 'en' %}No unresolved references.{% else %}Nenhuma referência por resolver.{% endif %}
+        </p>
         {% endif %}
+
+        <h3 class="brain-sub">{% if lang == 'en' %}Knowledge{% else %}Conhecimento{% endif %}</h3>
+        <div class="brain-cards">
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
+            <span class="stat-value">{{ stats.concepts or 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}Links{% else %}Ligações{% endif %}</span>
+            <span class="stat-value">{{ stats.links or 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}RAG chunks{% else %}Chunks RAG{% endif %}</span>
+            <span class="stat-value">{{ stats.chunks or 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}FlyBrain steps{% else %}Passos FlyBrain{% endif %}</span>
+            <span class="stat-value">{{ flybrain.steps if flybrain else 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}GMIF gaps{% else %}Lacunas GMIF{% endif %}</span>
+            <span class="stat-value">{{ stats.gmif_weak_edges or 0 }}</span>
+          </div>
+          <div class="card stat">
+            <span class="stat-label">{% if lang == 'en' %}Unresolved{% else %}Por resolver{% endif %}</span>
+            <span class="stat-value">{{ stats.unresolved_edges or 0 }}</span>
+          </div>
+        </div>
+
+        <h3 class="brain-sub">{% if lang == 'en' %}Recent memories{% else %}Memórias recentes{% endif %}</h3>
+        <ul class="brain-list">
+          {% for m in memories[:40] %}
+          <li class="brain-item">
+            <span>#{{ m.id }}</span>
+            <span class="muted">{{ (m.text or '')[:150] }}</span>
+          </li>
+          {% endfor %}
+        </ul>
       </section>
     </div>
   </div>
@@ -1366,6 +1366,77 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
     b.addEventListener('click', () => select(b.dataset.jump)));
   if (!document.querySelector('.brain-tab.is-active') && tabs.length) select(tabs[0].dataset.tab);
 })();
+    // One panel, opened from the subnav. The graph stays mounted underneath --
+    // the five old tabs each replaced it, and the whole point of the hub is
+    // that the graph is the page and the rest slides over it.
+    (function () {
+      const toggle = document.getElementById('brain-inspect-toggle');
+      const panel = document.getElementById('brain-inspect');
+      if (!toggle || !panel) return;
+      const graph = document.querySelector('.brain-panel[data-panel="graph"]');
+      function setOpen(open) {
+        panel.classList.toggle('is-active', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (graph) graph.classList.toggle('is-under', open);
+        if (open) toggle.classList.add('is-active');
+        else toggle.classList.remove('is-active');
+      }
+      setOpen(false);
+      toggle.addEventListener('click', () =>
+        setOpen(!panel.classList.contains('is-active')));
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') setOpen(false);
+      });
+    })();
+
+    // Resolving a dangling endpoint. /api/graph/resolve takes side as
+    // mandatory: an edge can dangle on both ends, and resolving the wrong one
+    // is a silent no-op on the number the owner is watching.
+    (function () {
+      const status = document.getElementById('ref-status');
+      document.querySelectorAll('[data-resolve-btn]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const row = btn.closest('tr');
+          const target = row.querySelector('[data-ref]');
+          const mode = row.querySelector('[data-ref-mode]');
+          if (!target || !target.value) {
+            if (status) status.textContent =
+              'Escolhe um nó para esta extremidade.';
+            return;
+          }
+          const edgeKey = mode.dataset.refEdge;
+          const side = mode.dataset.refSide;
+          btn.disabled = true;
+          try {
+            const r = await fetch('/api/graph/resolve', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                edge_key: edgeKey, side: side,
+                action: mode.value,
+                target_label: target.value,
+                actor: 'admin',
+              }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (r.ok) {
+              if (status) status.textContent =
+                'Resolvido. A página vai recarregar.';
+              setTimeout(() => location.reload(), 700);
+            } else {
+              if (status) status.textContent =
+                (data && (data.error || data.message)) ||
+                ('Falhou: HTTP ' + r.status);
+              btn.disabled = false;
+            }
+          } catch (e) {
+            if (status) status.textContent = 'Erro de rede: ' + e;
+            btn.disabled = false;
+          }
+        });
+      });
+    })();
+
 </script>
 
     <section id="corrigir" style="background: var(--surface); border: 1px solid var(--border);
@@ -2740,6 +2811,44 @@ def brain_sleep_status():
     return jsonify(payload)
 
 
+def _dangling_refs() -> list[dict]:
+    """Every edge endpoint that points at a node which does not exist.
+
+    /api/graph/resolve exists and is deliberately not wired into the sleep
+    cycle: relinking versus promoting is a judgement only the owner can make.
+    It had no interface at all, so the count was visible on /admin/brain and
+    the fix was not. These rows are what the unified panel offers to resolve.
+    """
+    from src.brain import reconcile
+
+    try:
+        found = reconcile.find_dangling(str(BRAIN_DB_PATH))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not list dangling refs: %s", exc)
+        return []
+    out = []
+    for f in found:
+        out.append({
+            "edge_key": f.get("edge_key", ""),
+            "side": f.get("side", ""),
+            "label": str(f.get("label") or f.get("edge_key", ""))[:120],
+        })
+    return out
+
+
+def _resolve_candidates() -> list[dict]:
+    """Existing nodes, as targets for a relink or a promote."""
+    conn = sqlite3.connect(BRAIN_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT node_key, label FROM memory_graph WHERE node_type = 'node'"
+            " ORDER BY affinity DESC LIMIT 200")]
+    finally:
+        conn.close()
+
+
+
 @admin_bp.route("/brain", methods=["GET", "POST"])
 @login_required
 def brain_hub():
@@ -2833,7 +2942,8 @@ def brain_hub():
     role = _current_user_data()["role"] if _current_user_data() else "user"
     return render_template_string(
         BRAIN_TEMPLATE,
-        nodes=_knowledge_nodes(),
+        refs=_dangling_refs(),
+        nodes=_resolve_candidates(),
         memories=_knowledge_memories(60),
         selected_text=selected_text_brain,
         chunks=chunks,
@@ -2848,7 +2958,7 @@ def brain_hub():
     )
 
 
-@admin_bp.route("/memory")
+@admin_bp.route("/memory", methods=["GET", "POST"])
 @login_required
 def memory_viewer():
     """View pHantasma memory."""
@@ -2879,9 +2989,10 @@ def memory_viewer():
         return render_template_string(
             MEMORY_TEMPLATE,
             graph=[dict(g) for g in graph],
+        nodes=_knowledge_nodes(),
+        selected_id=sel,
+        selected_text=selected_text,
             topic=dict(topic) if topic else None,
-            selected_id=sel,
-            selected_text=selected_text,
             user=_current_user(),
             subnav=_build_subnav("admin.memory_viewer"),
             nav_menu=nav_menu,

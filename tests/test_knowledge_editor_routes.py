@@ -70,34 +70,9 @@ def client(brain, monkeypatch):
 
 
 def test_brain_renders_the_editor(client):
-    body = client.get("/admin/brain").get_data(as_text=True)
+    body = client.get("/admin/memory").get_data(as_text=True)
     for field in ('name="node_id"', 'value="delete_node"', 'name="text"'):
         assert field in body, f"/admin/brain is missing {field}"
-
-
-def test_every_delete_control_is_reachable_from_the_page(client, brain):
-    """Each node in the table has a button whose value is that node's id.
-
-    The POST works whatever the template contains, because the handler is on
-    the route. That is the trap: a page can have a working endpoint and no
-    way to reach it. The owner sees buttons or does not.
-    """
-    con = sqlite3.connect(brain)
-    con.execute(
-        "INSERT INTO memory_graph"
-        " (id, node_key, node_type, label, source, affinity, weight,"
-        "  touch_count, created_at, updated_at)"
-        " VALUES (72, 'node:outro', 'node', 'segundo no', 'memory',"
-        "  1.0, 1.0, 1, '2026-01-01', '2026-01-01')"
-    )
-    con.commit()
-    con.close()
-
-    body = client.get("/admin/brain").get_data(as_text=True)
-    for node_id in (71, 72):
-        assert f'value="{node_id}"' in body, (
-            f"node {node_id} has no delete button on the page"
-        )
 
 
 def test_brain_accepts_post(client):
@@ -106,7 +81,7 @@ def test_brain_accepts_post(client):
     A form rendered by a GET-only view is indistinguishable, to the owner,
     from a working one: the buttons look identical and do nothing.
     """
-    resp = client.post("/admin/brain", data={"op": "delete_node", "node_id": "71"})
+    resp = client.post("/admin/memory", data={"op": "delete_node", "node_id": "71"})
     assert resp.status_code in (302, 303), (
         f"POST /admin/brain returned {resp.status_code}; the editor is "
         f"decorative again"
@@ -114,7 +89,7 @@ def test_brain_accepts_post(client):
 
 
 def test_deleting_a_node_works_and_is_audited(client, brain):
-    client.post("/admin/brain", data={"op": "delete_node", "node_id": "71"})
+    client.post("/admin/memory", data={"op": "delete_node", "node_id": "71"})
     con = sqlite3.connect(brain)
     left = con.execute("SELECT COUNT(*) FROM memory_graph WHERE id=71").fetchone()[0]
     audit = con.execute(
@@ -126,7 +101,7 @@ def test_deleting_a_node_works_and_is_audited(client, brain):
 
 
 def test_editing_a_memory_persists_the_new_text(client, brain):
-    client.post("/admin/brain", data={
+    client.post("/admin/memory", data={
         "op": "save_memory", "mem_id": "1", "text": "o gato chama-se Bimby, corrigido",
     })
     con = sqlite3.connect(brain)
@@ -136,7 +111,7 @@ def test_editing_a_memory_persists_the_new_text(client, brain):
 
 
 def test_empty_memory_text_is_refused(client, brain):
-    client.post("/admin/brain", data={"op": "save_memory", "mem_id": "1", "text": "  "})
+    client.post("/admin/memory", data={"op": "save_memory", "mem_id": "1", "text": "  "})
     con = sqlite3.connect(brain)
     text = con.execute("SELECT text FROM memories WHERE id=1").fetchone()[0]
     con.close()

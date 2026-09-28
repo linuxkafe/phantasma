@@ -86,10 +86,32 @@ def test_hub_shows_the_memory_it_claims_to_unify(get_hub):
     )
 
 
-def test_hub_shows_the_node_and_its_affinity(get_hub):
+def test_the_five_tabs_are_one(get_hub):
+    """Summary, RAG, FlyBrain, Memory and Pending issues are now one panel
+    opened over the graph. Each tab replaced the graph, and none of them held
+    more than a few hundred characters of counters."""
     body = get_hub()
-    assert "no marcador do hub" in body
-    assert "3.0" in body, "the node's affinity is not shown"
+    for gone in ('data-tab="summary"', 'data-tab="rag"', 'data-tab="fly"',
+                 'data-tab="mem"', 'data-tab="prob"'):
+        assert gone not in body, f"{gone} is back: the hub is fragmented again"
+    assert 'id="brain-inspect-toggle"' in body, "no single panel to open"
+    assert 'id="brain-inspect"' in body, "the unified panel is missing"
+
+
+def test_the_unified_panel_offers_the_dangling_refs(get_hub):
+    """The relink interface for /api/graph/resolve, which existed as an
+    endpoint with no interface at all: the count was visible, the fix was
+    not."""
+    body = get_hub()
+    assert "data-ref-mode" in body or "data-ref=" in body, (
+        "no control to resolve an unresolved reference"
+    )
+    assert "action" in body, "the resolve form is missing"
+
+
+def test_nodes_are_offered_as_resolve_targets(get_hub):
+    body = get_hub()
+    assert "<option" in body, "no node offered as a relink target"
 
 
 def test_hub_shows_the_topic(get_hub):
