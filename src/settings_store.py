@@ -27,6 +27,7 @@ from typing import Any, Optional
 import config
 
 _LOCK = threading.Lock()
+logger = logging.getLogger("phantasma.settings")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -192,6 +193,11 @@ def get_reaction_weights() -> dict[str, float]:
     stored = get_json(REACTION_WEIGHTS_KEY, {}) or {}
     if isinstance(stored, dict):
         for emoji, value in stored.items():
+            # Filter on read as well as on write. Rows written before the
+            # write-side check existed are still in the owner's database, and
+            # the caller of this function is what renders the page.
+            if str(emoji) not in DEFAULT_REACTION_WEIGHTS:
+                continue
             try:
                 weights[str(emoji)] = float(value)
             except (TypeError, ValueError):
@@ -201,11 +207,31 @@ def get_reaction_weights() -> dict[str, float]:
     return weights
 
 
-def set_reaction_weights(weights: dict[str, float], updated_by: Optional[str] = None) -> None:
+def set_reaction_weights(
+    weights: dict[str, float], updated_by: Optional[str] = None
+) -> None:
+    """Store reaction weights, keeping only keys that are actual emojis.
+
+    This saved {"0": 1.0, "1": -0.5, ... "11": 0.5} and /admin/config rendered
+    eighteen weight rows: six emojis and twelve digits. The digits came from
+    another form on the same route whose inputs were named w_0..w_11, and the
+    collector -- {k[2:]: v for k in request.form if k.startswith("w_")} --
+    picked them up because the route accepts every POST. A weight is keyed by
+    an emoji, so a key that is not one is a programming error, not a setting.
+    """
     clean: dict[str, float] = {}
+    rejected: list[str] = []
     for emoji, value in weights.items():
+        key = str(emoji)
+        if key not in DEFAULT_REACTION_WEIGHTS:
+            rejected.append(key)
+            continue
         try:
-            clean[str(emoji)] = float(value)
+            clean[key] = float(value)
         except (TypeError, ValueError):
-            raise ValueError(f"Peso inválido para {emoji!r}: {value!r}")
+            raise ValueError(f"Peso invalido para {emoji!r}: {value!r}")
+    if rejected:
+        logger.warning("Ignoring non-emoji reaction weight keys: %s", rejected[:12])
+    if not clean:
+        raise ValueError("Nenhum peso de reaccao valido foi fornecido.")
     set_json(REACTION_WEIGHTS_KEY, clean, updated_by=updated_by)

@@ -41,6 +41,7 @@ from flask import (
 
 import config
 from src.settings_store import (
+    DEFAULT_REACTION_WEIGHTS,
     REACTION_WEIGHTS_KEY,
     clear_setting,
     get_persona,
@@ -910,7 +911,7 @@ CONFIG_TEMPLATE = (
         Positivo ensina, negativo afasta.
       </p>
       <table style="width: 100%; border-collapse: collapse;">
-        {% for emoji, weight in weights.items() %}
+        {% for emoji, weight in weights.items() if emoji in default_weights %}
         <tr>
           <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
           <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
@@ -1116,11 +1117,9 @@ BRAIN_TEMPLATE = (
     {% endif %}
   </div>
 
-  {% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %}
-
-  <div class="sleep-bar" style="margin-bottom:1.5rem; padding:var(--sp-3); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;">
+    <div class="sleep-bar" id="sonhar" style="margin-bottom:1.5rem; padding:var(--sp-3); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;">
     <div style="flex:1; min-width:200px;">
-      <strong>{% if lang == 'en' %}Pending issues detected{% else %}Problemas pendentes detectados{% endif %}</strong>
+      <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>{% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %} &mdash; {% if lang == 'en' %}pending issues{% else %}problemas pendentes{% endif %}{% endif %}</strong>
       <span class="muted" style="margin-left:var(--sp-2); font-size:var(--fs-small);">
         {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
         {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
@@ -1132,7 +1131,6 @@ BRAIN_TEMPLATE = (
       🌙 {% if lang == 'en' %}Sleep & Dream{% else %}Dormir e Sonhar{% endif %}
     </button>
   </div>
-  {% endif %}
         <div class="brain-cards">
           <div class="card">
             <h3 class="brain-title">RAG</h3>
@@ -1334,7 +1332,7 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
 })();
 </script>
 
-    <section style="background: var(--surface); border: 1px solid var(--border);
+    <section id="corrigir" style="background: var(--surface); border: 1px solid var(--border);
       border-radius: 8px; padding: 1.5rem; margin-top: 2.5rem;">
       <h2 style="color: var(--accent); font-size: 1.25rem; margin: 0 0 .5rem;">
         Corrigir o que ele acredita</h2>
@@ -1359,6 +1357,11 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
           {% endfor %}
         </table>
       </form>
+      <p style="color: var(--muted); font-size: .8rem; margin: 1.5rem 0 .5rem;">
+        <a href="#corrigir">↓ Ir para a correcção do conhecimento</a>
+        &nbsp;·&nbsp;
+        <a href="#sonhar">↑ Dormir e Sonhar</a>
+      </p>
       <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Memórias</h3>
       <form method="post">
         <input type="hidden" name="op" value="save_memory">
@@ -2053,7 +2056,7 @@ _PERSONA_TEMPLATE = (
       Positivo ensina, negativo afasta. Vale no chat e no Discord.
     </p>
     <table style="width: 100%; border-collapse: collapse;">
-      {% for emoji, weight in weights.items() %}
+      {% for emoji, weight in weights.items() if emoji in default_weights %}
       <tr>
         <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
         <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
@@ -2109,6 +2112,7 @@ def persona_editor():
         persona=get_persona(),
         persona_overridden=persona_is_overridden(),
         weights=get_reaction_weights(),
+        default_weights=DEFAULT_REACTION_WEIGHTS,
     )
 
 
@@ -2433,6 +2437,7 @@ def config_manager():
         persona=get_persona(),
         persona_overridden=persona_is_overridden(),
         weights=get_reaction_weights(),
+        default_weights=DEFAULT_REACTION_WEIGHTS,
         configs=configs,
         categories=categories,
         user=_current_user(),

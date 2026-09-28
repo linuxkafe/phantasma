@@ -129,3 +129,43 @@ def test_corrupt_weight_row_does_not_silence_the_others():
 def test_invalid_weight_is_rejected_loudly():
     with pytest.raises(ValueError):
         settings_store.set_reaction_weights({"x": "not-a-number"})
+
+
+# --- the eighteen-row regression -------------------------------------------
+
+def test_only_known_emoji_are_ever_stored():
+    """/admin/config rendered eighteen weight rows: six emojis and the digits
+    0..11. Another form on the same route named its inputs w_0..w_11 and the
+    collector -- {k[2:]: v for k in request.form if k.startswith("w_")} --
+    swept them up. A weight is keyed by an emoji; a digit is a mistake."""
+    weights = settings_store.get_reaction_weights()
+    weights.update({"0": 1.0, "11": 0.5})
+    settings_store.set_reaction_weights(weights, updated_by="tester")
+    stored = settings_store.get_reaction_weights()
+    assert not [k for k in stored if k not in
+                settings_store.DEFAULT_REACTION_WEIGHTS], (
+        f"non-emoji keys survived: "
+        f"{[k for k in stored if k not in settings_store.DEFAULT_REACTION_WEIGHTS]}"
+    )
+    assert len(stored) == len(settings_store.DEFAULT_REACTION_WEIGHTS)
+
+
+def test_a_form_with_no_valid_emojis_is_refused():
+    """Silently storing nothing would leave the owner with a form that
+    appears to save and does not."""
+    with pytest.raises(ValueError):
+        settings_store.set_reaction_weights({"0": 1.0, "1": 2.0})
+
+
+def test_corrupt_stored_rows_never_reach_the_admin_page():
+    """Already-saved bad keys must not render even before they are cleared:
+    the filter belongs at both ends, the write and the read."""
+    settings_store.set_setting(
+        settings_store.REACTION_WEIGHTS_KEY,
+        '{"0": 1.0, "1": -0.5, "\\ud83d\\udc4d": 2.0}',
+    )
+    weights = settings_store.get_reaction_weights()
+    assert "0" not in weights and "1" not in weights, (
+        "digit keys in the store reached the caller that renders the page"
+    )
+    assert weights["\U0001F44D"] == 2.0, "a valid owner-set weight was lost"
