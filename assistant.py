@@ -38,7 +38,6 @@ from src.pipeline.audio import (
     VADProcessor,
 )
 from src.pipeline.stt import transcribe as stt_transcribe
-from src.pipeline.tts import synthesize as tts_synthesize
 from src.pipeline.utils import Result, log_stage, logger
 from src.settings_store import get_persona
 from tools import search_with_searxng
@@ -679,7 +678,39 @@ class PhantasmaPipeline:
             return raw
         return "\n".join(lines)
 
+    def _speak(self, text: str, use_cache: bool = True):
+        """Speak text, going through the TTS cache unless told not to.
+
+        play_tts reads the cache first and writes the result back; this
+        wraps it in the Result shape the pipeline logs, so the cache and the
+        direct synthesizer are indistinguishable to the caller.
+        """
+        from audio_utils import play_tts
+
+        try:
+            play_tts(text, use_cache=use_cache)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TTS failed: %s", exc)
+            return Result.fail(str(exc))
+        return Result.ok(None)
+
     def _respond_with_llm(self, text: str) -> Optional[str]:
+        """Answer through SearXNG + the LLM, and mark the answer as web-derived.
+
+        The flag is cleared in a finally: latched on, it would make every
+        later answer uncacheable, which is the opposite of its purpose.
+        """
+        self._web_derived = True
+        try:
+            return self._respond_with_llm_body(text)
+        finally:
+            self._web_derived = False
+
+    def _respond_with_llm_body(self, text: str) -> Optional[str]:
+        # This path goes through SearXNG before the LLM, so its answers are not
+        # the owner's own words and are not worth keeping. Set here rather
+        # than inferred by the caller, because the caller only sees a string
+        # and cannot tell where it came from.
         """LLM fallback for text that no skill handled.
 
         Full fallback chain: Cache -> RAG + SearXNG -> Ollama with multiple hosts.
@@ -902,8 +933,9 @@ class PhantasmaPipeline:
         skill_response = self._execute_with_paused_shared_audio(text)
         if skill_response is not None:
             logger.info(f"Skill '{text}' handled: {skill_response}")
-            # Speak skill response via TTS
-            tts_result = tts_synthesize(skill_response)
+            # Speak skill response via TTS, served from the cache when the
+            # same answer has been spoken before.
+            tts_result = self._speak(skill_response)
             if tts_result.success:
                 audio_data, sample_rate = tts_result.data
                 self.audio_playback.play(audio_data)
@@ -915,8 +947,11 @@ class PhantasmaPipeline:
         if response is None:
             return
 
-        # TTS
-        tts_result = tts_synthesize(response)
+        # TTS. The cache is read for every answer; it is written only when the
+        # answer did not come from SearXNG, so the store fills with the
+        # owner's own exchanges and not with retrieved web text.
+        tts_result = self._speak(response, use_cache=not getattr(
+            self, "_web_derived", False))
         log_stage(logger, "tts", tts_result)
         if not tts_result.success:
             logger.error(f"TTS failed: {tts_result.error}")
