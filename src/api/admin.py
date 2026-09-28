@@ -1066,6 +1066,11 @@ BRAIN_TEMPLATE = (
     /* Translucent rather than a solid slab: the bar reports on the brain,
        and the brain stays visible through it. Falls back to a plain
        translucent background where color-mix is unsupported. */
+    .brain-item-link {
+      display: flex; gap: var(--sp-2); flex: 1;
+      text-decoration: none; color: inherit; cursor: pointer;
+    }
+    .brain-item-link:hover .muted { color: var(--accent); }
     .sleep-bar {
         display: flex; align-items: center; gap: var(--sp-3);
         margin: 0 0 var(--sp-4); padding: var(--sp-2) var(--sp-3);
@@ -1240,11 +1245,16 @@ BRAIN_TEMPLATE = (
         </div>
 
         <h3 class="brain-sub">{% if lang == 'en' %}Recent memories{% else %}Memórias recentes{% endif %}</h3>
+        <a class="brain-link brain-more" href="/admin/brain/knowledge">
+          {% if lang == 'en' %}Edit or delete{% else %}Editar ou apagar{% endif %} ↗
+        </a>
         <ul class="brain-list">
           {% for m in memories[:40] %}
           <li class="brain-item">
-            <span>#{{ m.id }}</span>
-            <span class="muted">{{ (m.text or '')[:150] }}</span>
+            <a class="brain-item-link" href="/admin/brain/knowledge?mem_id={{ m.id }}">
+              <span>#{{ m.id }}</span>
+              <span class="muted">{{ (m.text or '')[:150] }}</span>
+            </a>
           </li>
           {% endfor %}
         </ul>
