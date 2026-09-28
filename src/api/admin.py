@@ -1055,6 +1055,29 @@ BRAIN_TEMPLATE = (
        rather than destinations -- on a laptop they were squeezed. Nothing is
        dropped: every counter and list below is the same real payload. -->
   <div class="brain-hub">
+    <style>
+    /* Translucent rather than a solid slab: the bar reports on the brain,
+       and the brain stays visible through it. Falls back to a plain
+       translucent background where color-mix is unsupported. */
+    .sleep-bar {
+        display: flex; align-items: center; gap: var(--sp-3);
+        margin: 0 0 var(--sp-4); padding: var(--sp-2) var(--sp-3);
+        background: color-mix(in srgb, var(--surface) 55%, transparent);
+        background: rgba(127,127,127,.14);
+        -webkit-backdrop-filter: blur(8px);
+        backdrop-filter: blur(8px);
+        border: 1px solid var(--border); border-radius: 8px;
+        position: sticky; top: 0; z-index: 5;
+    }
+    .sleep-bar strong { font-size: var(--fs-small); }
+    @media (prefers-reduced-transparency: reduce) {
+        .sleep-bar { background: var(--surface);
+                     -webkit-backdrop-filter: none; backdrop-filter: none; }
+    }
+    @media (max-width: 640px) {
+        .sleep-bar { flex-wrap: wrap; position: static; }
+    }
+    </style>
     <nav class="brain-tabs" role="tablist">
       <span class="brain-titlebar">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</span>
       <button type="button" class="brain-tab is-active" data-tab="graph" role="tab" aria-selected="true">
@@ -1078,6 +1101,15 @@ BRAIN_TEMPLATE = (
         {% if lang == 'en' %}Full screen{% else %}Ecrã inteiro{% endif %} ↗
       </a>
     </nav>
+    <div class="sleep-bar" id="sonhar">
+    <div style="flex:1; min-width:200px;">
+      <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>{% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %} &mdash; {% if lang == 'en' %}pending issues{% else %}problemas pendentes{% endif %}{% endif %}</strong>
+      <span class="muted" style="margin-left:var(--sp-2); font-size:var(--fs-small);">
+        {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
+        {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
+        {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
+      </span>
+    </div>
 
     <div class="brain-stage">
       <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
@@ -1117,15 +1149,6 @@ BRAIN_TEMPLATE = (
     {% endif %}
   </div>
 
-    <div class="sleep-bar" id="sonhar" style="margin-bottom:1.5rem; padding:var(--sp-3); background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;">
-    <div style="flex:1; min-width:200px;">
-      <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>{% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %} &mdash; {% if lang == 'en' %}pending issues{% else %}problemas pendentes{% endif %}{% endif %}</strong>
-      <span class="muted" style="margin-left:var(--sp-2); font-size:var(--fs-small);">
-        {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
-        {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
-        {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
-      </span>
-    </div>
     <button data-sleep class="btn btn--primary" style="white-space:nowrap;"
             onclick="triggerSleep()">
       🌙 {% if lang == 'en' %}Sleep & Dream{% else %}Dormir e Sonhar{% endif %}

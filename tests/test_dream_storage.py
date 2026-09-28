@@ -198,3 +198,56 @@ def test_a_failing_dream_step_does_not_abort_the_cycle(cycle, monkeypatch):
     dream = body[body.index('_step("dream"'):]
     guarded = dream[:dream.index(")", dream.index("except"))]
     assert "except" in guarded, "the dream step is unguarded"
+
+
+# --- the classifier and the cycle that drives it ---------------------------
+
+def test_classifier_reads_rows_by_name_on_a_plain_connection(tmp_path, monkeypatch):
+    """This raised "TypeError: tuple indices must be integers or slices, not
+    str" on the first edge, so the whole sleep cycle failed in 0.0s and the
+    owner saw "Ciclo terminou com estado: failed".
+
+    The classifier indexed rows by column name while the cycle handed it a
+    bare sqlite3.connect() with no row_factory. __main__ opens one with
+    row_factory = sqlite3.Row, which is why it worked there and nowhere
+    else. A function that reads by name must not depend on how its caller
+    opened the database.
+    """
+    from pathlib import Path as _Path
+
+    from src.pipeline import gmif_classifier as g
+
+    schema = (_Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
+    db = tmp_path / "brain.db"
+    con = sqlite3.connect(db)
+    con.executescript(schema)
+    con.execute(
+        "INSERT INTO memory_graph (node_key, node_type, label, source, target,"
+        " affinity, weight, touch_count, created_at, updated_at)"
+        " VALUES ('edge:a', 'edge', 'A -> B', 'node:a', 'node:b', 0.2, 1.0, 1,"
+        " '2026-01-01', '2026-01-01')"
+    )
+    con.execute(
+        "INSERT INTO memory_graph (node_key, node_type, label, source,"
+        " affinity, weight, touch_count, created_at, updated_at)"
+        " VALUES ('node:a', 'node', 'Assunto A', 'memory', 1.0, 1.0, 1,"
+        " '2026-01-01', '2026-01-01')"
+    )
+    con.commit()
+    con.close()
+
+    # A bare connection: exactly what the sleep cycle passes in.
+    plain = sqlite3.connect(db)
+    assert plain.row_factory is None, "the fixture stopped reproducing it"
+    g.classify_all_edges(plain)
+    g.classify_all_nodes(plain)
+    plain.close()
+
+    # The assertion is the absence of the TypeError, which is what the owner
+    # saw. Whether a given row gets a level depends on the classifier's own
+    # thresholds, which are not what regressed.
+    out = sqlite3.connect(db)
+    out.execute(
+        "SELECT node_key, gmif_level, node_gmif_type FROM memory_graph"
+        " WHERE node_key IN ('edge:a', 'node:a')")
+    out.close()

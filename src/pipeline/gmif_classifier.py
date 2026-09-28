@@ -209,9 +209,39 @@ def classify_node(node_key: str, label: str) -> NodeClassification:
         )
 
 
+class _Row(dict):
+    """A row that also supports index access.
+
+    sqlite3.Row gives one but only when the connection sets it; this keeps
+    name access working for callers that did not, without breaking the
+    positional unpacking elsewhere in this module.
+    """
+
+    def __init__(self, cursor, values):
+        super().__init__(zip([d[0] for d in cursor.description], values))
+        self._values = values
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+    def __iter__(self):
+        return iter(self._values)
+
+
 def apply_gmif_to_edge(conn, edge_id: int) -> bool:
-    """Apply GMIF classification to a specific edge in the database."""
+    """Apply GMIF classification to a specific edge in the database.
+
+    Rows are read by column name, so the cursor has to be one that supports
+    it. The sleep cycle passes a plain sqlite3.connect() and this raised
+    "TypeError: tuple indices must be integers or slices, not str" on the very
+    first edge -- the whole cycle failed in 0.0s. The fix belongs here rather
+    than in each caller: a function that indexes by name should not depend on
+    how its caller opened the database.
+    """
     cur = conn.cursor()
+    cur.row_factory = lambda cursor, row: _Row(cursor, row)
     row = cur.execute(
         "SELECT * FROM memory_graph WHERE id = ? AND node_type = 'edge'", (edge_id,)
     ).fetchone()
@@ -252,6 +282,7 @@ def apply_gmif_to_edge(conn, edge_id: int) -> bool:
 def apply_gmif_to_node(conn, node_id: int) -> bool:
     """Apply GMIF classification to a specific node in the database."""
     cur = conn.cursor()
+    cur.row_factory = lambda cursor, row: _Row(cursor, row)
     row = cur.execute(
         "SELECT * FROM memory_graph WHERE id = ? AND node_type = 'node'", (node_id,)
     ).fetchone()
