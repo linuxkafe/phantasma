@@ -71,3 +71,6 @@ id_ed25519.pub
 # the project's own wakeword models (models/*.onnx) stay tracked.
 models/tts/pt_PT-dii-high.onnx
 models/tts/en_US-glados-medium.onnx
+
+# build artefact: pip install -e regenerates it, never version it
+pHantasma.egg-info/
