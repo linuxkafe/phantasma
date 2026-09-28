@@ -75,6 +75,31 @@ def test_brain_renders_the_editor(client):
         assert field in body, f"/admin/brain is missing {field}"
 
 
+def test_every_delete_control_is_reachable_from_the_page(client, brain):
+    """Each node in the table has a button whose value is that node's id.
+
+    The POST works whatever the template contains, because the handler is on
+    the route. That is the trap: a page can have a working endpoint and no
+    way to reach it. The owner sees buttons or does not.
+    """
+    con = sqlite3.connect(brain)
+    con.execute(
+        "INSERT INTO memory_graph"
+        " (id, node_key, node_type, label, source, affinity, weight,"
+        "  touch_count, created_at, updated_at)"
+        " VALUES (72, 'node:outro', 'node', 'segundo no', 'memory',"
+        "  1.0, 1.0, 1, '2026-01-01', '2026-01-01')"
+    )
+    con.commit()
+    con.close()
+
+    body = client.get("/admin/brain").get_data(as_text=True)
+    for node_id in (71, 72):
+        assert f'value="{node_id}"' in body, (
+            f"node {node_id} has no delete button on the page"
+        )
+
+
 def test_brain_accepts_post(client):
     """The 405 that made the whole editor decorative.
 
