@@ -67,6 +67,32 @@ def _safe_ollama_chat(prompt, system_instruction=""):
 
 # --- Utils de Extração Robusta ---
 
+def _as_memory(text, tags=None, facts=None):
+    """Store one fact with the keyword structure the rest of the RAG expects.
+
+    The dream already asks the model for tags -- the news prompt literally
+    requests {"noticias": [...], "tags": [...]} -- and then threw them away,
+    saving f"Noticia: {fact}". Retrieval matches on keywords with LIKE, so a
+    memory without them is one the RAG cannot find. The worst offenders were
+    the LLM's own "not enough information" replies, stored as knowledge.
+
+    Anything without tags or facts is stored as plain text: inventing tags for
+    a sentence the model refused to tag would be worse than not tagging it.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if not tags and not facts:
+        if len(text) < 12 or "não contém informações" in text.lower():
+            return None
+        return text
+    return json.dumps(
+        {"tags": [str(t) for t in (tags or [])][:8],
+         "facts": [str(f) for f in (facts or [])][:8] or [text[:300]]},
+        ensure_ascii=False,
+    )
+
+
 def _extract_json(text):
     """ Extração robusta de blocos JSON. """
     if not text: return None
@@ -110,7 +136,10 @@ def _consolidate_memories():
 
         if merged and 'memoria_consolidada' in merged:
             cursor.execute(f"DELETE FROM memories WHERE id IN ({','.join(['?']*len(ids_to_purge))})", ids_to_purge)
-            save_to_rag(merged['memoria_consolidada'])
+            mem = _as_memory(merged['memoria_consolidada'],
+                             tags=merged.get('tags'))
+            if mem:
+                save_to_rag(mem)
             conn.commit()
             print("🧠 [Dream] Consolidação terminada.")
     except Exception as e: print(f"❌ Erro Consolidação: {e}")
@@ -148,9 +177,12 @@ def _perform_news_dream():
     data = _extract_json(ans)
 
     if data and 'noticias' in data:
+        tags = data.get('tags') or []
         for noticia in data['noticias']:
-            # Guardamos cada notícia como uma memória individual para o RAG
-            save_to_rag(f"Notícia: {noticia}")
+            # One memory per fact, keeping the tags the model returned.
+            mem = _as_memory(noticia, tags=tags)
+            if mem:
+                save_to_rag(mem)
         print(f"📰 [Dream] Aprendi {len(data['noticias'])} coisas novas sobre o mundo.")
 
 def _perform_web_dream():
@@ -174,7 +206,10 @@ def _perform_web_dream():
             ans = _safe_ollama_chat(internal_prompt, "Bibliotecário das Sombras.")
             data = _extract_json(ans)
             if data and 'conhecimento' in data:
-                save_to_rag(f"Conhecimento Profundo: {data['conhecimento']}")
+                mem = _as_memory(data['conhecimento'],
+                                 tags=data.get('tags') or [query.strip()])
+                if mem:
+                    save_to_rag(mem)
                 print(f"💤 [Dream] Aprofundei sobre: {query}")
     except Exception as e: print(f"⚠️ Erro Introspecção: {e}")
 

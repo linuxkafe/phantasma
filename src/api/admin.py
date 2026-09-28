@@ -386,13 +386,6 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
     # /admin/config already covers configuration. The page stays reachable at
     # /admin/env by URL.
     links = [
-        ("admin.persona_editor", "nav.persona", "Persona e reacções", "/admin/persona"),
-        (
-            "admin.knowledge_editor",
-            "nav.knowledge",
-            "Editar conhecimento",
-            "/admin/brain/knowledge",
-        ),
         ("admin.config_manager", "nav.config", "Configuração", "/admin/config"),
         ("admin.user_manager", "nav.users", "Utilizadores", "/admin/users"),
     ]
@@ -1745,7 +1738,8 @@ FLYBRAIN_TEMPLATE = (
       classify_edges: 'classificar arestas',
       classify_nodes: 'classificar nos',
       consolidate_memories: 'consolidar memorias',
-      gmif_dream: 'sonhar (GMIF)'
+      gmif_dream: 'sonhar (GMIF)',
+      dream: 'sonhar (notícias e pesquisa)'
     };
     function sleepStatusLine() {
       let line = document.getElementById('sleep-status-line');
@@ -2629,7 +2623,12 @@ def brain_sleep():
         """Background worker for sleep/dream cycle."""
         conn = sqlite3.connect(BRAIN_DB_PATH)
         try:
-            from skills.skill_dream import _consolidate_memories
+            from skills.skill_dream import (
+                _consolidate_memories,
+            )
+            from skills.skill_dream import (
+                perform_dreaming as _perform_dreaming,
+            )
             from skills.skill_gmif_dream import _gmif_dream_cycle
             from src.pipeline.gmif_classifier import (
                 classify_all_edges,
@@ -2646,6 +2645,13 @@ def brain_sleep():
                 _step("gmif_dream", _gmif_dream_cycle)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GMIF dream cycle step failed: %s", exc)
+            # The dreaming half of skill_dream: news and web research, stored
+            # with the keyword structure the RAG matches on. Consolidation
+            # above only merges what is already stored.
+            try:
+                _step("dream", _perform_dreaming)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Dream step failed: %s", exc)
         except Exception as exc:  # noqa: BLE001
             state["status"] = "failed"
             state["error"] = f"{type(exc).__name__}: {exc}"
@@ -2693,7 +2699,7 @@ def brain_sleep_status():
     return jsonify(payload)
 
 
-@admin_bp.route("/brain")
+@admin_bp.route("/brain", methods=["GET", "POST"])
 @login_required
 def brain_hub():
     """All four brain subsystems on one screen.
