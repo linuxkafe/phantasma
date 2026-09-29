@@ -1,65 +1,101 @@
 """
 Speech-to-Text using Whisper.
 
-Provides WhisperSTT class with model caching and a convenience transcribe() function.
-Thread-safe model loading with class-level lock.
+Engine: faster-whisper (CTranslate2) instead of openai-whisper. Measured on
+this host (Intel i5-8500T, 6 threads, no usable GPU) with the same 1.3s
+fixture:
+
+    openai-whisper, medium, fp32, CPU   17.6 - 27.8s   (13-21x real time)
+    faster-whisper, medium, int8, CPU    7.45s         (5.7x real time)
+
+Same model, same output, 2.4-3.7x faster. openai-whisper runs in float32 on
+the CPU (float16 is unsupported there, so it silently downgrades) and pays
+Python-level overhead per layer; CTranslate2 with int8 quantisation is the
+same weights at a fraction of the arithmetic. Dropping the engine also drops
+torch from the import path.
+
+The model name is unchanged (`config.stt.model_size`), so this is a drop-in:
+same config, same `Result` shape, same language handling, same phonetic-fix
+post-processing.
+
+VAD is deliberately off. A wake word is the opening of a longer utterance, and
+silence-splitting would keep the wake word and drop the request.
 """
 
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
-import whisper
 
 from config import config
 from src.pipeline.utils import Result, logger
+
+# int8 is the point of the swap. float32 on this host was 2.4-3.7x slower.
+_DEFAULT_COMPUTE_TYPE = "int8"
+
+
+def _make_engine(model_size: str, device: str, compute_type: str, **kwargs) -> Any:
+    """Build the recognition model. Separated so tests can inject a fake.
+
+    The import is local on purpose: it is slow, and a module-level import
+    would make every test that merely imports `stt` pay for it.
+    """
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(model_size, device=device, compute_type=compute_type, **kwargs)
 
 
 class WhisperSTT:
     """Whisper transcription with model caching.
 
-    Loads Whisper model once and reuses for subsequent transcriptions.
-    Thread-safe model loading using class-level lock.
+    Loads the model once and reuses it for subsequent transcriptions, because
+    loading `medium` costs minutes. Thread-safe via a class-level lock.
 
     Class Attributes:
-        _model: Cached Whisper model instance.
-        _model_size: Size of currently loaded model.
+        _engine: Cached model instance.
+        _engine_key: (size, device, compute_type) the cache was built for.
         _lock: Threading lock for model loading.
     """
 
-    _model: Optional[whisper.Whisper] = None
-    _model_size: Optional[str] = None
+    _engine: Optional[Any] = None
+    _engine_key: Optional[tuple] = None
     _lock: threading.Lock = threading.Lock()
 
     @classmethod
     def load_model(cls, model_size: str) -> Result:
-        """Load Whisper model (cached, thread-safe).
+        """Load the model (cached, thread-safe).
 
         Args:
-            model_size: Whisper model size ("tiny", "base", "small", "medium", "large").
+            model_size: Whisper size ("tiny", "base", "small", "medium",
+                "large", "large-v2", "large-v3", "large-v3-turbo", or a
+                distil-* / turbo name).
 
         Returns:
-            Result.ok(model) on success, Result.fail(error) on failure.
+            Result.ok(engine) on success, Result.fail(error) on failure.
         """
-        # Fast path: already loaded
-        if cls._model is not None and cls._model_size == model_size:
-            return Result.ok(cls._model)
+        device = "cpu"
+        compute_type = _DEFAULT_COMPUTE_TYPE
+        key = (model_size, device, compute_type)
 
-        # Slow path: need to load (with lock)
+        # Fast path: already loaded for this exact configuration.
+        if cls._engine is not None and cls._engine_key == key:
+            return Result.ok(cls._engine)
+
         with cls._lock:
-            # Double-check after acquiring lock
-            if cls._model is not None and cls._model_size == model_size:
-                return Result.ok(cls._model)
+            # Double-check after acquiring the lock.
+            if cls._engine is not None and cls._engine_key == key:
+                return Result.ok(cls._engine)
 
             try:
-                logger.info(f"Loading Whisper model: {model_size}")
+                logger.info(f"Loading Whisper model: {model_size} ({compute_type}, {device})")
                 start = time.perf_counter()
-                cls._model = whisper.load_model(model_size, device="cpu")
-                cls._model_size = model_size
+                engine = _make_engine(model_size, device, compute_type)
+                cls._engine = engine
+                cls._engine_key = key
                 load_time = (time.perf_counter() - start) * 1000
-                logger.info(f"Whisper model loaded: {model_size} (load_time_ms={load_time:.1f})")
-                return Result.ok(cls._model)
+                logger.info(f"Whisper model loaded: {model_size} ({load_time:.0f}ms)")
+                return Result.ok(engine)
             except Exception as e:
                 logger.error(f"Failed to load Whisper model: {e}")
                 return Result.fail(str(e))
@@ -84,7 +120,8 @@ class WhisperSTT:
         if not load_result.success:
             return load_result
 
-        model = load_result.data
+        engine = load_result.data
+        lang = language or config.stt.language
 
         try:
             # Convert to float32 [-1, 1] if needed
@@ -93,15 +130,19 @@ class WhisperSTT:
             else:
                 audio_float = audio.astype(np.float32)
 
-            # Whisper expects 16kHz mono
-            options = {
-                "fp16": config.stt.fp16,
-                "language": language or config.stt.language,
-                "task": "transcribe",
-            }
-
-            result = model.transcribe(audio_float, **options)
-            text = result.get("text", "").strip()
+            # faster-whisper returns a lazy generator: the inference happens
+            # when it is consumed, so it must be consumed INSIDE the timing
+            # below. Timing the call alone measures nothing (see SD-OPS-204).
+            segments, info = engine.transcribe(
+                audio_float,
+                language=lang,
+                task="transcribe",
+                beam_size=5,
+                # Never split on silence: the utterance starts with the wake
+                # word, so VAD would keep the wake word and drop the request.
+                vad_filter=False,
+            )
+            text = " ".join(seg.text for seg in segments).strip()
 
             # Apply domain-specific phonetic fixes (mis-transcriptions of
             # common phrases, e.g. "não é que está ótimo" -> "como está o
@@ -117,8 +158,11 @@ class WhisperSTT:
                     text = lower_text
 
             duration_ms = (time.perf_counter() - start) * 1000
-            lang = result.get("language", "unknown")
-            logger.info(f"STT transcribed: '{text[:100]}...' (lang={lang})")
+            detected = getattr(info, "language", None) or lang or "unknown"
+            logger.info(
+                f"STT transcribed: '{text[:100]}...' "
+                f"(lang={detected}, {duration_ms:.0f}ms)"
+            )
             return Result.ok(text, duration_ms=duration_ms)
 
         except Exception as e:
@@ -130,7 +174,7 @@ class WhisperSTT:
 def transcribe(audio: np.ndarray, language: Optional[str] = None) -> Result:
     """Convenience function for direct transcription.
 
-    Creates WhisperSTT instance and calls transcribe(). Use for one-off
+    Creates a WhisperSTT instance and calls transcribe(). Use for one-off
     transcriptions. For repeated use, call WhisperSTT.transcribe() directly
     to benefit from model caching.
 

@@ -39,7 +39,12 @@ def _update_single_value(device_id, watts, extra=None):
     if watts is None: return
     try:
         data = _load_cache()
-        entry = {"val": watts, "ts": time.time()}
+        entry = data.get(str(device_id), {})
+        # Keep a short history so a frozen reading is detectable: one sample
+        # cannot show that a value is stuck, four identical ones can.
+        history = (entry.get("history") or [])[-7:]
+        history.append(watts)
+        entry = {"val": watts, "ts": time.time(), "history": history}
         entry.update(extra or {})
         data[str(device_id)] = entry
         with open(CACHE_FILE, 'w') as f: json.dump(data, f)
@@ -90,6 +95,10 @@ def _fetch_readings(device_id):
             if data and isinstance(data, list) and len(data) > 0:
                 last = data[-1]
                 if last.get("Read") is not None:
+                    # The whole window, not just the last point: a plug stuck
+                    # on one value is only visible across samples. The oven
+                    # plug reports 1.0 kW for every sample in the window.
+                    series = [d["Read"] for d in data if d.get("Read") is not None]
                     return {
                         "power_w": float(last["Read"]) * 1000,
                         "consumption_kwh": last.get("Consumption"),
@@ -97,6 +106,7 @@ def _fetch_readings(device_id):
                         "currency_symbol": last.get("CurrencySymbol"),
                         "carbon_g": last.get("ReadCarbon"),
                         "granularity": last.get("Granularity"),
+                        "series": series,
                     }
     except Exception: pass
     return None
@@ -140,17 +150,60 @@ def _find_id_by_name(nickname_lower):
 # reading existed -- was not a heuristic, it was a lie the UI rendered.
 ON_THRESHOLD_W = 5.0
 
+# A frozen reading must not be turned into a switch position. Verified on the
+# oven plug (TagId 169809): 96 consecutive 15-min samples over 24h, every one
+# exactly 1.0 kW, population stddev 0.0000 -- physically impossible for a real
+# socket. Treating that as "the oven is on" is a lie with a plausible number
+# attached. So: if a device has been reporting a bit-identical value for
+# STUCK_SAMPLES consecutive polls, the state is reported as unknown and the
+# reading is labelled as suspect, rather than believed.
+STUCK_SAMPLES = 4
+STUCK_EPSILON = 0.0001
+
+
+def _is_stuck(entry):
+    """True when the last readings are all the same to within epsilon."""
+    history = entry.get("history") or []
+    if len(history) < STUCK_SAMPLES:
+        return False
+    recent = history[-STUCK_SAMPLES:]
+    return (max(recent) - min(recent)) < STUCK_EPSILON
+
+
+def _stuck_for(history):
+    """True when a list of samples holds one unchanging value.
+
+    Used for the live read as well as the cache: the question is whether the
+    API itself keeps repeating the same number, which is what the oven plug
+    does, not whether our last write happened to equal this one.
+    """
+    if len(history) < STUCK_SAMPLES:
+        return False
+    recent = history[-STUCK_SAMPLES:]
+    return (max(recent) - min(recent)) < STUCK_EPSILON
+
+
 def get_status_for_device(nickname):
     target_id = _find_id_by_name(nickname.lower())
     if not target_id: return {"state": "unreachable"}
 
     cache = _load_cache()
     if target_id in cache:
-        watts = cache[target_id]["val"]
-        state = "on" if watts > ON_THRESHOLD_W else "off"
-        out = {"state": state, "power_w": round(watts, 1), "state_inferred": True}
-        extra = {k: v for k, v in cache[target_id].items() if k not in ("val", "ts")}
-        out.update(extra)
+        entry = cache[target_id]
+        watts = entry["val"]
+        out = {"power_w": round(watts, 1)}
+
+        if _is_stuck(entry):
+            # A reading that has not moved in an hour is not a measurement.
+            out["state"] = "unknown"
+            out["state_inferred"] = True
+            out["reading_suspect"] = True
+            out["note"] = "leitura parada: o valor nao muda, estado desconhecido"
+        else:
+            out["state"] = "on" if watts > ON_THRESHOLD_W else "off"
+            out["state_inferred"] = True
+
+        out.update({k: v for k, v in entry.items() if k not in ("val", "ts", "history")})
         return out
 
     return {"state": "unreachable"}
@@ -185,6 +238,17 @@ def _describe(name, d):
         bits.append("media dos ultimos 15 minutos")
     return f"O {name} esta a {', '.join(bits)}."
 
+def _describe_stuck(name):
+    """A reading that never moves is a broken sensor, not a measurement.
+
+    Announcing "1000 Watts" from a value the plug has been repeating
+    unchanged for days would be reporting a defect as a fact.
+    """
+    return (
+        f"A leitura do {name} esta parada no mesmo valor, portanto nao consigo "
+        f"dizer o estado. Pode ser a tomada ou a telemetria do Cloogy."
+    )
+
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'CLOOGY_DEVICES'): return None
 
@@ -212,8 +276,10 @@ def handle(user_prompt_lower, user_prompt_full):
             return f"O {target_name} marcava {int(round(entry['val']))} Watts na ultima leitura guardada."
 
         _update_single_value(target_id, d["power_w"], extra={
-            k: v for k, v in d.items() if k != "power_w"
+            k: v for k, v in d.items() if k not in ("power_w", "series")
         })
+        if _stuck_for(d.get("series") or []):
+            return _describe_stuck(target_name)
         return _describe(target_name, d)
 
     # 2. Controlo (Ligar / Desligar)

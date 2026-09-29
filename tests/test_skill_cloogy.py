@@ -29,6 +29,11 @@ READING = {
 }
 
 
+def _series(values):
+    """Build the window of samples the instant endpoint returns."""
+    return [{**READING, "Read": v} for v in values]
+
+
 @pytest.fixture()
 def fake_api(monkeypatch, tmp_path):
     """Stub the Cloogy endpoints and point the cache at a temp file."""
@@ -50,7 +55,7 @@ def fake_api(monkeypatch, tmp_path):
 
     def fake_get(*_args, **_kwargs):
         calls["n"] += 1
-        return _Resp([READING])
+        return _Resp(_series([1.5, 1.4, 1.5, 1.5]))
 
     monkeypatch.setattr(skill_cloogy.httpx, "get", fake_get)
     return calls
@@ -63,6 +68,9 @@ def test_readings_expose_every_useful_field(fake_api):
     assert d["currency"] == 18.42
     assert d["carbon_g"] == 4210
     assert d["granularity"] == "instant"
+    # The window comes back too, so a frozen plug is visible without waiting
+    # for the cache to fill.
+    assert len(d["series"]) == 4
 
 
 def test_old_reading_helper_still_works(fake_api):
@@ -99,7 +107,7 @@ def test_standby_does_not_flip_the_switch_on(fake_api):
 def test_tile_carries_the_extra_readings(fake_api):
     d = skill_cloogy._fetch_readings("169809")
     skill_cloogy._update_single_value("169809", d["power_w"], extra={
-        k: v for k, v in d.items() if k != "power_w"
+        k: v for k, v in d.items() if k not in ("power_w", "series")
     })
     status = skill_cloogy.get_status_for_device("forno")
     assert status["consumption_kwh"] == 123.456
@@ -163,3 +171,41 @@ def test_cache_file_is_valid_json_after_a_write(fake_api):
         stored = json.load(fh)
     assert stored["169809"]["val"] == 1500.0
     assert stored["169809"]["carbon_g"] == 10
+
+
+def test_frozen_reading_is_not_reported_as_on(fake_api):
+    """The oven plug (TagId 169809) reports exactly 1.0 kW for every one of 96
+    samples over 24h, population stddev 0.0000. That is impossible for a real
+    socket, so it must not become "the oven is on"."""
+    for _ in range(skill_cloogy.STUCK_SAMPLES + 1):
+        skill_cloogy._update_single_value("169809", 1000.0)
+    status = skill_cloogy.get_status_for_device("forno")
+    assert status["state"] == "unknown"
+    assert status["reading_suspect"] is True
+    assert "parada" in status["note"]
+    assert status["power_w"] == 1000.0  # the raw value is still shown
+
+
+def test_frozen_api_window_is_caught_on_the_live_read(fake_api, monkeypatch):
+    """Same fault, seen in the API window rather than the cache: the live read
+    returns the same value for every sample and the answer must say the sensor
+    is stuck instead of quoting 1000 W."""
+    skill_cloogy.httpx.get = lambda *a, **k: type(
+        "R", (), {"status_code": 200, "json": staticmethod(lambda: _series([1.0] * 96))}
+    )()
+    reply = skill_cloogy.handle("quanto gastou o forno", "")
+    assert "parada" in reply
+    assert "1000 Watts" not in reply
+
+
+def test_a_moving_reading_is_still_trusted(fake_api):
+    """Guard against the stuck-detector swallowing real data: a socket whose
+    power actually varies must keep reporting a state."""
+    for w in (0.0, 1400.0, 0.0, 900.0, 20.0, 0.0):
+        skill_cloogy._update_single_value("169809", w)
+    status = skill_cloogy.get_status_for_device("forno")
+    assert status.get("reading_suspect") is not True
+    assert status["state"] in ("on", "off")
+
+
+
