@@ -35,11 +35,13 @@ def _load_cache():
         with open(CACHE_FILE, 'r') as f: return json.load(f)
     except Exception: return {}
 
-def _update_single_value(device_id, watts):
+def _update_single_value(device_id, watts, extra=None):
     if watts is None: return
     try:
         data = _load_cache()
-        data[str(device_id)] = {"val": watts, "ts": time.time()}
+        entry = {"val": watts, "ts": time.time()}
+        entry.update(extra or {})
+        data[str(device_id)] = entry
         with open(CACHE_FILE, 'w') as f: json.dump(data, f)
         _ensure_permissions()
     except Exception: pass
@@ -61,6 +63,20 @@ def _login():
 def _ensure_auth(): return _login() if not CURRENT_TOKEN else True
 
 def _fetch_reading(device_id):
+    """Instantaneous power in W, or None."""
+    d = _fetch_readings(device_id)
+    return d["power_w"] if d else None
+
+def _fetch_readings(device_id):
+    """All the instant readings Cloogy exposes for one device, in native units.
+
+    The endpoint (/consumptions/instant) returns 12 fields; the skill used to
+    read only `Read` (kW -> W) and threw the rest away. What is actually
+    useful is: instantaneous power (W), accumulated energy (kWh), money spent
+    (EUR) and carbon (g CO2) -- so a user asking "quanto gastei?" gets an
+    answer from a real field instead of an inference. Returns None on any
+    failure so callers keep the old all-or-nothing behaviour.
+    """
     if not _ensure_auth(): return None
     try:
         now = int(time.time() * 1000); start = now - (60 * 60 * 1000)
@@ -72,8 +88,16 @@ def _fetch_reading(device_id):
         if resp.status_code == 200:
             data = resp.json()
             if data and isinstance(data, list) and len(data) > 0:
-                kw = data[-1].get("Read")
-                if kw is not None: return float(kw) * 1000
+                last = data[-1]
+                if last.get("Read") is not None:
+                    return {
+                        "power_w": float(last["Read"]) * 1000,
+                        "consumption_kwh": last.get("Consumption"),
+                        "currency": last.get("ReadCurrency"),
+                        "currency_symbol": last.get("CurrencySymbol"),
+                        "carbon_g": last.get("ReadCarbon"),
+                        "granularity": last.get("Granularity"),
+                    }
     except Exception: pass
     return None
 
@@ -83,8 +107,11 @@ def _poll_loop():
         try:
             if hasattr(config, 'CLOOGY_DEVICES'):
                 for name, dev_id in config.CLOOGY_DEVICES.items():
-                    val = _fetch_reading(dev_id)
-                    if val is not None: _update_single_value(dev_id, val)
+                    d = _fetch_readings(dev_id)
+                    if d is not None:
+                        _update_single_value(dev_id, d["power_w"], extra={
+                            k: v for k, v in d.items() if k != "power_w"
+                        })
         except Exception: pass
         time.sleep(60)
 
@@ -103,6 +130,16 @@ def _find_id_by_name(nickname_lower):
     return None
 
 # --- Interface Web UI ---
+
+# A smart plug with something plugged in draws power; one that is "on" but idle
+# (or off) draws ~0W. Cloogy exposes no discrete on/off state, so the switch
+# position has to be inferred from the measurement -- and 3W of standby is a
+# real reading on these devices, not zero. Below this the plug is treated as
+# off; above it, on. It is a heuristic and it is documented as one, because the
+# alternative this code used to have -- always reporting "on" whenever a
+# reading existed -- was not a heuristic, it was a lie the UI rendered.
+ON_THRESHOLD_W = 5.0
+
 def get_status_for_device(nickname):
     target_id = _find_id_by_name(nickname.lower())
     if not target_id: return {"state": "unreachable"}
@@ -110,10 +147,11 @@ def get_status_for_device(nickname):
     cache = _load_cache()
     if target_id in cache:
         watts = cache[target_id]["val"]
-
-        # ALTERAÇÃO: Removida a lógica especial do forno.
-        # Agora devolve sempre power_w se houver leitura.
-        return {"state": "on", "power_w": round(watts, 1)}
+        state = "on" if watts > ON_THRESHOLD_W else "off"
+        out = {"state": state, "power_w": round(watts, 1), "state_inferred": True}
+        extra = {k: v for k, v in cache[target_id].items() if k not in ("val", "ts")}
+        out.update(extra)
+        return out
 
     return {"state": "unreachable"}
 
@@ -126,6 +164,26 @@ def _set_state(device_id, state_on):
         resp = httpx.put(url, json={"Value": val}, headers=_get_headers(), timeout=10, verify=False)
         return resp.status_code in [200, 204]
     except Exception: return False
+
+def _describe(name, d):
+    """Answer from a reading, naming only the fields that actually have values.
+
+    The API always returns the same 12 keys, most of them zero on any given
+    plug, so a canned sentence would quote empty numbers. Each part is added
+    only when Cloogy reported something for it.
+    """
+    bits = [f"{int(round(d['power_w']))} Watts"]
+    if d.get("consumption_kwh") is not None:
+        bits.append(f"{d['consumption_kwh']:.2f} kWh acumulados")
+    if d.get("currency"):
+        sym = d.get("currency_symbol") or ""
+        bits.append(f"{sym}{d['currency']:.2f}".strip())
+    if d.get("carbon_g"):
+        bits.append(f"{d['carbon_g']:.0f} g de CO2")
+    gran = d.get("granularity")
+    if gran == "instant":
+        bits.append("media dos ultimos 15 minutos")
+    return f"O {name} esta a {', '.join(bits)}."
 
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'CLOOGY_DEVICES'): return None
@@ -140,17 +198,23 @@ def handle(user_prompt_lower, user_prompt_full):
 
     if not target_id: return None
 
-    # 1. Leitura de Consumo
+    # 1. Leitura de consumo
     if any(x in user_prompt_lower for x in ["quanto", "consumo", "leitura", "gastar"]):
-        val = _fetch_reading(target_id)
-        if val is None:
+        d = _fetch_readings(target_id)
+        if d is None:
+            # A leitura viva falhou: o cache ainda e melhor do que nada, mas
+            # tem de ser rotulado como cacheado para nao parecer(actual).
             cache = _load_cache()
-            if str(target_id) in cache: val = cache[str(target_id)]["val"]
+            entry = cache.get(str(target_id))
+            if entry is None:
+                return f"Não consegui ler o sensor {target_name}."
+            d = {"power_w": entry["val"], **{k: v for k, v in entry.items() if k not in ("val", "ts")}}
+            return f"O {target_name} marcava {int(round(entry['val']))} Watts na ultima leitura guardada."
 
-        if val is not None:
-            _update_single_value(target_id, val)
-            return f"O consumo atual é de {int(val)} Watts."
-        return f"Não consegui ler o sensor {target_name}."
+        _update_single_value(target_id, d["power_w"], extra={
+            k: v for k, v in d.items() if k != "power_w"
+        })
+        return _describe(target_name, d)
 
     # 2. Controlo (Ligar / Desligar)
     is_on = any(x in user_prompt_lower for x in ["liga", "acende"])

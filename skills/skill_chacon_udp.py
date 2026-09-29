@@ -23,9 +23,11 @@ the interim holder of the balcony-light nicknames and cannot drive this plug
 (it is not a Tasmota device).
 """
 
+import json
 import logging
 import os
 import socket
+import time
 import unicodedata
 
 from skills.base import Skill, TriggerType
@@ -163,6 +165,43 @@ def _is_for_plug(prompt_lower):
     )
 
 
+def _state_path():
+    return os.path.join(
+        os.getenv("PHANTASMA_STATE_DIR", "state"), "chacon_plug_state.json"
+    )
+
+
+def _remember_state(state):
+    """Record the last state we commanded, so the UI tile has something to show.
+
+    The plug cannot be read back, so this is a record of what we sent, not what
+    the relay is doing. It goes stale if someone presses the button on the
+    plug, or if the plug is switched off at the wall. It is still better than
+    a tile that never shows anything, provided it is labelled as what it is --
+    hence the `source` field, which the UI does not display but any later
+    consumer can check before trusting the value.
+    """
+    try:
+        os.makedirs(os.path.dirname(_state_path()), exist_ok=True)
+        payload = {"state": state, "source": "last_command", "ts": time.time()}
+        tmp = _state_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, _state_path())
+    except OSError as e:
+        # A missing state file costs the tile its indicator, nothing more. It
+        # must never take down a light switch.
+        logger.warning("skill_chacon_udp: nao guardei o estado: %s", e)
+
+
+def _last_state():
+    try:
+        with open(_state_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def get_status_for_device(nickname: str) -> dict:
     """State for the UI tile.
 
@@ -172,15 +211,26 @@ def get_status_for_device(nickname: str) -> dict:
     to learn whether the relay is currently closed. Verified live: a 0x02
     query returns a 25-byte reback of opaque bytes.
 
-    So the honest answer is "reachable but state unknown", not a guessed
-    on/off and not "unreachable" (it does answer, which is what /device_status
-    conflates with reachability). The UI renders `unknown` at full opacity
-    with a disabled-looking switch that still sends commands -- a lamp whose
-    state is invented would be worse than one that admits ignorance.
+    So the state shown is the last command we sent, marked as such
+    (`source: last_command`). It is honest about being an inference and it is
+    genuinely useful: an unreachable-looking tile for a device that works is
+    worse than a tile that says "this is what I last asked for". If nothing
+    has been sent yet, the answer is `unknown` -- not `unreachable`, because
+    the device does answer; that word is what /device_status uses for devices
+    nobody responds for.
     """
     if not _is_for_plug(nickname.lower()):
         return {}
-    return {"state": "unknown", "readable": False}
+
+    last = _last_state()
+    if not last or last.get("state") not in ("on", "off"):
+        return {"state": "unknown", "readable": False}
+    return {
+        "state": last["state"],
+        "readable": False,
+        "source": "last_command",
+        "age_s": int(time.time() - last.get("ts", 0)),
+    }
 
 
 def handle(user_prompt_lower, user_prompt_full):
@@ -201,6 +251,7 @@ def handle(user_prompt_lower, user_prompt_full):
 
     word = "ligada" if action == "ON" else "desligada"
     if acked:
+        _remember_state(action.lower())
         return f"luz do balcão {word}."
     return "Não recebi confirmação do plug, tenta outra vez."
 
@@ -216,21 +267,7 @@ class ChaconUdpSkill(Skill):
     get_status_for_device = staticmethod(get_status_for_device)
 
     def handle(self, text: str) -> str:
-        if not _is_for_plug(text):
-            return ""
-
-        action = _intent(text.lower())
-        if action is None:
-            return ""
-
-        arg = _ARG_ON if action == "ON" else _ARG_OFF
-        try:
-            acked = send_command(CMD_SET_GPIO_STATUS, arg)
-        except OSError as e:
-            logger.error("skill_chacon_udp: falha de rede para %s: %s", PLUG_IP, e)
-            return "Ocorreu um erro de rede ao tentar controlar a luz do balcão."
-
-        word = "ligada" if action == "ON" else "desligada"
-        if acked:
-            return f"luz do balcão {word}."
-        return "Não recebi confirmação do plug, tenta outra vez."
+        # One implementation, two entry points. The class-based path and the
+        # legacy module-level `handle` used to carry a byte-identical copy of
+        # the send/ack/format block, which is exactly how the two drift apart.
+        return handle(text, text) or ""

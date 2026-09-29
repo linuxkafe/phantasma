@@ -9,6 +9,13 @@ These tests do NOT contact the plug. The wires-on-the-table bytes below are
 the exact packets validated live against 10.0.0.116:18530 on 2026-09-29.
 """
 
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import tempfile
+
 from skills import skill_chacon_udp
 
 
@@ -64,24 +71,101 @@ def test_handle_returns_none_without_action():
     assert skill_chacon_udp.handle("e a luz do balcao", "e a luz do balcao") is None
 
 
-def test_status_admits_ignorance_instead_of_guessing():
-    """The plug cannot be read back, so the tile must say so.
+@contextlib.contextmanager
+def _acked(value):
+    """Pretend the plug rebacked (or did not), without touching the network."""
+    original = skill_chacon_udp.send_command
+    skill_chacon_udp.send_command = lambda cmd, arg: value
+    try:
+        yield
+    finally:
+        skill_chacon_udp.send_command = original
 
-    GET_GPIO_STATUS is accepted by the device but the reback body is encrypted
-    with the per-device AES key, so there is no state to report. Returning
-    "unreachable" would be wrong too -- the device does answer. A fabricated
-    on/off is the one answer that is definitely a lie, so it is not offered.
+
+@contextlib.contextmanager
+def _temp_state_dir():
+    """Point the state file at a throwaway directory for one test."""
+    with tempfile.TemporaryDirectory() as tmp:
+        old = os.environ.get("PHANTASMA_STATE_DIR")
+        os.environ["PHANTASMA_STATE_DIR"] = tmp
+        try:
+            yield tmp
+        finally:
+            if old is None:
+                os.environ.pop("PHANTASMA_STATE_DIR", None)
+            else:
+                os.environ["PHANTASMA_STATE_DIR"] = old
+
+
+def test_status_admits_ignorance_instead_of_guessing():
+    """Before any command is sent there is nothing to show.
+
+    The answer is `unknown`, not `unreachable`: /device_status reserves that
+    word for devices nobody answers for, and this plug does answer. It just
+    cannot be read back -- GET_GPIO_STATUS is accepted, but the reback body is
+    encrypted with the per-device AES key that only the DIO pairing holds.
     """
-    status = skill_chacon_udp.get_status_for_device("luz do balcão")
+    with _temp_state_dir():
+        status = skill_chacon_udp.get_status_for_device("luz do balcão")
     assert status["state"] == "unknown"
     assert status["readable"] is False
     assert skill_chacon_udp.get_status_for_device("desumidificador") == {}
 
 
+def test_status_reports_the_last_command_and_labels_it():
+    """The tile shows what we last commanded, and says that is what it is.
+
+    A confirmed command is recorded. A command the plug did not acknowledge is
+    not, because then we do not know it acted and writing the intent would be a
+    guess dressed up as a fact.
+    """
+    with _temp_state_dir() as tmp, _acked(True):
+        assert skill_chacon_udp.handle("liga a luz do balcao", "") is not None
+        status = skill_chacon_udp.get_status_for_device("luz do balcão")
+        assert status["state"] == "on"
+        assert status["source"] == "last_command"
+        assert status["readable"] is False  # an inference, not a reading
+        # A command the plug did not acknowledge must not overwrite it.
+        skill_chacon_udp.send_command = lambda cmd, arg: False
+        skill_chacon_udp.handle("desliga a luz do balcao", "")
+        assert skill_chacon_udp.get_status_for_device("luz do balcão")["state"] == "on"
+        assert os.path.exists(os.path.join(tmp, "chacon_plug_state.json"))
+
+
+def test_state_survives_a_new_process(tmp_path, monkeypatch):
+    """The record must outlive the request or the tile flickers on every load.
+
+    Written to a temp file and renamed, so a crash mid-write cannot leave
+    half-written JSON that would then read as "no state at all".
+    """
+    monkeypatch.setenv("PHANTASMA_STATE_DIR", str(tmp_path))
+    with _acked(True):
+        skill_chacon_udp.handle("liga a luz do balcao", "")
+    stored = json.loads((tmp_path / "chacon_plug_state.json").read_text())
+    assert stored["state"] == "on"
+    assert stored["source"] == "last_command"
+    assert stored["ts"] > 0
+
+
+def test_class_and_module_share_one_implementation():
+    """The class delegates to the module handler.
+
+    They used to carry byte-identical copies of the send/ack/format block,
+    which is precisely how two copies drift apart.
+    """
+    skill = skill_chacon_udp.ChaconUdpSkill()
+    with _temp_state_dir(), _acked(True):
+        assert skill.handle("liga a luz do balcao") == skill_chacon_udp.handle(
+            "liga a luz do balcao", "liga a luz do balcao"
+        )
+    assert skill.handle("que horas sao") == ""
+
+
 def test_status_is_reachable_from_the_skill_class():
     """`/device_status` looks on the instance as well as on the module."""
     skill = skill_chacon_udp.ChaconUdpSkill()
-    assert skill.get_status_for_device("luz do balcao")["state"] == "unknown"
+    with _temp_state_dir():
+        assert skill.get_status_for_device("luz do balcao")["state"] == "unknown"
 
 
 def test_ui_places_the_balcony_light_in_the_sala():
