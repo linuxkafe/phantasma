@@ -180,6 +180,39 @@ instead of pretending to work.
 - Ruff lint + format, MyPy typecheck, pytest
 - Pre-commit hook runs the gates on every commit (`.aes/hooks/pre-commit.sh`)
 
+### Authentication
+
+`/` is behind a session; `/admin/*` has its own OTP flow. Two callers, two
+mechanisms:
+
+| Caller | Mechanism | Grants |
+|---|---|---|
+| Browser | `POST /login` with email + password → session cookie | the voice UI, and `/admin/*` if the role is admin |
+| Program | `Authorization: Bearer <token>` | sending commands, nothing else |
+
+A login from a device the account has not used before is asked for a code
+mailed to the address, and only then is the device trusted (a long random token
+in an httpOnly cookie, revocable from the profile). The loopback admin bypass
+does **not** open `/`: that bypass grants admin to any local process, and the
+light switches are not something an admin bypass should reach.
+
+**`/recuperar`** resets a forgotten password with a one-time code. It never
+confirms whether an address exists -- the page, the message and the status are
+identical either way, because a public form that answers differently is a free
+oracle for the user list. Codes are bcrypt-hashed, bound to the address and the
+purpose, single-use, and destroyed by a wrong guess rather than paused.
+
+**`/perfil`** issues per-user API tokens, shown once at creation and never
+re-displayable, revocable one at a time. A token is one capability: send
+commands. It cannot read this page, the memories, or the admin surface.
+`PHANTASMA_COMMAND_TOKEN` remains as the machine credential for the Android
+app and the Discord skill.
+
+| Env Var | Description |
+|---------|-------------|
+| `PHANTASMA_RECOVERY_PEPPER` | Mixed into every recovery-code verifier. **Set it.** Without it the codes are protected by bcrypt alone, and a stolen copy of the database becomes a slow offline search over the code space instead of an impossible one. A warning is logged on every code issued while it is absent. |
+| `PHANTASMA_COMMAND_TOKEN` | Machine-to-machine bearer token. Unset means the command gate is off and the endpoints behave as they always have. |
+
 ## Skills System
 
 Skills are dynamic Python modules in `skills/` directory. Two forms are
