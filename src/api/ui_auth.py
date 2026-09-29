@@ -171,19 +171,28 @@ def find_user(email: str) -> dict | None:
 
 
 def current_user() -> dict | None:
-    """The signed-in UI user, or None.
+    """The signed-in user, or None.
+
+    Reads EITHER session key. The two doors used to have one key each and
+    neither could see the other, so signing in at /admin and following the
+    brand link to / asked for the password again, and vice versa. Both login
+    paths now establish both keys; reading both here as well means a session
+    created before that change still works instead of looking signed out.
 
     Re-resolved from the store on every call rather than trusted from the
     cookie: a session naming an address that was since deleted must stop
     working, and a deleted account is a revocation the owner expects to take
     effect immediately.
     """
-    email = session.get(SESSION_KEY)
+    email = session.get(SESSION_KEY) or session.get(ADMIN_SESSION_KEY)
     if not email:
         return None
     user = _user_row(email)
     if user is None:
+        # Stale cookie: drop both rather than leaving a session that names
+        # nobody under either key.
         session.pop(SESSION_KEY, None)
+        session.pop(ADMIN_SESSION_KEY, None)
     return user
 
 

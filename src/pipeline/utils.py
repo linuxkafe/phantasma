@@ -120,6 +120,8 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     """
     logger = logging.getLogger("phantasma")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # One destination, not two. See the note above.
+    logger.propagate = False
 
     if not logger.handlers:
         handler = logging.StreamHandler()

@@ -125,6 +125,49 @@ def _speech_seconds(text: str) -> float:
 
 
 
+def _wake_score_is_worth_logging(
+    top_score: float,
+    last_logged: float,
+    threshold: float,
+    movement: float = 0.05,
+    near_ratio: float = 0.4,
+) -> bool:
+    """Should this wake score be written to the journal?
+
+    Two moments carry information and everything else is noise:
+
+    * **near** -- the score is within ``near_ratio`` of the threshold that would
+      actually fire the wake word for this model. This is why the threshold is
+      passed in rather than re-read from the environment here: the detector
+      holds a per-model threshold with a global fallback
+      (``HotwordConfig.thresholds_per_model``), so a single number read from
+      the environment would be wrong for any model configured otherwise, and
+      the log would disagree with the decision it exists to explain.
+    * **moved** -- the score shifted by at least ``movement`` since the last
+      line printed. Without this, a word that rises from 0.02 to 0.10 -- the
+      shape of somebody starting to speak -- would print nothing until it was
+      already close to firing, and the one window where the diagnostic is most
+      useful is the one where it is quiet.
+
+    Silence below that is not worth a line every five seconds forever. It was:
+    on 2026-09-29 that unconditional line was most of what the service wrote.
+
+    Args:
+        top_score: Highest raw score this tick.
+        last_logged: Top score of the last line actually printed.
+        threshold: The threshold in force for the model that produced the score.
+        movement: Score change that counts as worth reporting. Default 0.05.
+        near_ratio: Fraction of the threshold that counts as "near".
+            Default 0.4.
+
+    Returns:
+        True if the line should be written.
+    """
+    if top_score >= threshold * near_ratio:
+        return True
+    return abs(top_score - last_logged) >= movement
+
+
 class PhantasmaPipeline:
     """Main voice pipeline orchestrator.
 
@@ -184,12 +227,24 @@ class PhantasmaPipeline:
             sample_rate=config.audio.sample_rate,
             chunk_size=1280,  # openWakeWord expects 1280 samples (80ms at 16kHz)
         )
-        # Log every model's top score periodically, including below-threshold
-        # ones. Logging only detections made a model that never fires invisible:
-        # hey_fantasma sat under its threshold throughout one test and read as
-        # "no reaction" rather than "scoring 0.09", which cost a full
-        # diagnosis cycle. One INFO line per 5s.
+        # The wake-score log, and what it is for.
+        #
+        # It used to be an unconditional INFO every 5 s, forever, which made a
+        # diagnostic into a tax: the owner reported the journal filling with
+        # "Wake scores: ola_fantasma=0.0008", a number meaning silence. It is
+        # still here, and deliberately so -- a model that never fires is
+        # otherwise indistinguishable from a microphone that hears nothing, which
+        # cost a full diagnosis cycle once already (hey_fantasma sat under its
+        # threshold and read as "no reaction" rather than "scoring 0.09").
+        #
+        # What changed is WHEN it prints: near the threshold, or when the score
+        # has moved. See _wake_score_is_worth_logging and the audio loop.
+        #
+        # _last_top_score is the top score of the last line actually printed;
+        # the "moved" test compares against it, so it is only ever updated when
+        # a line is written.
         self._last_score_log = 0.0
+        self._last_top_score = 0.0
         self._last_level_log = 0.0
 
         self._running = False
@@ -437,12 +492,39 @@ class PhantasmaPipeline:
                     100.0 * float(np.abs(_a).max()) / 32768.0,
                     100.0 * float(np.sqrt((_a ** 2).mean())) / 32768.0,
                 )
-            if now - self._last_score_log > 5.0:
-                self._last_score_log = now
-                ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
-                logger.info(
-                    "🔬 Wake scores: " + (" ".join(f"{n}={v:.4f}" for n, v in ranked) or "n/a")
+            # Wake scores, only when they are worth reading.
+            #
+            # This was an unconditional INFO every 5 seconds, forever, and it
+            # printed the same line TWICE per tick -- once through the root
+            # handler and once through the pipeline's own, so the journal filled
+            # with a number that was 0.0008 in an empty room and said nothing
+            # about whether the microphone was working.
+            #
+            # A score is only interesting near the threshold, or when the top
+            # score has moved a lot since the last one printed: those are the
+            # two moments that tell you something. Silence is silence, and
+            # logging it on a loop is how a diagnostic becomes noise. The
+            # threshold comes from the same config the detector uses, so this
+            # cannot drift away from what would actually fire the wake word.
+            if now - getattr(self, "_last_score_log", 0.0) > 5.0:
+                ranked_all = sorted(scores.items(), key=lambda kv: -kv[1])
+                top_name, top_score = ranked_all[0] if ranked_all else ("n/a", 0.0)
+                # The threshold in force for THAT model, from the detector
+                # itself -- not a constant, and not a second read of the
+                # environment. Same source as the decision it explains.
+                per_model = getattr(self.hotword, "_thresholds", {}) or {}
+                threshold = per_model.get(
+                    top_name, getattr(self.hotword, "threshold", 0.5)
                 )
+                last_top = getattr(self, "_last_top_score", 0.0)
+                if _wake_score_is_worth_logging(top_score, last_top, threshold):
+                    self._last_score_log = now
+                    self._last_top_score = top_score
+                    ranked = ranked_all[:2]
+                    logger.info(
+                        "🔬 Wake scores: "
+                        + (" ".join(f"{n}={v:.4f}" for n, v in ranked) or "n/a")
+                    )
             if detected:
                 # Night mode is not "speak quietly": it means the assistant is
                 # not awake. Measured on 2026-09-29 at 03:41, inside quiet

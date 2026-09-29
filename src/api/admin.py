@@ -276,10 +276,22 @@ SESSION_EXPIRY_DAYS = 30
 
 
 def _login_user(email: str) -> None:
-    """Create a permanent session for the given e‑mail."""
+    """Create a permanent session for the given e-mail.
+
+    Both doors open. The voice UI has its own session key, and until the two
+    were unified signing in here and then following the brand link to `/` asked
+    for the password a second time -- the same complaint as the other
+    direction, and the same fix.
+    """
     session.permanent = True
     session[SESSION_KEY] = email
-    # Flask‑Session will handle the 30‑day expiry via PERMANENT_SESSION_LIFETIME
+    # Flask-Session will handle the 30-day expiry via PERMANENT_SESSION_LIFETIME
+    try:
+        from src.api import ui_auth
+
+        session[ui_auth.SESSION_KEY] = email
+    except Exception:  # noqa: BLE001 - the voice UI is optional for admin
+        logger.warning("admin login: could not open the voice UI session")
 
 
 def _logout_user() -> None:

@@ -57,7 +57,17 @@ SYNC_DIRS=(src tests skills prompts public)
 # Top-level files that ARE part of the product and must therefore be deployed.
 # assistant.py is the service entry point: not syncing it meant a change reached
 # production only by hand, which is how it silently diverged.
-TOP_LEVEL_SYNC=(assistant.py)
+  TOP_LEVEL_SYNC=(assistant.py)
+
+  # pyproject.toml is not only packaging: it is the pytest configuration prod
+  # runs the suite with. Without it in prod, `pytest tests/` found no
+  # [tool.pytest.ini_options], so `pythonpath = ["src"]` and testpaths were
+  # absent and tests that do `from tests.helpers_ui_auth import ...` failed
+  # there while passing in dev -- 15 failures that made the deploy look broken
+  # for a reason that had nothing to do with the change under test. The
+  # dependency list in the same file is what the prod-venv import gate compares
+  # against, so prod needs it for the gate to mean anything either.
+  TOP_LEVEL_SYNC=(assistant.py pyproject.toml)
 
 # SKILL_REVIEW was populated on 2026-09-27 with skill_tuya.py and
 # skill_weather.py: prod held behaviour dev lacked (a weather cache, and a
@@ -170,6 +180,111 @@ for f in "${TOP_LEVEL_SYNC[@]}"; do
     cp "$DEV/$f" "$PROD/$f.tmp-deploy" && mv "$PROD/$f.tmp-deploy" "$PROD/$f"
   fi
 done
+
+  # Declared-dependency gate.
+  #
+  # This script copies code and then runs the test suite. It never checked that
+  # the code can actually run in the prod venv, so a package the code imports
+  # but nobody declared shipped cleanly and failed only at runtime, in the one
+  # place it matters. That happened twice with faster-whisper: the swap from
+  # openai-whisper was correct in dev, "openai-whisper" stayed in the
+  # dependency list, "faster-whisper" was never added, the deploy passed, and
+  # /opt/phantasma/venv logged "No module named 'faster_whisper'" on every
+  # utterance while dev was fine.
+  #
+  # The direction that matters is the CODE's, not the manifest's. Declaring a
+  # dependency does not install it and does not prove the venv has it, so this
+  # walks the actual import statements -- including the ones inside functions,
+  # which is the whole point: src/pipeline/stt.py imports faster_whisper lazily
+  # inside the loader, so merely importing the entry point would pass and the
+  # failure would still be a runtime surprise on the first utterance.
+  #
+  # Fail-closed, and it does not install: a deploy that silently mutates the
+  # production venv is a deploy nobody can reason about afterwards. It reports
+  # what is missing and stops, so the fix is deliberate.
+  if ( cd "$PROD" && ./venv/bin/python3 - <<'PY'
+import ast
+import pathlib
+import sys
+
+# Scope is explicit, and it is the code this service runs. An earlier version of
+# this gate used rglob(".") and swept up the CPython test suite that ships inside
+# the venv's own site-packages -- test_grp, pgen2, urllib2, org, java -- and
+# failed on all of them in a perfectly healthy environment. A gate that fails
+# when everything is fine is worse than no gate: it teaches the reader to ignore
+# it. See SD-phantasma-OPS-025.
+LOCAL = {"assistant", "config", "skills", "src", "main", "aes", "setup"}
+SKIP_DIR_PARTS = {"tests", "test", "venv", "build", ".git", "node_modules", "vendor"}
+
+files = []
+for pattern_dir in ("src", "skills"):
+    base = pathlib.Path(pattern_dir)
+    if base.is_dir():
+        files.extend(p for p in base.rglob("*.py")
+                     if not (SKIP_DIR_PARTS & set(p.parts)))
+# Top-level modules are the service entry points (assistant.py, config.py).
+files.extend(p for p in pathlib.Path(".").glob("*.py")
+             if p.name not in ("setup.py", "conftest.py"))
+
+roots = set()
+for path in sorted(set(files)):
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, OSError):
+        continue
+    for node in ast.walk(tree):
+        # Both forms, at any nesting depth: `import x`, `from x import y`, and
+        # the deferred ones inside a function body. The deferred ones are the
+        # point: stt.py imports faster_whisper inside the loader, so importing
+        # the entry point would pass and the failure would still only surface
+        # on the first utterance.
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative import: always project-local
+                continue
+            if node.module:
+                roots.add(node.module.split(".")[0])
+
+stdlib = set(getattr(sys, "stdlib_module_names", ()))
+candidates = sorted(
+    r for r in roots
+    if r not in stdlib and r not in LOCAL and not r.startswith("_")
+)
+
+missing = []
+for mod in candidates:
+    try:
+        __import__(mod)
+    except ImportError as exc:
+        missing.append((mod, str(exc)))
+    except Exception:
+        # Imported far enough to hit runtime: a hardware or network library that
+        # fails for another reason is not a packaging fault and must not be
+        # reported as one.
+        pass
+
+if missing:
+    print("  the prod venv cannot import modules the code uses:", file=sys.stderr)
+    for mod, err in missing:
+        print(f"    {mod}: {err}", file=sys.stderr)
+    print(
+        "  install them in $PROD/venv, or fix the import. Declared in\n"
+        "  pyproject.toml and actually imported are not the same set, and\n"
+        "  this gate checks the second one.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"  ok    {len(candidates)} imported modules resolvable in prod venv "
+      f"(scanned {len(set(files))} files)")
+PY
+  ); then
+    :
+  else
+    echo "  FAILED: prod-venv import check (see above)" >&2
+    if [ "$DRY_RUN" -eq 1 ]; then exit 3; else exit 1; fi
+  fi
 
   # Audio env-var verification. config.py fails OPEN for these two: with the
   # .env absent, renamed, unreadable, or containing a name typo, the effective
@@ -300,22 +415,50 @@ echo "verifying prod suite ($reason)..."
   exit 1
 }
 
-echo "restarting phantasma.service..."
-sudo -n service phantasma restart
-# Probe the functional endpoint, not the listening socket. A cold start loads
-# models and has been observed to exceed 150s, during which the socket is
-# absent and the previous `ss`-based check reported a false failure on a
-# service that came up fine moments later.
-ok=0
-for _ in $(seq 1 60); do
-  if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/ 2>/dev/null)" = "200" ]; then
-    ok=1; break
+  echo "restarting phantasma.service..."
+  sudo -n service phantasma restart
+  # Probe the functional endpoint, not the listening socket. A cold start loads
+  # models and has been observed to exceed 150s, during which the socket is
+  # absent and the previous `ss`-based check reported a false failure on a
+  # service that came up fine moments later.
+  #
+  # Probe /api/health, NOT "/". The voice UI's root page is behind a session and
+  # answers 302 to /login for an unauthenticated caller -- correctly, that is
+  # the product working. Demanding a 200 from it made this check unsatisfiable
+  # the day the login was added, and the symptom was a deploy that reported
+  # "no HTTP 200 on 5000 after 300s" on a service that was up, healthy and
+  # listening the whole time. A health check that cannot pass is not a health
+  # check. See SD-phantasma-OPS-027.
+  #
+  # /api/health is the right probe because it is public by design and it
+  # reports the components individually -- "stt":"healthy" is the difference
+  # between "the process is up" and "the thing the owner complained about is
+  # up".
+  ok=0
+  for _ in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/api/health 2>/dev/null)" = "200" ]; then
+      ok=1; break
+    fi
+    sleep 5
+  done
+  # Second assertion: the protected root must redirect to the login, not serve
+  # the device page to an anonymous caller. A 200 here would mean the session
+  # gate had been lost, which is a worse failure than the service being down and
+  # exactly the kind of thing a "is it up?" probe is not looking for.
+  root_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/ 2>/dev/null)"
+  if [ "$root_code" != "302" ]; then
+    echo "  FAILED: / answered $root_code to an unauthenticated request; expected 302 to the login" >&2
+    ok=0
   fi
-  sleep 5
-done
-if [ "$ok" -eq 1 ]; then
-  echo "deploy OK -- service answering 200 on 5000"
-else
+  if [ "$ok" -eq 1 ]; then
+    echo "deploy OK -- /api/health 200, / redirects anonymous callers to the login"
+    # Surface the component report: a deploy that leaves stt unhealthy has
+    # still broken the product, and the owner should not have to go read the
+    # journal to find out.
+    echo -n "  components: "
+    curl -s --max-time 5 http://127.0.0.1:5000/api/health 2>/dev/null \
+      | sed -n 's/.*"components":{\([^}]*\)}.*/\1/p' || true
+  else
   echo "DEPLOY FAILED: no HTTP 200 on 5000 after 300s" >&2
   systemctl is-active phantasma >&2 2>/dev/null || true
   ss -tln 2>/dev/null | grep ':5000' >&2 || echo "  (nothing listening on 5000)" >&2

@@ -10,7 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "sounddevice",
-    "openai-whisper",
+    # faster-whisper (CTranslate2, int8) replaced openai-whisper on 2026-09-29:
+    # 17.6-27.8s became 7.45s on the same CPU, and the int8 build is ~4x
+    # lighter to load. openai-whisper was left in this list after the swap,
+    # which is how the package went UNDECLARED and then missing from
+    # /opt/phantasma/venv on the very next deploy -- STT failed at runtime with
+    # "No module named 'faster_whisper'" while dev worked fine. Declaring what
+    # the code imports is not optional bookkeeping.
+    "faster-whisper>=1.2,<2",
     "ollama",
     "torch",
     "httpx",
@@ -27,7 +34,6 @@ dependencies = [
     "librosa",
     "discord",
     "dio-chacon-wifi-api",
-    "pyalsaaudio",
 ]
 optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff", "mypy"], dotenv = ["python-dotenv"]}
 
@@ -64,7 +70,6 @@ module = [
     "python_miio.*",
     "zeroconf.*",
     "librosa.*",
-    "alsaaudio.*",
 ]
 ignore_missing_imports = true
 

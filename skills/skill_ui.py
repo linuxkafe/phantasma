@@ -696,21 +696,26 @@ def handle_weather_api():
 def _viewer_is_admin() -> bool:
     """Is the current requester an admin?
 
-    Resolved server-side so admin links are never SENT to a non-admin, rather
-    than hidden in CSS: a display:none link still leaves its URL in the page
-    source, which is disclosure by accident. The real gate remains
-    @admin_required on the routes; not sending a link the viewer cannot use is
-    the honest behaviour on top of it.
+    Read from EITHER session key, not just the UI one. The admin area and the
+    voice UI each wrote their own key, and a browser that signed in before the
+    two were unified still carries only the old one: reading `ui_user` alone
+    left that session rendering a non-admin menu on a page the owner could
+    plainly administer, and following an admin link from there asked for the
+    password again -- the exact symptom that prompted the unification.
 
-    `/` is behind a session now, so this reads that session and never the
-    loopback admin bypass: a bypassed local request is admin in /admin/*, but
-    it is not signed in as a user here, and `handle_request` is only reached
-    once a real session exists.
+    The role is resolved from the store on every request in both cases, so
+    neither key is trusted for what it says: a cookie claiming admin for a
+    non-admin resolves to no admin, because the store says so.
     """
     try:
+        from src.api import admin as admin_mod
         from src.api import ui_auth
 
-        return ui_auth.is_admin()
+        if ui_auth.current_user() is not None:
+            return ui_auth.is_admin()
+        # A session from before the unification, or an admin-OTP login that
+        # never touched the voice UI.
+        return bool(ui_auth.admin_session_email())
     except Exception:
         # Never let an auth probe break the device page.
         return False

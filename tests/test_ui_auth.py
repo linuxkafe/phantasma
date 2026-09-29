@@ -526,3 +526,57 @@ def test_the_forgotten_password_link_is_inside_the_login_form():
     assert 'href="/recuperar"' in form.group(0), (
         "the recovery link is outside the login form and will not align with it"
     )
+
+
+# --- both directions, and old sessions --------------------------------------
+
+
+def test_an_admin_otp_login_also_opens_the_voice_ui(app, monkeypatch):
+    """Signing in at /admin and following the brand link to `/` used to ask for
+    the password a second time: the admin wrote `admin_user` and the voice UI
+    only read `ui_user`. Both login paths now establish both keys."""
+    from src.api import admin as admin_mod
+
+    with app.test_request_context("/admin/login"):
+        admin_mod._login_user("user@example.invalid")
+        import flask
+
+        assert flask.session.get(ui_auth.SESSION_KEY) == "user@example.invalid", (
+            "an admin login did not open the voice UI session"
+        )
+        # And the voice UI recognises that session on its own.
+        assert ui_auth.is_authenticated() is True
+
+
+def test_a_pre_unification_session_still_resolves(app, monkeypatch):
+    """A browser that signed in before the two keys were unified carries only
+    the old one. Reading only the new key left that session rendering a
+    non-admin menu on a page the owner can plainly administer, and following an
+    admin link from there asked for the password again."""
+    with app.test_request_context("/"):
+        import flask
+
+        flask.session[ui_auth.ADMIN_SESSION_KEY] = "user@example.invalid"
+        assert ui_auth.is_authenticated() is True, (
+            "a session from before the unification reads as signed out"
+        )
+
+
+def test_a_stale_session_is_cleared_from_both_keys(app):
+    """Deleting an account must revoke it under either key, not leave a cookie
+    that names nobody."""
+    from src.api import admin as admin_mod
+
+    conn = admin_mod.get_db_connection()
+    conn.execute("DELETE FROM users")
+    conn.commit()
+    conn.close()
+
+    with app.test_request_context("/"):
+        import flask
+
+        flask.session[ui_auth.SESSION_KEY] = "user@example.invalid"
+        flask.session[ui_auth.ADMIN_SESSION_KEY] = "user@example.invalid"
+        assert ui_auth.is_authenticated() is False
+        assert ui_auth.ADMIN_SESSION_KEY not in flask.session
+        assert ui_auth.SESSION_KEY not in flask.session
