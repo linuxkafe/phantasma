@@ -234,6 +234,58 @@ def create_app(pipeline=None) -> Flask:
         response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
         return response
 
+    # ============ Command authorisation ============
+
+    # Gate for the endpoints that change the house: /comando, /device_action
+    # and /api/command.
+    #
+    # Two callers, two mechanisms. A browser arrives with a session cookie; a
+    # program arrives with `Authorization: Bearer <token>`. The token grants
+    # exactly one capability -- sending a command -- and cannot reach the
+    # memory graph, the user store or anything under /admin.
+    #
+    # The gate is INACTIVE until PHANTASMA_COMMAND_TOKEN is set. That is
+    # deliberate: the service is already reachable from the LAN, the Android
+    # companion and the Discord skill call these endpoints today, and turning
+    # the gate on by default would break every existing client. Configuring the
+    # token is the moment the owner opts in. An unset token must therefore never
+    # mean "accept anything from anyone who found the port" *because the token
+    # was configured and typo'd* -- enabled() is False in that case and the
+    # request is treated exactly as before.
+    #
+    # A command is a real-world action (it turns the lights on), so this is not
+    # a formality; it is also not a full authorisation system, and does not try
+    # to be one. See src/api/command_token.py for the threat model and for what
+    # is deliberately not implemented.
+    def _command_authorized() -> bool:
+        from src.api import command_token
+
+        if not command_token.enabled():
+            return True  # feature not opted into; behave as before
+        header = request.headers.get("Authorization")
+        if command_token.check_header(header):
+            return True
+        logger.warning("Command rejected: no or invalid bearer token")
+        return False
+
+    @app.before_request
+    def _require_token_for_commands():
+        # Read-only endpoints are left open on purpose: the UI renders devices,
+        # weather and help from them, and they expose nothing that cannot be
+        # read off the device list anyway. Anything that ACTS is gated.
+        if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
+            return None
+        if request.path in (
+            "/comando",
+            "/device_action",
+            "/api/command",
+        ):
+            if not _command_authorized():
+                return jsonify(
+                    {"status": "error", "error": "Authorization required"}
+                ), 401
+        return None
+
     # ============ Legacy Discord/UI contract ============
 
     @app.route("/comando", methods=["POST"])
@@ -443,6 +495,24 @@ def create_app(pipeline=None) -> Flask:
                 components=components,
                 timestamp=datetime.now(),
             ).model_dump()
+        )
+
+    @app.route("/api/auth", methods=["GET"])
+    def auth_status():
+        """Which auth mechanisms are active, without disclosing any secret.
+
+        The owner needs to be able to tell from outside whether the command
+        token is actually set: a typo in the env var leaves the gate OFF, which
+        means the endpoints are open, and that is exactly the kind of thing
+        that must not be a guess. Reports state only, never values.
+        """
+        from src.api import command_token, localauth
+
+        return jsonify(
+            {
+                "command_token": command_token.describe(),
+                "local_bypass": localauth.describe(),
+            }
         )
 
     @app.route("/api/info", methods=["GET"])

@@ -142,7 +142,10 @@ class WhisperSTT:
                 # word, so VAD would keep the wake word and drop the request.
                 vad_filter=False,
             )
-            text = " ".join(seg.text for seg in segments).strip()
+            # Split, not join: real segments already carry a trailing space,
+            # and joining with " " as well produces a double space in every
+            # gap. `" ".join(s.text for s in ...)` is the trap.
+            text = "".join(seg.text for seg in segments).strip()
 
             # Apply domain-specific phonetic fixes (mis-transcriptions of
             # common phrases, e.g. "não é que está ótimo" -> "como está o

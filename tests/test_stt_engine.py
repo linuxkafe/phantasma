@@ -41,7 +41,7 @@ class _FakeSegment:
 class _FakeEngine:
     """Stands in for faster_whisper.WhisperModel."""
 
-    def __init__(self, model_size, device, compute_type, text="Olá  fantasma. ", **_kw):
+    def __init__(self, model_size, device, compute_type, text="Olá fantasma. ", **_kw):
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
@@ -50,6 +50,8 @@ class _FakeEngine:
 
     def transcribe(self, audio, **kwargs):
         self.calls.append({"audio": audio, **kwargs})
+        # Real segments carry their own trailing space; concatenating (not
+        # joining with " ") is what keeps the gaps single-spaced.
         segments = [_FakeSegment(self.text)]
         info = types.SimpleNamespace(language=kwargs.get("language") or "pt")
         return segments, info
