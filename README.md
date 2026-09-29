@@ -69,6 +69,9 @@ All runtime configuration in `config.py` with environment variable overrides:
 | `PHANTASMA_OLLAMA_MODEL` | `llm.model` | Model name (default llama3:8b-instruct-8k) |
 | `PHANTASMA_PIPER_VOICE` | `tts.voice_model_path` | Path to .onnx voice model |
 | `PHANTASMA_QUEUE_SIZE` | `pipeline.queue_maxsize` | Audio queue size |
+| `CHACON_PLUG_IP` | `chacon_plug_ip` | Local IP of the Chacon balcony plug (default 10.0.0.116). Non-empty ⇒ the device gets a tile in `/`. |
+| `CHACON_PLUG_NAME` | `chacon_plug_name` | Nickname shown on the tile (default "luz do balcão") |
+| `CHACON_PLUG_PORT` | `chacon_plug_port` | UDP port (default 18530) |
 
 ## Features Implemented (branch `testing`)
 
@@ -86,7 +89,15 @@ All runtime configuration in `config.py` with environment variable overrides:
 - **Skill-based UI** served at `/` with design system shared from admin
 - **Hamburger menu** with admin links (Cérebro, Dashboard, Config, Users, .env, Logout)
 - **Device sensors** — real temperature/humidity/power, no fake "ON" fallback
+- **Device tiles** grouped by room (`Geral`, `WC`, `Sala`, `Quarto`,
+  `Entrada`) with a per-name icon; a click sends a natural-language command
+  through the same pipeline as a voice request. Devices are listed by
+  `/get_devices`, and their state by `/device_status`
 - **Weather widget** — live IPMA/Open-Meteo via `skill_weather` daemon
+- **Pipeline resilience** — `src/pipeline/noise.py` tracks the ambient noise
+  floor and `src/pipeline/quiet.py` gates replies; the LLM call gets a bounded
+  **connect** timeout (a dead Ollama host used to block with no bound at all
+  and stalled every answer) while keeping the generous read budget
 
 ### Wake Words
 - `olá fantasma` (TTS trigger, score ~0.81)
@@ -97,6 +108,37 @@ All runtime configuration in `config.py` with environment variable overrides:
 - **Tuya sensors** — declared DPS mapping (`SENSOR_TEMP_MAP`), validity 5–45°C
 - **Real readings**: `24.5° · 30m`, `25.3° · 1h`, `0 ppm`, `sem leitura · 17h`
 - No fake "ON" fallback; shows `age_s`, `stale` flag
+
+### Chacon Balcony Light (`skill_chacon_udp`)
+
+The balcony plug is a Hi-Flying **HF-LPB100** (firmware V1.0.08) and is
+controlled **directly over the LAN**, with no vendor account. The previous
+path went through the DIO/Chacon cloud, whose account is dead (see
+`aes/tickets/T036`, `T051`); `skill_chacon` now fails with a clear message
+instead of pretending to work.
+
+- **Device**: MAC `F0:FE:6B:57:E7:5A`, UDP port **18530**, commands in English
+- **No AES key needed.** The plug's local key is random, generated at DIO
+  pairing, so encrypted packets are silently dropped. The firmware accepts
+  **plaintext** packets (header flag `bEncrypt` cleared) whose body header
+  matches the device constants, and it answers them. The skill keeps a UDP
+  socket bound to `:18530` because the plug replies on that **fixed** port,
+  not to the sender's ephemeral one.
+- **Packet** (25 bytes, validated live): open header `pv=0x01`, flag `0x04`,
+  MAC, `dataLen=0x10`; body `reserved=0x00`, `sn=0xFFFF`, `deviceType=0xDF`,
+  `factoryCode=0xF1`, `license=0x21B4`, `cmd`, `arg`, pad. `cmd 0x01`
+  (SET_GPIO_STATUS) with `arg 0xFFFF` = on, `0x00FF` = off.
+- **Triggered** by the balcony nicknames; `PRIORITY=60` so it wins over
+  `skill_tasmota` (50), which cannot drive this firmware.
+- **UI tile** in `/`: `luz do balcão` is listed by `/get_devices` and grouped
+  under **Sala** with the bulb icon. Clicking it routes through the same
+  natural-language pipeline as a voice command.
+- **State is reported as `unknown`, never guessed.** The plug accepts
+  `GET_GPIO_STATUS` (0x02) but encrypts its reply with the per-device key, so
+  there is nothing to read back; `/device_status` therefore answers
+  `{"state": "unknown", "readable": false}` — reachable, but honest about not
+  knowing whether the relay is closed. A fabricated on/off would be worse
+  than admitted ignorance.
 
 ### Weather
 - `skill_weather` daemon populates `weather_cache.json` every 30 min
@@ -122,22 +164,38 @@ All runtime configuration in `config.py` with environment variable overrides:
 - **RAG** — retrievable chunks with tags/facts
 - **FlyBrain Manager** — reinforcement parameters (α, γ, ε, steps)
 - **Users** — role-based (admin/user), bcrypt passwords
-- **Config/Env** — YAML/ENV editor with validation
+- **Config/Env** — YAML/ENV editor with validation. `update_config()` inserts
+  the row when the key is not in the config table yet, so a setting that was
+  never persisted can still be set from the UI and read back; categories come
+  from `CONFIG_CONTROLS` and each value is normalised per key.
 
 ### Quality Gates
-- **Python**: 80/80 tests passing
+- **Python**: 641 passed, 1 skipped (`pytest`, full suite)
+  - 17 `tests/test_hotword.py` errors are **pre-existing** `onnxruntime`
+    model-loading failures, unrelated to the code changes; proven by
+    re-running them with the changes stashed
 - **Node (mermaid)**: 26/26 tests passing
 - **Chromium (explorer)**: 36/36 tests passing
 - **0 tracebacks** in service
-- Ruff lint + format, MyPy typecheck, pytest with mutation tests
+- Ruff lint + format, MyPy typecheck, pytest
+- Pre-commit hook runs the gates on every commit (`.aes/hooks/pre-commit.sh`)
 
 ## Skills System
 
-Skills are dynamic Python modules in `skills/` directory. Each skill defines:
-- `TRIGGERS`: list of keyword patterns
-- `TRIGGER_TYPE`: "contains" | "exact" | "regex"
-- `handle(text, context)`: function returning response text
-- Optional: `init_skill_daemon()` for background tasks
+Skills are dynamic Python modules in `skills/` directory. Two forms are
+supported and both are loaded by `skills/loader.py`:
+
+- **Class-based** (preferred) — subclass `skills.base.Skill` with `NAME`,
+  `TRIGGERS`, `TRIGGER_TYPE`, `PRIORITY` and `handle()`. A higher `PRIORITY`
+  wins when several skills match the same text, which is how
+  `skill_chacon_udp` (60) takes the balcony nicknames from `skill_tasmota`
+  (50). `get_status_for_device()` here is what feeds the `/device_status`
+  endpoint behind each UI tile.
+- **Legacy module-level** — a module exposing `TRIGGERS` and
+  `handle(text, context)`, wrapped by the loader in a `LegacySkillAdapter`.
+
+`TRIGGER_TYPE` is `"contains" | "exact" | "regex"`. Skills may also define
+`init_skill_daemon()` for background tasks.
 
 ## REST API
 
@@ -152,6 +210,9 @@ Flask server at port 5000:
 | `POST /api/tts` | Text-to-speech |
 | `GET /api/devices` | List configured devices |
 | `POST /api/devices/<name>/control` | Control device |
+| `GET /get_devices` | Device list for the `/` UI (toggles + sensors) |
+| `GET /device_status?nickname=` | State behind one UI tile |
+| `POST /device_action` | Toggle a device by nickname (natural language) |
 | `GET/POST /api/memory` | Long-term memory |
 | `GET /api/weather` | Weather widget data |
 | `GET /api/memory/graph` | Explorer payload |
@@ -191,6 +252,8 @@ pHantasma/
 │   │   └── design.py     # Design system CSS/JS
 │   └── pipeline/         # Voice pipeline stages
 │       ├── audio.py      # Audio I/O, VAD, hotword, GMIF classifier
+│       ├── noise.py      # Ambient noise-floor tracking
+│       ├── quiet.py      # Reply gating (stay quiet when not needed)
 │       ├── stt.py        # Whisper STT
 │       ├── llm.py        # Ollama LLM
 │       ├── tts.py        # Piper TTS
@@ -198,6 +261,8 @@ pHantasma/
 ├── tests/                # Unit + integration tests (mocked + real)
 ├── skills/               # Skill modules (dynamic loading)
 │   ├── skill_ui.py       # Voice UI at /
+│   ├── skill_chacon_udp.py # Chacon balcony light over local UDP
+│   ├── skill_tasmota.py  # Tasmota HTTP device path (PRIORITY 50)
 │   ├── skill_dream.py    # Standard dream (02:30)
 │   ├── skill_gmif_dream.py # GMIF dream (03:00)
 │   ├── skill_feedback.py # ++/-- feedback
@@ -239,8 +304,15 @@ cd android
 
 | Branch | Status |
 |--------|--------|
-| `master` | Stable production |
-| `testing` | Latest features (GMIF dream, unified brain, sleep button, GMIF classifier, sleep endpoint) |
+| `main` | Production (mirrors `origin/main`; formerly `master`) |
+| `testing` | Latest features, merged into `main` (GMIF dream, unified brain, sleep button, local Chacon control, admin config editor) |
+
+Recent work on `testing` (all in `main`):
+- `feat(skill): control Chacon balcony plug over local UDP (no cloud/AES)` — voice control
+- `feat(ui): show the Chacon balcony light in / with a Sala tile and honest state`
+- `chore: land in-progress work from parallel sessions` — admin config editor, noise/quiet pipeline, LLM connect timeout, Tasmota path, FlyBrain/GMIF fixes
+
+See `aes/tickets/` for the tracked work items (`T051` Chacon, `T053` Tasmota reflash).
 
 ## License
 
