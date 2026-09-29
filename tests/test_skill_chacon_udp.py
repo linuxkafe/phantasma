@@ -62,3 +62,54 @@ def test_handle_returns_none_for_unrelated_prompt():
 def test_handle_returns_none_without_action():
     """Mentioning the device without an action must not fire a command."""
     assert skill_chacon_udp.handle("e a luz do balcao", "e a luz do balcao") is None
+
+
+def test_status_admits_ignorance_instead_of_guessing():
+    """The plug cannot be read back, so the tile must say so.
+
+    GET_GPIO_STATUS is accepted by the device but the reback body is encrypted
+    with the per-device AES key, so there is no state to report. Returning
+    "unreachable" would be wrong too -- the device does answer. A fabricated
+    on/off is the one answer that is definitely a lie, so it is not offered.
+    """
+    status = skill_chacon_udp.get_status_for_device("luz do balcão")
+    assert status["state"] == "unknown"
+    assert status["readable"] is False
+    assert skill_chacon_udp.get_status_for_device("desumidificador") == {}
+
+
+def test_status_is_reachable_from_the_skill_class():
+    """`/device_status` looks on the instance as well as on the module."""
+    skill = skill_chacon_udp.ChaconUdpSkill()
+    assert skill.get_status_for_device("luz do balcao")["state"] == "unknown"
+
+
+def test_ui_places_the_balcony_light_in_the_sala():
+    """Reported: the balcony light had no tile in `/` at all.
+
+    Two separate causes, and fixing only one leaves it invisible: the name
+    carries no room word, so it fell through to "Geral" instead of "Sala".
+    """
+    from skills.skill_ui import handle_request
+
+    page = handle_request()
+    assert 'n.includes("balcao") || n.includes("balcão")' in page
+    # The icon must stay the existing bulb rule rather than the default ⚡,
+    # which is what a generic plug would get.
+    assert "n.includes('luz')||n.includes('candeeiro')" in page
+
+
+def test_get_devices_lists_the_chacon_plug():
+    """The UI builds its tiles from `/get_devices`, which only knew the cloud
+    device dicts, so a locally-controlled device had no way to show up."""
+    from unittest.mock import MagicMock
+
+    from src.api.routes import create_app
+
+    app = create_app(pipeline=MagicMock())
+    app.config["TESTING"] = True
+    resp = app.test_client().get("/get_devices")
+
+    assert resp.status_code == 200
+    toggles = resp.get_json()["devices"]["toggles"]
+    assert "luz do balcão" in toggles

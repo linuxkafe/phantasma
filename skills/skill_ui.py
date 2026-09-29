@@ -777,6 +777,11 @@ def handle_request():
             function getRoomName(name) {
                 const n = name.toLowerCase();
                 if (n.includes("wc") || n.includes("banho")) return "WC";
+                // "luz do balcao" carries no room word of its own, so it fell
+                // through to "Geral" and the light looked misplaced. The balcony
+                // belongs to the Sala group in the layout, so name it here
+                // instead of renaming the device.
+                if (n.includes("balcao") || n.includes("balcão")) return "Sala";
                 if (n.includes("sala")) return "Sala";
                 if (n.includes("quarto")) return "Quarto";
                 if (n.includes("entrada") || n.includes("corredor")) return "Entrada";

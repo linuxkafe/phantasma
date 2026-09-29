@@ -19,6 +19,7 @@ Environment Variables:
 
 import os
 import re
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +86,27 @@ class HotwordConfig:
     # tree makes prod and dev unfalsifiable against each other.
     thresholds_per_model: dict = field(default_factory=dict)
 
+    # --- Ambient-noise adaptive threshold ---
+    #
+    # Added 2026-09-29 after a 03:41 false activation inside quiet hours
+    # (score 0.80 vs a flat 0.70) that played the acknowledgement and
+    # transcribed to nothing. The room was the trigger, not the wake word.
+    #
+    # A flat threshold cannot distinguish a quiet room from a noisy one, so the
+    # measured floor of the room raises the bar -- and only the floor, never the
+    # instantaneous level, because the loudest sound in the room is the user
+    # saying the wake word. See src/pipeline/noise.py for why that asymmetry is
+    # the whole design.
+    #
+    # max_bump is deliberately bounded: raising the bar forever is the same as
+    # turning the microphone off. 0.20 takes the 03:41 event (0.80) below a
+    # 0.90 bar while leaving a real wake word, which scores far higher than the
+    # 0.0009 speech floor measured on 2026-09-27, reachable.
+    noise_adaptive: bool = True
+    noise_quiet_db: float = -60.0
+    noise_loud_db: float = -35.0
+    noise_max_bump: float = 0.20
+
 
 @dataclass
 class PipelineConfig:
@@ -112,6 +134,16 @@ class LLMConfig:
     model: str = "llama3.1:8b"
     model_fallback: str = "qwen3:8b"
     timeout: int = 600
+    # Connect timeout, separate from the read timeout above.
+    #
+    # OLLAMA_TIMEOUT is a READ budget: a long generation legitimately takes
+    # minutes, and the operator set 600 on purpose. It was never passed to
+    # ollama.Client at all, so a host that is simply down (the primary
+    # 10.0.0.128:11434 stopped answering on 2026-09-29) blocked the caller until
+    # the OS gave up -- an assistant that cannot answer is one that also cannot
+    # be restarted or tested. Reaching a dead host is not a slow generation, it
+    # is a failure, and it is worth failing fast on.
+    connect_timeout: int = 10
     context_size: int = 4096
     system_prompt: str = ""
     threads: int = 4
@@ -167,7 +199,79 @@ class QuietHoursConfig:
     """Quiet hours (night mode) configuration."""
 
     start: int = 23
-    end: int = 9
+    end: int = 7  # was 9: the owner asked for 23-07. .env still says 9; the admin
+                 # override wins over both and is what the schedule reads.
+
+
+_OVERLAY_KEYS = frozenset(
+    {
+        # Audio
+        "ALSA_DEVICE_IN",
+        "ALSA_DEVICE_OUT",
+        "ALSA_VOLUME_PERCENT",
+        "MIC_SAMPLERATE",
+        "VAD_AGGRESSIVENESS",
+        "VAD_FRAME_DURATION_MS",
+        "WAKEWORD_CONFIDENCE",
+        "WAKEWORD_PERSISTENCE",
+        "WAKEWORD_COOLDOWN_SECONDS",
+        "WAKEWORD_MODELS",
+        # General
+        "AUDIO_FEEDBACK_ENABLED",
+        "USE_SOX_EFFECTS",
+        "FEEDBACK_WINDOW_SECONDS",
+        "STT_MAX_AUDIO_SECONDS",
+        "QUEUE_MAXSIZE",
+        "MUSIC_DIR",
+        "GREETING_PATH",
+        "TTS_MODEL_PATH",
+        "SKILLS_DIR",
+        "HOME_COORDS",
+        # LLM
+        "OLLAMA_HOST_PRIMARY",
+        "OLLAMA_HOST_FALLBACK",
+        "OLLAMA_MODEL_PRIMARY",
+        "OLLAMA_MODEL_FALLBACK",
+        "OLLAMA_VISION_MODEL",
+        "OLLAMA_CONTEXT_SIZE",
+        "OLLAMA_THREADS",
+        "OLLAMA_TIMEOUT",
+        "WHISPER_MODEL",
+        "WHISPER_INITIAL_PROMPT",
+        # Security
+        "DEBUG_MODE",
+        "ALERT_EMAIL",
+    }
+)
+
+
+def _overlay_owner_settings(memory_db_path: str) -> None:
+    """Apply owner settings written by /admin/config on top of os.environ.
+
+    The admin UI persists friendly controls to ``app_settings`` (the same
+    database table as ``quiet_schedule``). Without this overlay those controls
+    would be decoration: the table is real, this read is what turns it into
+    effective configuration for the whole process on the next start.
+
+    Deliberately silent on failure. ``app_settings`` hosts no secrets (secret
+    service tokens stay in the root-owned ``.env``), the key set is whitelisted
+    above, and any row that cannot be applied is dropped rather than fatal.
+    """
+    if not memory_db_path:
+        return
+    try:
+        conn = sqlite3.connect(memory_db_path, timeout=5)
+    except sqlite3.Error:
+        return
+    try:
+        rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
+    except sqlite3.Error:
+        rows = ()
+    finally:
+        conn.close()
+    for key, value in rows:
+        if key in _OVERLAY_KEYS and value not in (None, ""):
+            os.environ[key] = str(value)
 
 
 @dataclass
@@ -235,6 +339,12 @@ class Config:
     ewelink_devices: dict = field(default_factory=dict)
     chacon_cloud_user: str = ""
     chacon_cloud_pass: str = ""
+    # Local Chacon plug (HF-LPB100). The cloud credentials above are dead, so the
+    # plug is controlled directly over UDP. Non-empty IP => the device gets a tile
+    # in the UI. Defaulted to the known plug so the tile exists without env setup.
+    chacon_plug_ip: str = "10.0.0.116"
+    chacon_plug_name: str = "luz do balcão"
+    chacon_plug_port: int = 18530
     tapo_user: str = ""
     tapo_pass: str = ""
     tapo_cameras: dict = field(default_factory=dict)
@@ -376,6 +486,13 @@ class Config:
         # correct -- the old literal also did not exist there.
         cfg.public_dir = os.getenv("PUBLIC_DIR", str(base / "public"))
 
+        # Owner-editable settings saved from /admin/config land in app_settings
+        # (the same store as quiet_schedule and reaction weights). Overlay them
+        # on os.environ so the runtime honours the next boot: the UI controls
+        # are real, not a decorative mirror. All env reads below happen after
+        # this point. A missing DB or a bad row must never brick starting up.
+        _overlay_owner_settings(cfg.memory_db_path)
+
         # Debug
         cfg.debug = os.getenv("DEBUG_MODE", "false").lower() == "true"
         cfg.alert_email = os.getenv("ALERT_EMAIL", cfg.alert_email)
@@ -479,6 +596,9 @@ class Config:
         cfg.llm.model = os.getenv("OLLAMA_MODEL_PRIMARY", cfg.llm.model)
         cfg.llm.model_fallback = os.getenv("OLLAMA_MODEL_FALLBACK", cfg.llm.model_fallback)
         cfg.llm.timeout = int(os.getenv("OLLAMA_TIMEOUT", str(cfg.llm.timeout)))
+        cfg.llm.connect_timeout = int(
+            os.getenv("OLLAMA_CONNECT_TIMEOUT", str(cfg.llm.connect_timeout))
+        )
         cfg.llm.context_size = int(os.getenv("OLLAMA_CONTEXT_SIZE", str(cfg.llm.context_size)))
         cfg.llm.threads = int(os.getenv("OLLAMA_THREADS", str(cfg.llm.threads)))
 
@@ -538,6 +658,9 @@ class Config:
         # Chacon
         cfg.chacon_cloud_user = os.getenv("CHACON_CLOUD_USER", "")
         cfg.chacon_cloud_pass = os.getenv("CHACON_CLOUD_PASS", "")
+        cfg.chacon_plug_ip = os.getenv("CHACON_PLUG_IP", cfg.chacon_plug_ip)
+        cfg.chacon_plug_name = os.getenv("CHACON_PLUG_NAME", cfg.chacon_plug_name)
+        cfg.chacon_plug_port = int(os.getenv("CHACON_PLUG_PORT", cfg.chacon_plug_port))
 
         # Tapo
         cfg.tapo_user = os.getenv("TAPO_USER", "")
@@ -699,6 +822,9 @@ EWELINK_REGION = config.ewelink_region
 EWELINK_DEVICES = config.ewelink_devices
 CHACON_CLOUD_USER = config.chacon_cloud_user
 CHACON_CLOUD_PASS = config.chacon_cloud_pass
+CHACON_PLUG_IP = config.chacon_plug_ip
+CHACON_PLUG_NAME = config.chacon_plug_name
+CHACON_PLUG_PORT = config.chacon_plug_port
 TAPO_USER = config.tapo_user
 TAPO_PASS = config.tapo_pass
 TAPO_CAMERAS = config.tapo_cameras
@@ -774,6 +900,9 @@ __all__ = [
     "EWELINK_DEVICES",
     "CHACON_CLOUD_USER",
     "CHACON_CLOUD_PASS",
+    "CHACON_PLUG_IP",
+    "CHACON_PLUG_NAME",
+    "CHACON_PLUG_PORT",
     "TAPO_USER",
     "TAPO_PASS",
     "TAPO_CAMERAS",

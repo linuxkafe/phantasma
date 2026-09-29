@@ -28,7 +28,7 @@ import os
 import socket
 import unicodedata
 
-from skills.base import Skill, SkillContext, TriggerType
+from skills.base import Skill, TriggerType
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,26 @@ def _is_for_plug(prompt_lower):
     )
 
 
+def get_status_for_device(nickname: str) -> dict:
+    """State for the UI tile.
+
+    The plug does NOT expose a readable state. GET_GPIO_STATUS (cmd 0x02) is
+    accepted, but the reback body is encrypted with the per-device AES key
+    that only the DIO pairing knows, so there is nothing to decrypt and no way
+    to learn whether the relay is currently closed. Verified live: a 0x02
+    query returns a 25-byte reback of opaque bytes.
+
+    So the honest answer is "reachable but state unknown", not a guessed
+    on/off and not "unreachable" (it does answer, which is what /device_status
+    conflates with reachability). The UI renders `unknown` at full opacity
+    with a disabled-looking switch that still sends commands -- a lamp whose
+    state is invented would be worse than one that admits ignorance.
+    """
+    if not _is_for_plug(nickname.lower()):
+        return {}
+    return {"state": "unknown", "readable": False}
+
+
 def handle(user_prompt_lower, user_prompt_full):
     """Legacy-style module handler; kept for direct callers and tests."""
     if not _is_for_plug(user_prompt_lower):
@@ -192,6 +212,8 @@ class ChaconUdpSkill(Skill):
     TRIGGERS = TRIGGERS_NICKNAMES
     TRIGGER_TYPE = TriggerType.CONTAINS
     PRIORITY = 60  # wins over skill_tasmota (PRIORITY=50)
+
+    get_status_for_device = staticmethod(get_status_for_device)
 
     def handle(self, text: str) -> str:
         if not _is_for_plug(text):

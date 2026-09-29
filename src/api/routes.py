@@ -300,6 +300,15 @@ def create_app(pipeline=None) -> Flask:
                     toggles.append(n)
             if hasattr(config, "shelly_gas_url") and config.shelly_gas_url:
                 status.append("Sensor de Gás")
+            # Chacon plug is not a cloud device: it has no entry in any *_devices
+            # dict, but it IS controllable, so it must get a tile like the rest.
+            # Gated on the IP being configured, not on the plug being online --
+            # reachability is what /device_status reports, not what a listing means.
+            plug_ip = getattr(config, "chacon_plug_ip", "")
+            if plug_ip:
+                plug_name = getattr(config, "chacon_plug_name", "") or "luz do balcão"
+                if plug_name not in toggles:
+                    toggles.append(plug_name)
 
             return jsonify(
                 {
@@ -325,9 +334,14 @@ def create_app(pipeline=None) -> Flask:
             # Check skills that have get_status function
             for skill in pipeline._skill_loader.skills:
                 module = getattr(skill, "_module", None)
+                candidates = []
                 if module and hasattr(module, "get_status_for_device"):
+                    candidates.append(module)
+                if hasattr(skill, "get_status_for_device"):
+                    candidates.append(skill)
+                for impl in candidates:
                     try:
-                        res = module.get_status_for_device(nickname)
+                        res = impl.get_status_for_device(nickname)
                         if res and res.get("state") != "unreachable":
                             return jsonify(res)
                     except Exception:
