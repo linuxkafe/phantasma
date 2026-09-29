@@ -332,5 +332,56 @@ def test_menu_is_rendered_for_a_signed_in_user():
     application.secret_key = "k"
     with application.test_request_context("/"):
         page = skill_ui.handle_request()
-    assert "/logout" in page, "no logout link in the menu"
+    assert 'href="/logout"' in page, "no logout link in the menu"
     assert 'class="nav-link"' in page
+
+
+def test_non_admin_is_not_sent_admin_links(monkeypatch, tmp_path):
+    """An admin URL in the page of someone who may not use it is disclosure by
+    accident, even behind `display:none`. Asserted on the rendered LINK, not on
+    the substring: the help text legitimately mentions /admin/brain/sleep, and a
+    substring check would flag that and then pass on a page that did leak it.
+    """
+    _seed(tmp_path, monkeypatch, email="plain@example.invalid", role="user")
+    from flask import Flask
+
+    from skills import skill_ui
+    from src.api import ui_auth
+
+    application = Flask(__name__)
+    application.secret_key = "k"
+    client = application.test_client()
+    with client.session_transaction() as s:
+        s[ui_auth.SESSION_KEY] = "plain@example.invalid"
+    with application.test_request_context("/"):
+        page = skill_ui.handle_request()
+
+    import re
+
+    admin_links = re.findall(r'href="(/admin[^"]*)"', page)
+    assert admin_links == [], f"admin links sent to a non-admin: {admin_links}"
+    assert 'href="/logout"' in page
+
+
+def test_admin_is_sent_admin_links(monkeypatch, tmp_path):
+    """The other direction: the gate must not be so tight that an admin gets no
+    menu either, which is the failure that made the page feel broken before."""
+    _seed(tmp_path, monkeypatch, email="boss@example.invalid", role="admin")
+    from flask import Flask
+
+    from src.api import ui_auth
+
+    application = Flask(__name__)
+    application.secret_key = "k"
+    from skills import skill_ui as _ui
+
+    _ui.register_routes(application)
+    client = application.test_client()
+    with client.session_transaction() as s:
+        s[ui_auth.SESSION_KEY] = "boss@example.invalid"
+    # A real request, so handle_request() sees the session the client holds.
+    page = client.get("/").get_data(as_text=True)
+
+    import re
+
+    assert "/admin/brain" in re.findall(r'href="(/admin[^"]*)"', page)
