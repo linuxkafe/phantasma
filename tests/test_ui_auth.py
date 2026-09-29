@@ -499,3 +499,30 @@ def admin_conn(app):
     from src.api import admin as admin_mod
 
     return admin_mod.get_db_connection()
+
+
+def test_the_forgotten_password_link_is_inside_the_login_form():
+    """It sat after the closing form tag, so it inherited neither the card's
+    width nor its padding and rendered flush against the viewport, left of the
+    panel it belongs to.
+
+    The HTML comments are stripped before the search. A literal closing tag
+    inside a comment still reads as a tag to a naive string search, and one did
+    exactly that while verifying this fix -- reporting the bug as unfixed while
+    the served page was correct.
+    """
+    import re
+
+    from flask import Flask
+
+    from skills import skill_ui
+
+    application = Flask(__name__)
+    with application.test_request_context("/login"):
+        page = skill_ui.render_login_page().get_data(as_text=True)
+    bare = re.sub(r"<!--.*?-->", "", page, flags=re.S)
+    form = re.search(r"<form.*?</form>", bare, re.S)
+    assert form, "no login form rendered"
+    assert 'href="/recuperar"' in form.group(0), (
+        "the recovery link is outside the login form and will not align with it"
+    )

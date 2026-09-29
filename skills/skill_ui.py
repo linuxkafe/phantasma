@@ -181,9 +181,14 @@ LOGIN_PAGE = """<!DOCTYPE html>
     <input id="password" name="password" type="password"
            autocomplete="current-password" required>
     <button type="submit">Entrar</button>
-    <!-- Inside the form's box. It used to sit AFTER </form>, so it inherited
-         neither the card's max-width nor its padding and rendered flush
-         against the viewport edge, left of the panel it belongs to. -->
+    <!-- Inside the form's box. It used to sit after the closing form tag, so it
+         inherited neither the card's width nor its padding and rendered flush
+         against the viewport, left of the panel it belongs to.
+
+         The comment deliberately spells out "the closing form tag" rather than
+         writing the tag: a literal closing tag inside an HTML comment still
+         reads as a tag to any naive string search, and one did exactly that
+         when verifying this fix. -->
     <p class="sub" style="margin:1.25rem 0 0;text-align:center">
       <a href="/recuperar" style="color:var(--muted)">Esqueci-me a password</a>
     </p>
