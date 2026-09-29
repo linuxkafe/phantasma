@@ -72,16 +72,26 @@ def _build_session_databases() -> tuple[Path, Path]:
     # grouped by config_categories, so an empty store renders no inputs and every
     # a11y assertion about those controls becomes vacuously true. Seeding keeps
     # the test meaningful without borrowing production data as its fixture.
+    # The /admin/config grid now renders only the categories the CONFIG_CONTROLS
+    # registry knows, so those are the categories seeded here.
     con.executemany(
         "INSERT INTO config_categories (name, description, display_order) VALUES (?, ?, ?)",
-        [("geral", "General settings", 1), ("audio", "Audio configuration", 2)],
+        [
+            ("General", "General settings", 1),
+            ("Audio", "Audio configuration", 2),
+            ("LLM", "Large language model", 3),
+            ("Security", "Security settings", 4),
+        ],
     )
     con.executemany(
         "INSERT INTO config (category, key, value, description, is_sensitive) "
         "VALUES (?, ?, ?, ?, 0)",
         [
-            ("geral", "idioma", "pt-PT", "Idioma de resposta"),
-            ("geral", "nome", "Ambrósia", "Nome da persona"),
+            ("Audio", "ALSA_VOLUME_PERCENT", "85", "Audio volume"),
+            ("Audio", "WAKEWORD_CONFIDENCE", "0.70", "Wake word threshold"),
+            ("General", "AUDIO_FEEDBACK_ENABLED", "true", "Audio feedback"),
+            ("LLM", "WHISPER_MODEL", "medium", "Speech to text model"),
+            ("Security", "DEBUG_MODE", "false", "Debug mode"),
         ],
     )
     con.commit()

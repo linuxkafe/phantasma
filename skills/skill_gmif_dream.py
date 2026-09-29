@@ -11,21 +11,20 @@ This extends the standard dream system by:
 5. Consolidating graph structure during sleep cycle
 """
 
-import threading
-import time
 import datetime
-import random
-import sqlite3
 import json
 import os
+import sqlite3
+import threading
+import time
+
 import config
-from tools import search_with_searxng
 from data_utils import save_to_rag
 from src.pipeline.gmif_classifier import (
-    GMIFLevel, ValidationType,
-    classify_all_edges, classify_all_nodes, get_gmif_stats,
-    classify_edge
+    classify_all_edges,
+    classify_all_nodes,
 )
+from tools import search_with_searxng
 
 # --- Config ---
 GMIF_DREAM_TIME = "03:00"  # After standard dream (02:30)
@@ -43,7 +42,15 @@ def _safe_ollama_chat(prompt, system_instruction=""):
     ]
     for host, model in targets:
         try:
-            client = ollama.Client(host=host, timeout=config.OLLAMA_TIMEOUT)
+            # Connect bound, separate from the read budget. The pipeline found
+            # on 2026-09-29 that the primary host can simply be down, and a
+            # bare timeout also caps connect at 600s -- a dead host should
+            # fail in seconds, not minutes (see assistant._llm_timeout).
+            import httpx
+
+            read = float(getattr(config, 'OLLAMA_TIMEOUT', 600) or 600)
+            connect = min(float(getattr(config, 'OLLAMA_CONNECT_TIMEOUT', 10) or 10), read)
+            client = ollama.Client(host=host, timeout=httpx.Timeout(read, connect=connect))
             messages = []
             if system_instruction:
                 messages.append({'role': 'system', 'content': system_instruction})
@@ -56,7 +63,8 @@ def _safe_ollama_chat(prompt, system_instruction=""):
 
 
 def _extract_json(text):
-    import re, ast
+    import ast
+    import re
     if not text: return None
     try:
         match = re.search(r'(\{.*\})', text, re.DOTALL)
@@ -181,7 +189,7 @@ def _analyze_graph_gaps():
 def _research_gap(gap_type, gap_data):
     """Perform targeted online research for a specific graph gap.
     Returns synthesized knowledge to add to graph."""
-    
+
     if gap_type == 'weak_edge':
         source = gap_data['source']
         target = gap_data['target']
@@ -192,7 +200,7 @@ def _research_gap(gap_type, gap_data):
             f"causais ou lógicas. Apenas a query, sem aspas."
         )
         desired_level = "M3/M4"
-        
+
     elif gap_type == 'disconnected_pair':
         source = gap_data['source']
         target = gap_data['target']
@@ -203,7 +211,7 @@ def _research_gap(gap_type, gap_data):
             f"lógicas, causais ou de dependência. Apenas a query."
         )
         desired_level = "M2/M3"
-        
+
     elif gap_type == 'missing_requirement':
         node = gap_data['node']
         query_prompt = (
@@ -212,7 +220,7 @@ def _research_gap(gap_type, gap_data):
             f"lógicas, técnicas ou ontológicas. Apenas a query."
         )
         desired_level = "M3"
-        
+
     elif gap_type == 'causal_gap':
         source = gap_data['source']
         target = gap_data['target']
@@ -223,7 +231,7 @@ def _research_gap(gap_type, gap_data):
             f"informacionais. Apenas a query."
         )
         desired_level = "M4/M5"
-        
+
     else:
         return None
 
@@ -255,16 +263,16 @@ def _apply_research_to_graph(research_results, gap_type, gap_data):
     """Apply synthesized research to the memory graph."""
     if not research_results:
         return False
-    
+
     conn = sqlite3.connect(config.DB_PATH)
     cur = conn.cursor()
-    
+
     try:
         knowledge = research_results.get('conhecimento', '')
         confidence = research_results.get('confianca', 0.5)
         rel_type = research_results.get('tipo_relacao', 'related_to')
         evidence = research_results.get('evidencia', [])
-        
+
         if gap_type == 'weak_edge':
             # Upgrade existing edge
             cur.execute(
@@ -313,13 +321,13 @@ def _apply_research_to_graph(research_results, gap_type, gap_data):
 def _gmif_dream_cycle():
     """Main GMIF Dream cycle - analyzes graph gaps and researches them."""
     print("🧬 [GMIF-Dream] Iniciando ciclo de otimização do grafo cognitivo...")
-    
+
     # 1. Ensure GMIF classification is up to date
     conn = sqlite3.connect(config.DB_PATH)
     classify_all_edges(conn)
     classify_all_nodes(conn)
     conn.close()
-    
+
     # 2. Analyze gaps
     gaps = _analyze_graph_gaps()
     print(f"🧬 [GMIF-Dream] Gaps encontrados: "
@@ -327,11 +335,11 @@ def _gmif_dream_cycle():
           f"{len(gaps['disconnected_pairs'])} pares desconectados, "
           f"{len(gaps['missing_requirements'])} requisitos em falta, "
           f"{len(gaps['causal_gaps'])} gaps causais")
-    
+
     # 2. Research top priority gaps (limit to avoid API spam)
     max_research = 3
     researched = 0
-    
+
     # Priority: causal gaps > weak edges > disconnected pairs > missing requirements
     for gap_type, gap_list in [
         ('causal_gap', gaps['causal_gaps']),
@@ -342,7 +350,7 @@ def _gmif_dream_cycle():
         for gap in gap_list[:max_research]:
             if researched >= max_research:
                 break
-            
+
             print(f"🧬 [GMIF-Dream] A pesquisar gap {gap_type}: {gap}")
             research = _research_gap(gap_type, gap)
             if research:
@@ -354,7 +362,7 @@ def _gmif_dream_cycle():
                 save_to_rag(f"GMIF-Dream Insight ({gap_type}): {research.get('conhecimento', '')}")
                 researched += 1
                 time.sleep(5)  # Rate limit
-    
+
     # 4. Consolidate: run standard consolidation too
     # (calls the standard dream consolidation)
     try:
@@ -362,7 +370,7 @@ def _gmif_dream_cycle():
         dream_mod._consolidate_memories()
     except:
         pass
-    
+
     print(f"🧬 [GMIF-Dream] Ciclo completo. Pesquisados: {researched} gaps.")
 
 
@@ -388,17 +396,17 @@ def init_skill_daemon():
 
 def handle(user_prompt_lower, user_prompt_full):
     text = user_prompt_lower.strip()
-    
+
     if text in ["desliga gmif", "para gmif", "cancela gmif"]:
         globals()['GMIF_DREAM_ENABLED'] = False
         return "GMIF-Dream desativado. O grafo deixará de ser otimizado automaticamente."
-    
+
     if text in ["liga gmif", "ativa gmif"]:
         globals()['GMIF_DREAM_ENABLED'] = True
         return "GMIF-Dream ativado. O grafo será otimizado noturnamente."
-    
+
     if text in ["sonha gmif", "otimiza grafo", "gmif agora"]:
         threading.Thread(target=_gmif_dream_cycle, daemon=True).start()
         return "GMIF-Dream iniciado manualmente. O grafo será analisado e otimizado."
-    
+
     return None

@@ -31,6 +31,7 @@ from data_utils import get_cached_response, retrieve_from_rag
 from skills import SkillContext, SkillLoader
 from src.brain.fly_brain import FlyBrain
 from src.brain.persistence import FlyBrainStore
+from src.pipeline import quiet
 from src.pipeline.audio import (
     AudioCapture,
     AudioPlayback,
@@ -45,6 +46,24 @@ from tools import search_with_searxng
 # What the Phantom says when it hears its own name. Synthesised on first
 # use and served from the TTS cache after that.
 GREETING_TEXT = "Sim."
+
+
+def _llm_timeout():
+    """The HTTP timeout for one Ollama call.
+
+    Read budget stays generous (OLLAMA_TIMEOUT, 600s in prod) because a long
+    generation is legitimate. Connect budget is short: reaching a host that is
+    down is a failure, not a slow answer, and on 2026-09-29 a dead primary
+    (10.0.0.128:11434) left the call blocking with no bound at all, which is
+    what stopped the whole pipeline from answering.
+    """
+    import httpx
+
+    import config
+
+    read = float(getattr(config.config.llm, "timeout", 600) or 600)
+    connect = min(float(getattr(config.config.llm, "connect_timeout", 10) or 10), read)
+    return httpx.Timeout(read, connect=connect)
 
 
 def sanitize_llm_context(context: str) -> str:
@@ -425,6 +444,29 @@ class PhantasmaPipeline:
                     "🔬 Wake scores: " + (" ".join(f"{n}={v:.4f}" for n, v in ranked) or "n/a")
                 )
             if detected:
+                # Night mode is not "speak quietly": it means the assistant is
+                # not awake. Measured on 2026-09-29 at 03:41, inside quiet
+                # hours, a false positive (0.80 against 0.70) reached the branch
+                # below, played "Sim." at 03:41 in an empty house, burned 23 s
+                # of STT, and transcribed to nothing. _speak's silence gate
+                # cannot help here: _play_audio_feedback() speaks directly, and
+                # by then the microphone, the model and the user have all been
+                # woken for no reason.
+                #
+                # So the detection is swallowed here, before any of it. The
+                # detector is told to reject rather than to reset: the mel
+                # buffer now describes a wake word the rest of the system never
+                # accepted (the phantom-score state _prime_buffer exists to
+                # prevent), but the cooldown must survive, or a steady noise
+                # source is re-scored and re-rejected on every frame.
+                if quiet.is_quiet():
+                    logger.info(
+                        "Quiet hours: hotword %r rejected (score %.2f) -- not waking",
+                        model,
+                        max(scores.values()) if scores else 0.0,
+                    )
+                    self.hotword.reject_detection()
+                    return
                 logger.info(f"Hotword detected: {model}")
                 self._hotword_detected = True
                 self._collecting_speech = True
@@ -732,6 +774,14 @@ class PhantasmaPipeline:
 
         Holding the mic costs a moment of silence. The loop cost the device.
         """
+        # Night mode: during quiet hours the answer is written but not spoken.
+        # This is the single choke point both response paths go through, so no
+        # route can bypass it. The text is still logged -- night mode silences
+        # the speaker, it does not make the assistant mute.
+        if quiet.is_quiet():
+            logger.info("Quiet hours: not spoken, answer below\n%s", text)
+            return Result.ok(None)
+
         if self.audio_capture:
             self.audio_capture.stop()
         self._speaking = True
@@ -919,7 +969,7 @@ class PhantasmaPipeline:
         for host, model in inference_targets:
             try:
                 logger.info(f"Trying Ollama: {host} (model: {model})")
-                client = ollama.Client(host=host)
+                client = ollama.Client(host=host, timeout=_llm_timeout())
                 response = client.chat(
                     model=model,
                     messages=self._build_messages(full_prompt),

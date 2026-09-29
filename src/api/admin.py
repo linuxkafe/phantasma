@@ -40,16 +40,19 @@ from flask import (
 )
 
 import config
+from src.pipeline import quiet
 from src.settings_store import (
     DEFAULT_REACTION_WEIGHTS,
     REACTION_WEIGHTS_KEY,
     clear_setting,
     get_persona,
     get_reaction_weights,
+    get_setting,
     persona_is_overridden,
     reset_persona,
     set_persona,
     set_reaction_weights,
+    set_setting,
 )
 
 logger = logging.getLogger("phantasma.api")
@@ -569,12 +572,27 @@ def get_configs_by_category() -> dict:
         conn.close()
 
 
-def update_config(key: str, value: str) -> bool:
+def _config_category_for(key: str) -> str:
+    return CONFIG_CONTROLS.get(key, {}).get("category", "General")
+
+
+def update_config(key: str, value: str, category: Optional[str] = None) -> bool:
+    """Persist one config value; insert the row if the key is not there yet.
+
+    The form only ever writes rows that the registry knows. Upserting keeps
+    the config table an accurate display mirror even when a row was never
+    seeded (e.g. a new control added in code but absent from an old install).
+    """
     conn = get_db_connection()
     try:
-        conn.execute("UPDATE config SET value = ? WHERE key = ?", (value, key))
+        cur = conn.execute("UPDATE config SET value = ? WHERE key = ?", (value, key))
+        if cur.rowcount == 0:
+            conn.execute(
+                "INSERT INTO config (category, key, value) VALUES (?, ?, ?)",
+                (category or _config_category_for(key), key, value),
+            )
         conn.commit()
-        return conn.rowcount > 0
+        return True
     finally:
         conn.close()
 
@@ -840,6 +858,105 @@ DASHBOARD_TEMPLATE = (
 """
 )
 
+CONFIG_CONTROLS: dict[str, dict] = {
+    # Friendly controls for /admin/config. Each key is the config-table row /
+    # env-var name the runtime reads (config.py). The whitelist here is also
+    # what the boot overlay honours: anything not listed is never pushed into
+    # the process environment, so secret service tokens stay in .env.
+    #
+    # Category   -- grid section on the page
+    # type       -- bool (toggle) | number (slider) | select | textarea | text
+    # label      -- plain-language label for a non-technical owner
+    # help       -- one line that explains what the value does
+    "ALSA_DEVICE_IN": dict(category="Audio", type="text", label="Microfone (entrada)",
+                           help="Dispositivo ALSA usado para captar o áudio (ex.: sysdefault)."),
+    "ALSA_DEVICE_OUT": dict(category="Audio", type="text", label="Coluna (saída)",
+                            help="Dispositivo ALSA da coluna (ex.: plughw:0,0)."),
+    "ALSA_VOLUME_PERCENT": dict(category="Audio", type="number", min=0, max=100, step=1,
+                                label="Volume do sistema (%)"),
+    "MIC_SAMPLERATE": dict(category="Audio", type="select",
+                           options=["8000", "16000", "32000", "44100"],
+                           label="Frequência de gravação",
+                           help="16000 é o recomendado para o assistente."),
+    "VAD_AGGRESSIVENESS": dict(category="Audio", type="select", options=["0", "1", "2", "3"],
+                               label="Sensibilidade ao silêncio",
+                               help="0 capta tudo; 3 corta mais o ruído de fundo, mas pode cortar fala."),
+    "VAD_FRAME_DURATION_MS": dict(category="Audio", type="select",
+                                  options=["10", "20", "30", "40", "50", "60"],
+                                  label="Janela de silêncio (ms)"),
+    "WAKEWORD_CONFIDENCE": dict(category="Audio", type="number", min=0, max=1, step=0.05,
+                                label="Confiança mínima para ativar",
+                                help="Mais baixo ativa melhor com ruído, mas pode acordar por engano."),
+    "WAKEWORD_PERSISTENCE": dict(category="Audio", type="number", min=1, max=10, step=1,
+                                 label="Deteções consecutivas para ativar"),
+    "WAKEWORD_COOLDOWN_SECONDS": dict(category="Audio", type="number", min=0, max=10, step=0.5,
+                                      label="Intervalo entre ativações (s)"),
+    "WAKEWORD_MODELS": dict(category="Audio", type="text", label="Modelos de ativação",
+                            help="Separados por vírgula (ex.: models/hey_fantasma.onnx,models/ola_fantasma.onnx)."),
+    "AUDIO_FEEDBACK_ENABLED": dict(category="General", type="bool", label="Som de confirmação",
+                                   help="Toca um som quando o assistente é ativado."),
+    "USE_SOX_EFFECTS": dict(category="General", type="bool", label="Efeitos de áudio (SoX)",
+                            help="Aplica efeitos de equalização ao áudio das respostas."),
+    "FEEDBACK_WINDOW_SECONDS": dict(category="General", type="number", min=1, max=20, step=1,
+                                    label="Janela de feedback (s)"),
+    "STT_MAX_AUDIO_SECONDS": dict(category="General", type="number", min=5, max=60, step=5,
+                                  label="Tempo máximo de fala (s)"),
+    "QUEUE_MAXSIZE": dict(category="General", type="number", min=1, max=50, step=1,
+                          label="Tamanho da fila de mensagens"),
+    "MUSIC_DIR": dict(category="General", type="text", label="Pasta de música",
+                      help="Diretório com a música que o assistente pode tocar."),
+    "GREETING_PATH": dict(category="General", type="text", label="Ficheiro de saudação"),
+    "TTS_MODEL_PATH": dict(category="General", type="text", label="Modelo de voz (TTS)"),
+    "SKILLS_DIR": dict(category="General", type="text", label="Pasta das skills"),
+    "HOME_COORDS": dict(category="General", type="text", label="Coordenadas de casa",
+                        help="Formato: latitude,longitude (ex.: 41.17,-8.59)."),
+    "OLLAMA_HOST_PRIMARY": dict(category="LLM", type="text", label="Servidor principal (LLM)",
+                                help="URL do servidor Ollama principal."),
+    "OLLAMA_HOST_FALLBACK": dict(category="LLM", type="text", label="Servidor secundário (LLM)"),
+    "OLLAMA_MODEL_PRIMARY": dict(category="LLM", type="text", label="Modelo principal",
+                                help="Usado para a maioria das tarefas."),
+    "OLLAMA_MODEL_FALLBACK": dict(category="LLM", type="text", label="Modelo secundário"),
+    "OLLAMA_VISION_MODEL": dict(category="LLM", type="text", label="Modelo de visão"),
+    "OLLAMA_CONTEXT_SIZE": dict(category="LLM", type="number", min=512, max=65536, step=512,
+                                label="Contexto (tokens)"),
+    "OLLAMA_THREADS": dict(category="LLM", type="number", min=1, max=16, step=1,
+                           label="Threads de processamento"),
+    "OLLAMA_TIMEOUT": dict(category="LLM", type="number", min=10, max=900, step=10,
+                           label="Tempo máximo de resposta (s)"),
+    "WHISPER_MODEL": dict(category="LLM", type="select",
+                          options=["tiny", "base", "small", "medium", "large"],
+                          label="Modelo de transcrição",
+                          help="medium dá um bom equilíbrio entre rapidez e qualidade."),
+    "WHISPER_INITIAL_PROMPT": dict(category="LLM", type="textarea", label="Guia de transcrição",
+                                   help="Dicas de contexto dadas ao transcritor (ex.: comandos frequentes)."),
+    "DEBUG_MODE": dict(category="Security", type="bool", label="Modo de depuração",
+                       help="Registos mais detalhados. Deve ficar desligado em produção."),
+    "ALERT_EMAIL": dict(category="Security", type="text", label="Email para alertas"),
+}
+
+CONFIG_CONTROL_CATEGORIES = {meta["category"] for meta in CONFIG_CONTROLS.values()}
+
+
+def _normalize_config_value(key: str, meta: dict, raw: str) -> str:
+    """Coerce a submitted control value to the string the config DB/env stores.
+
+    Numbers are clamped to the declared range; an unparsable number falls back
+    to the minimum rather than raising. Booleans are normalised earlier by the
+    caller (checkbox present/absent), so ``type != "number"`` passes through.
+    """
+    if meta["type"] != "number":
+        return raw
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        number = float(meta.get("min", 0))
+    number = min(max(number, float(meta.get("min", 0))), float(meta.get("max", number)))
+    step = meta.get("step", 1)
+    if float(step) == int(step):
+        return str(int(round(number)))
+    decimals = len(str(step).split(".")[-1])
+    return f"{number:.{decimals}f}"
+
 CONFIG_TEMPLATE = (
     BASE_STYLE
     + """
@@ -872,27 +989,106 @@ CONFIG_TEMPLATE = (
         <h2 style="color: var(--accent); font-size: 1.25rem; margin-top: 0; margin-bottom: 0.5rem;">{{ category.name }}</h2>
         <p style="color: var(--muted); font-size: 0.875rem; margin-bottom: 1.5rem;">{{ category.description }}</p>
 
+        <p style="color: var(--muted); font-size: 0.875rem; margin-bottom: 1.5rem;">
+            Valores do dia-a-dia, numa linguagem simples. As alterações aplicam-se
+            no <strong>próximo arranque</strong> do serviço. Tokens e palavras-passe
+            de serviços não aparecem aqui — gerem-se pelo ficheiro .env.
+        </p>
+
         <div class="cfg-grid">
             {% for config in configs.get(category.name, []) %}
+            {% set ctl = controls.get(config.key) %}
+            {% if ctl %}
             <div class="cfg-card">
-                <div style="margin-bottom: 1rem;">
-                    <label for="cfg-{{ config.key }}" style="font-weight: 600; font-size: 0.875rem; color: var(--text); word-break: break-all;">{{ config.key }}</label>
-                    {% if config.description %}
-                    <p id="cfg-desc-{{ config.key }}" style="color: var(--muted); font-size: 0.75rem; margin: 0.25rem 0 0;">{{ config.description }}</p>
+                <div style="margin-bottom: 0.75rem;">
+                    <label for="cfg-{{ config.key }}" style="font-weight: 600; font-size: 0.875rem; color: var(--text);">{{ ctl.label }}</label>
+                    {% if ctl.help %}
+                    <p id="cfg-desc-{{ config.key }}" style="color: var(--muted); font-size: 0.75rem; margin: 0.25rem 0 0;">{{ ctl.help }}</p>
                     {% endif %}
                 </div>
                 <div>
-                    {% if config.is_sensitive %}
-                    <input type="password" id="cfg-{{ config.key }}" name="config_{{ config.key }}" value="{{ config.value }}"{% if config.description %} aria-describedby="cfg-desc-{{ config.key }}"{% endif %} class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
+                    {% if ctl.type == 'bool' %}
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" id="cfg-{{ config.key }}" name="config_{{ config.key }}"
+                               value="true"{% if config.value|lower == 'true' %} checked{% endif %}
+                               onchange="this.nextElementSibling.textContent = this.checked ? 'Ligado' : 'Desligado';">
+                        <span style="color: var(--muted); font-size: 0.875rem;">{% if config.value|lower == 'true' %}Ligado{% else %}Desligado{% endif %}</span>
+                    </label>
+                    {% elif ctl.type == 'number' %}
+                    <div style="display: flex; align-items: center; gap: 0.75rem;">
+                        <input type="range" id="cfg-{{ config.key }}" name="config_{{ config.key }}"
+                               min="{{ ctl.min }}" max="{{ ctl.max }}" step="{{ ctl.step }}"
+                               value="{{ config.value }}"
+                               oninput="document.getElementById('cfg-out-{{ config.key }}').textContent = this.value;"
+                               style="flex: 1;">
+                        <output id="cfg-out-{{ config.key }}" style="min-width: 3.5rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--text);">{{ config.value }}</output>
+                    </div>
+                    {% elif ctl.type == 'select' %}
+                    <select id="cfg-{{ config.key }}" name="config_{{ config.key }}"
+                            style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
+                        {% for opt in ctl.options %}
+                        <option value="{{ opt }}"{% if config.value == opt|string %} selected{% endif %}>{{ opt }}</option>
+                        {% endfor %}
+                    </select>
+                    {% elif ctl.type == 'textarea' %}
+                    <textarea id="cfg-{{ config.key }}" name="config_{{ config.key }}" rows="5"
+                              style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem; font-family: monospace;">{{ config.value }}</textarea>
                     {% else %}
-                    <input type="text" id="cfg-{{ config.key }}" name="config_{{ config.key }}" value="{{ config.value }}"{% if config.description %} aria-describedby="cfg-desc-{{ config.key }}"{% endif %} class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
+                    <input type="text" id="cfg-{{ config.key }}" name="config_{{ config.key }}"
+                           value="{{ config.value }}"{% if ctl.help %} aria-describedby="cfg-desc-{{ config.key }}"{% endif %}
+                           class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
                     {% endif %}
                 </div>
             </div>
+            {% endif %}
             {% endfor %}
         </div>
     </div>
     {% endfor %}
+
+    <h3 style="margin-top:2rem;">{% if lang == 'en' %}Night mode{% else %}Periodo noturno{% endif %}</h3>
+    <p class="muted" style="max-width:60ch;">
+      {% if lang == 'en' %}During this window the assistant writes the answer
+      but does not say it, and the text is written to the log instead. The
+      window may cross midnight: 23 to 7 means 23:00-23:59 and 00:00-06:59.
+      Start equal to end means the whole day. Leave a day at the default to
+      follow the global hours.{% else %}Dentro desta janela o assistente
+      escreve a resposta mas nao a diz, e o texto fica no registo. A janela
+      pode atravessar a meia-noite: 23 para 7 quer dizer 23:00-23:59 e
+      00:00-06:59. Inicio igual ao fim quer dizer o dia inteiro. Deixar um
+      dia no valor global e o mais simples.{% endif %}
+    </p>
+    <div class="card" style="padding:1rem; overflow-x:auto;">
+      <table style="width:100%; border-collapse:collapse;">
+        <thead><tr>
+          <th style="text-align:left; padding:.35rem;">{% if lang == 'en' %}Day{% else %}Dia{% endif %}</th>
+          <th>{% if lang == 'en' %}From{% else %}De{% endif %}</th>
+          <th>{% if lang == 'en' %}To{% else %}Ate{% endif %}</th>
+        </tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:.35rem;"><strong>{% if lang == 'en' %}All days (default){% else %}Todos os dias (por omissao){% endif %}</strong></td>
+            <td><input type="number" min="0" max="23" name="quiet_start_default"
+                       value="{{ quiet_default.start }}" style="width:5rem;"></td>
+            <td><input type="number" min="0" max="23" name="quiet_end_default"
+                       value="{{ quiet_default.end }}" style="width:5rem;"></td>
+          </tr>
+        {% for key, label in quiet_days %}
+          <tr>
+            <td style="padding:.35rem;">{{ label }}</td>
+            <td><input type="number" min="0" max="23" name="quiet_start_{{ key }}"
+                       value="{{ quiet.get(key, quiet_default).start }}" style="width:5rem;"></td>
+            <td><input type="number" min="0" max="23" name="quiet_end_{{ key }}"
+                       value="{{ quiet.get(key, quiet_default).end }}" style="width:5rem;"></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <button type="submit" name="action" value="save_quiet" style="margin-top:.75rem;">
+        {% if lang == 'en' %}Save night mode{% else %}Guardar periodo noturno{% endif %}
+      </button>
+    </div>
+
     <button type="submit" name="config_submit">Atualizar Configurações</button>
 
     <section style="background: var(--surface); border: 1px solid var(--border);
@@ -921,7 +1117,7 @@ CONFIG_TEMPLATE = (
         {% for emoji, weight in weights.items() if emoji in default_weights %}
         <tr>
           <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
-          <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
+          <td><input type="number" step="0.1" name="w_{{ emoji }}"
                      value="{{ weight }}" style="width: 6rem;"></td>
           <td style="padding-left: 1rem; color: var(--muted);">
             {% if weight > 0 %}reforça{% elif weight < 0 %}enfraquece{% else %}neutro{% endif %}
@@ -2161,7 +2357,7 @@ _PERSONA_TEMPLATE = (
       {% for emoji, weight in weights.items() if emoji in default_weights %}
       <tr>
         <td style="font-size: 1.5rem; width: 4rem;">{{ emoji }}</td>
-        <td><input type="number" step="0.1" name="w_{{ loop.index0 }}"
+        <td><input type="number" step="0.1" name="w_{{ emoji }}"
                    value="{{ weight }}"></td>
         <td style="padding-left: 1rem; color: var(--muted);">
           {% if weight > 0 %}reforça{% elif weight < 0 %}enfraquece{% else %}neutro{% endif %}
@@ -2499,6 +2695,23 @@ def _audit(conn, actor, op, target, before, after):
     )
 
 
+_QUIET_DAYS = tuple(zip(
+    quiet.DAY_KEYS,
+    ("Segunda", "Terca", "Quarta", "Quinta", "Sexta", "Sabado", "Domingo"),
+))
+
+
+def _clamp_quiet_hour(raw, fallback):
+    """An hour from a form field, or the given default when unusable.
+
+    start and end have different defaults (23 and 7): a single shared fallback
+    would turn a missing field into a 24h window (start == end).
+    """
+    from src.pipeline.quiet import _clamp_hour
+
+    return _clamp_hour(raw, fallback)
+
+
 @admin_bp.route("/config", methods=["GET", "POST"])
 @login_required
 def config_manager():
@@ -2513,23 +2726,65 @@ def config_manager():
                 reset_persona()
                 flash("Persona reposta no original.")
             elif _act == "save_weights":
-                set_reaction_weights(
-                    {key[2:]: v for key, v in request.form.items() if key.startswith("w_")},
-                    updated_by=_current_user(),
-                )
-                flash("Pesos guardados.")
+                try:
+                    set_reaction_weights(
+                        {key[2:]: v for key, v in request.form.items() if key.startswith("w_")},
+                        updated_by=_current_user(),
+                    )
+                    flash("Pesos guardados.")
+                except ValueError as e:
+                    # A form field named w_1 (a digit, not an emoji) lands in no
+                    # known weight and set_reaction_weights raises. Surfacing the
+                    # message beats bubbling a 500.
+                    flash(str(e))
             else:
                 clear_setting(REACTION_WEIGHTS_KEY)
                 flash("Pesos repostos nos originais.")
             return redirect(url_for("admin.config_manager"))
-        for key in request.form:
-            if key.startswith("config_") and key != "config_submit":
-                update_config(key[7:], request.form[key])
-        flash("Configurações atualizadas.")
+        if _act == "save_quiet":
+            from src.pipeline.quiet import DEFAULT_END, DEFAULT_START
+
+            def _pair(start_field, end_field):
+                # Fields are named quiet_start_<day> / quiet_end_<day>.
+                return {
+                    "start": _clamp_quiet_hour(request.form.get(f"quiet_start_{start_field}"), DEFAULT_START),
+                    "end": _clamp_quiet_hour(request.form.get(f"quiet_end_{end_field}"), DEFAULT_END),
+                }
+
+            schedule = {"default": _pair("default", "default")}
+            for key, _label in _QUIET_DAYS:
+                if f"quiet_start_{key}" in request.form:
+                    schedule[key] = _pair(key, key)
+            set_setting("quiet_schedule", json.dumps(schedule, ensure_ascii=False),
+                        updated_by=_current_user())
+            # Applied in-process: the running assistant must not wait for a
+            # restart to start honouring the window the owner just saved.
+            quiet.set_schedule(schedule)
+            flash("Periodo noturno guardado e activo.")
+            return redirect(url_for("admin.config_manager"))
+        for key, meta in CONFIG_CONTROLS.items():
+            field = f"config_{key}"
+            if meta["type"] == "bool":
+                value = "true" if field in request.form else "false"
+            elif field in request.form:
+                value = _normalize_config_value(key, meta, request.form[field])
+            else:
+                continue
+            update_config(key, value)
+            # Also store where the running assistant reads at the next boot
+            # (same table as quiet_schedule). The config-table write above is
+            # the display mirror; this one is the source of truth.
+            set_setting(key, value, updated_by=_current_user())
+        flash("Configurações guardadas. Aplicam-se a partir da próxima arranque.")
         return redirect(url_for("admin.config_manager"))
 
     configs = get_configs_by_category()
-    categories = get_categories()
+    _sched = quiet.QuietSchedule.parse(get_setting("quiet_schedule", None))
+    _d = _sched.default.as_dict()
+    quiet_ctx = {k: v.as_dict() for k, v in _sched.days.items()}
+    categories = [
+        c for c in get_categories() if c["name"] in CONFIG_CONTROL_CATEGORIES
+    ]
     nav_menu = _build_nav_menu(
         "admin.config_manager",
         _current_user_data()["role"] if _current_user_data() else "user",
@@ -2541,7 +2796,11 @@ def config_manager():
         weights=get_reaction_weights(),
         default_weights=DEFAULT_REACTION_WEIGHTS,
         configs=configs,
+        quiet_days=_QUIET_DAYS,
+        quiet=quiet_ctx,
+        quiet_default=_d,
         categories=categories,
+        controls=CONFIG_CONTROLS,
         user=_current_user(),
         nav_menu=nav_menu,
     )

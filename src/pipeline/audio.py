@@ -26,6 +26,7 @@ import sounddevice as sd
 import webrtcvad
 
 from config import config
+from src.pipeline.noise import NoiseFloor
 from src.pipeline.utils import Result, logger
 
 
@@ -317,6 +318,15 @@ class HotwordDetector:
         # Partial-window carry-over. See process() for why framing is enforced.
         self._accum = np.zeros(0, dtype=np.int16)
         self._max_patience = 2
+        # Ambient noise floor. Fed from the raw input, used to raise the
+        # threshold when the room is noisy enough to make the model unreliable.
+        # See src/pipeline/noise.py and HotwordConfig.noise_adaptive.
+        self._noise = NoiseFloor(
+            quiet_db=config.hotword.noise_quiet_db,
+            loud_db=config.hotword.noise_loud_db,
+            max_bump=config.hotword.noise_max_bump if config.hotword.noise_adaptive else 0.0,
+        )
+        self._last_noise_log = 0.0
 
         # Custom model paths resolve to existing files -> load them directly.
         # This is how the PT wake words (models/ola_fantasma.onnx etc.) are used.
@@ -349,6 +359,39 @@ class HotwordDetector:
             wakeword_models=filtered_paths if filtered_paths else model_paths,
             inference_framework="onnx",
         )
+
+    def effective_threshold(self, model_name: str) -> float:
+        """The bar this model must clear right now: its base, plus the room's.
+
+        Falls back to the flat base until the floor has heard the room, so a
+        cold start behaves exactly as it did before noise adaptation existed.
+        """
+        base = self._thresholds.get(model_name, self.threshold)
+        return min(base + self._noise.penalty(), 0.99)
+
+    def noise_state(self) -> str:
+        """One-line description of the floor, for logs and the admin page."""
+        return self._noise.describe()
+
+    def reject_detection(self) -> None:
+        """Refuse a detection the rest of the system is not going to accept.
+
+        Distinct from reset() on purpose. reset() clears ``_last_detection``,
+        which would let a continuous noise source be re-scored on the very next
+        frame and rejected again -- a reset storm, each one re-priming the mel
+        buffer. Rejecting must still respect the cooldown.
+
+        Clearing the streaks is the point: a rejected window must not count
+        towards the next model's persistence, and the mel buffer is re-primed
+        because it now describes a wake word nothing acted on.
+        """
+        self._streaks.clear()
+        self._patience.clear()
+        self._last_detection = time.time()
+        self._accum = np.zeros(0, dtype=np.int16)
+        if getattr(self, "oww_model", None) is not None:
+            self.oww_model.reset()
+            self._prime_buffer()
 
     def process(self, audio_chunk: np.ndarray) -> tuple[bool, Optional[str]]:
         """Process 1280-sample int16 chunk for hotword detection.
@@ -391,6 +434,14 @@ class HotwordDetector:
         window = self._accum[: self.chunk_size]
         self._accum = self._accum[self.chunk_size :]
 
+        # Same window the model is about to score, so the floor and the score
+        # describe the same audio. Fed BEFORE predict() so the threshold used
+        # on this very window already reflects the room.
+        self._noise.update(window)
+        if time.time() - self._last_noise_log > 30.0:
+            self._last_noise_log = time.time()
+            logger.debug(self._noise.describe())
+
         predictions = self.oww_model.predict(window)
 
         if not predictions:
@@ -411,9 +462,10 @@ class HotwordDetector:
 
         # --- LÓGICA DE DETECÇÃO COM TOLERÂNCIA (match legacy) ---
         for model_name, score in predictions.items():
-            # Per-model threshold; the legacy code compared every model against
-            # one global value, which is what left hey_fantasma unusable.
-            model_threshold = self._thresholds.get(model_name, self.threshold)
+            # Per-model threshold, raised by the room's noise floor. The legacy
+            # code compared every model against one global value, which is what
+            # left hey_fantasma unusable.
+            model_threshold = self.effective_threshold(model_name)
 
             if score >= model_threshold:
                 bar = "█" * int(score * 20)

@@ -49,6 +49,10 @@ def _pipeline_with_speak(monkeypatch):
     played = []
     monkeypatch.setattr("audio_utils.play_tts", lambda t, use_cache=True: played.append(t))
     monkeypatch.setattr(assistant.time, "sleep", lambda s: None)
+    # These tests are about the speaking contract, not the clock. _speak is
+    # now gated by night mode, so without pinning midday they started failing
+    # at 23:00-07:00 and passing at 12:00 -- the same suite, two verdicts.
+    monkeypatch.setattr("src.pipeline.quiet.is_quiet", lambda *a, **k: False)
     return obj, played
 
 

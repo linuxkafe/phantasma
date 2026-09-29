@@ -111,11 +111,26 @@ class TestAuthenticateUserSurvivesBadHashes:
 
         db = Path(admin_store.CONFIG_DB_PATH)
         con = sqlite3.connect(db)
-        con.execute("DELETE FROM users")
-        con.execute(
-            "INSERT INTO users (email, password_hash, role, is_active) "
-            "VALUES ('broken@example.invalid', 'scrypt:garbage$nope', 'admin', 1)"
-        )
-        con.commit()
-        con.close()
-        assert admin_store.authenticate_user("broken@example.invalid", "anything") is None
+        # This database is session-scoped (tests/conftest.py): other admin
+        # tests later in the same run sign in as TEST_ADMIN_EMAIL, whose row
+        # lives in this very table. Deleting every row breaks them for the
+        # rest of the session -- it turned /admin/config into a login redirect
+        # by the time test_quiet.py ran. Snapshot and restore, so this test
+        # stays a test and stops being a session landmine.
+        before = list(con.execute("SELECT email, password_hash, role, is_active FROM users"))
+        try:
+            con.execute("DELETE FROM users")
+            con.execute(
+                "INSERT INTO users (email, password_hash, role, is_active) "
+                "VALUES ('broken@example.invalid', 'scrypt:garbage$nope', 'admin', 1)"
+            )
+            con.commit()
+            assert admin_store.authenticate_user("broken@example.invalid", "anything") is None
+        finally:
+            con.execute("DELETE FROM users")
+            con.executemany(
+                "INSERT INTO users (email, password_hash, role, is_active) VALUES (?, ?, ?, ?)",
+                before,
+            )
+            con.commit()
+            con.close()

@@ -140,6 +140,24 @@ def answering(
     monkeypatch.setattr(reconcile, "_ask", ask)
 
 
+@pytest.fixture(autouse=True)
+def _stub_networked_ask(monkeypatch):
+    """No unit test may dial the real Ollama host.
+
+    On 2026-09-29 the primary host stopped answering. Any reconcile test that
+    stubbed only ``_search`` and not ``_ask`` dialled the network and hung in
+    transport time. ``answering()`` runs later in the test body and overrides
+    this with whichever decision the test actually wants.
+    """
+
+    def offline_ask(prompt, system):
+        if "query de pesquisa" in prompt:
+            return "consulta de teste offline"
+        return json.dumps({"decision": "ambiguous", "reason": "offline stub"})
+
+    monkeypatch.setattr(reconcile, "_ask", offline_ask)
+
+
 # --- enumeration -------------------------------------------------------------
 
 

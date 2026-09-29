@@ -1,7 +1,12 @@
 import asyncio
+import logging
 import unicodedata
 
 import config
+
+logger = logging.getLogger(__name__)
+
+IMPORT_ERROR = None
 
 try:
     # O import correto do client
@@ -17,10 +22,33 @@ try:
     DioChaconApi = DIOChaconAPIClient
 
 except ImportError as e:
-    print(
-        f"ERRO CRÍTICO [skill_chacon]: Falha a importar a biblioteca dio_chacon_wifi_api. Erro: {e}"
+    # A skill fica inerte, mas o motivo tem de ficar registado: um `print`
+    # desaparece do journald e faz a skill parecer desligada em vez de
+    # avariada. `IMPORT_ERROR` é o que o teste de regressão carrega.
+    IMPORT_ERROR = str(e)
+    logger.error(
+        "skill_chacon inerte: dio_chacon_wifi_api não importável (%s). "
+        "A skill vai devolver None e outras skills podem responder em vez dela.",
+        e,
     )
     DioChaconApi = None  # Desativa a skill
+
+
+def _make_fallback_exceptions():
+    """Exception stand-ins for when the library is absent.
+
+    The `except` clauses below name these classes. Without a fallback, a
+    failure raised inside the handler raises NameError and hides the real
+    cause. Built in a function rather than as a `class` in the except block
+    so the names are assigned once and mypy sees no redefinition.
+    """
+    base = type("DIOChaconAPIError", (Exception,), {})
+    invalid = type("DIOChaconInvalidAuthError", (base,), {})
+    return base, invalid
+
+
+if DioChaconApi is None:
+    DIOChaconAPIError, DIOChaconInvalidAuthError = _make_fallback_exceptions()
 
 # --- Configuração da Skill ---
 TRIGGER_TYPE = "contains"
