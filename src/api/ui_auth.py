@@ -66,6 +66,11 @@ SESSION_KEY = "ui_user"
 # with a routing BuildError.
 UI_LOGIN_ROUTE = "ui_login"
 NEXT_SESSION_KEY = "ui_login_next"
+# The admin area's own key, duplicated here on purpose rather than imported:
+# importing admin into this module at import time would make the voice UI
+# depend on the admin package being loadable, and this module is imported by the
+# UI routes before anything else is wired. The value is asserted equal in a test.
+ADMIN_SESSION_KEY = "admin_user"
 
 # A password-verified login that still owes a second factor. It holds the
 # ADDRESS and an expiry, never the password: the session cookie is signed, not
@@ -113,9 +118,7 @@ def complete_pending_login(email: str) -> dict | None:
     user = _user_row(claim["email"])
     if user is None or not user.get("is_active", 1):
         return None
-    session.clear()
-    session[SESSION_KEY] = user["email"]
-    session.permanent = True
+    _establish(user)
     logger.info("ui auth: device verified for %s (role=%s)", user["email"], user.get("role"))
     return user
 
@@ -193,6 +196,24 @@ def is_admin() -> bool:
     return bool(user and user.get("role") == "admin")
 
 
+def admin_session_email() -> str | None:
+    """The address under the ADMIN session key, if the UI login granted one.
+
+    The admin area and the voice UI are two doors into the same house, and they
+    had two independent session keys. Signing in at `/` and then following an
+    admin link asked for the password a second time, because the admin gate only
+    read `admin_user` and the UI login had written `ui_user`. Logging in twice
+    for one person in one browser is not a security feature; it is a door that
+    does not open from the room you are already standing in.
+
+    So the UI login ALSO sets the admin key when -- and only when -- the role is
+    admin. A plain user does not get an admin session from a UI login, and
+    nothing here weakens @admin_required: the role is still read from the store
+    on every request.
+    """
+    return session.get("admin_user")
+
+
 def authenticate(email: str, password: str) -> bool:
     """Check a password. Identical result and timing for every failure."""
     from src.api import admin as admin_mod
@@ -217,6 +238,24 @@ def authenticate(email: str, password: str) -> bool:
     return bool((user or {}).get("is_active", 1))
 
 
+def _establish(user: dict) -> None:
+    """Write the session for a user who has just proved their password.
+
+    Both keys, for an admin. See admin_session_email() for why: the admin area
+    and the voice UI are two doors into the same house, and asking for the
+    password twice in one browser is not a second factor, it is a second door
+    that does not open from the room you are in.
+
+    A non-admin gets the UI key only. Nothing here grants anything: @admin_required
+    still resolves the role from the store on every request.
+    """
+    session.clear()  # a pre-login session must not survive as a valid one
+    session[SESSION_KEY] = user["email"]
+    session.permanent = True
+    if user.get("role") == "admin":
+        session[ADMIN_SESSION_KEY] = user["email"]
+
+
 def login(email: str, password: str) -> dict | None:
     """Sign a user in and return their row, or None. Rate limiting is the
     caller's job, before this is reached."""
@@ -225,16 +264,22 @@ def login(email: str, password: str) -> dict | None:
     user = _user_row(email)
     if user is None:
         return None
-    session.clear()  # a pre-login session must not survive as a valid one
-    session[SESSION_KEY] = user["email"]
-    session.permanent = True
+    _establish(user)
     logger.info("ui auth: signed in %s (role=%s)", user["email"], user.get("role"))
     return user
 
 
 def logout() -> None:
+    """Sign out of BOTH doors.
+
+    Logging out of the voice UI and staying logged in to /admin would be the
+    mirror image of the double-login problem: the logout button would appear not
+    to work, and it would look like a security failure.
+    """
     session.pop(SESSION_KEY, None)
+    session.pop(ADMIN_SESSION_KEY, None)
     session.pop(NEXT_SESSION_KEY, None)
+    session.pop(PENDING_KEY, None)
 
 
 def _safe_local_path(path: str | None) -> str | None:

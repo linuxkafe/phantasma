@@ -94,6 +94,27 @@ def app(monkeypatch, tmp_path):
         ui_auth.logout()
         return "out"
 
+    # The UI login, with the new-device branch already trusted: these tests are
+    # about which session keys a successful login establishes, not about the
+    # device challenge, which test_ui_recovery_routes.py covers.
+    from src.api import auth_store
+
+    @application.route("/ui-login", methods=["POST"])
+    def ui_login():
+        user = ui_auth.authenticate(
+            request.form.get("email", ""), request.form.get("password", "")
+        )
+        if not user:
+            return "no", 401
+        row = ui_auth.find_user(request.form.get("email", ""))
+        if auth_store.is_device_trusted(
+            admin_conn(application), row["email"],
+            request.cookies.get(auth_store.DEVICE_COOKIE, ""),
+        ):
+            ui_auth.login(row["email"], request.form.get("password", ""))
+            return "in"
+        return "challenge"
+
     return application
 
 
@@ -332,7 +353,7 @@ def test_menu_is_rendered_for_a_signed_in_user():
     application.secret_key = "k"
     with application.test_request_context("/"):
         page = skill_ui.handle_request()
-    assert 'href="/logout"' in page, "no logout link in the menu"
+    assert 'href="/admin/logout"' in page, "no sign-out link in the menu"
     assert 'class="nav-link"' in page
 
 
@@ -358,15 +379,19 @@ def test_non_admin_is_not_sent_admin_links(monkeypatch, tmp_path):
 
     import re
 
-    admin_links = re.findall(r'href="(/admin[^"]*)"', page)
+    admin_links = [
+        href for href in re.findall(r'href="(/admin[^"]*)"', page)
+        if not href.startswith("/admin/logout")
+    ]
     assert admin_links == [], f"admin links sent to a non-admin: {admin_links}"
-    assert 'href="/logout"' in page
+    # Perfil is not admin's, so it stays for everyone.
+    assert 'href="/perfil"' in page
 
 
 def test_admin_is_sent_admin_links(monkeypatch, tmp_path):
     """The other direction: the gate must not be so tight that an admin gets no
     menu either, which is the failure that made the page feel broken before."""
-    _seed(tmp_path, monkeypatch, email="boss@example.invalid", role="admin")
+    _seed(tmp_path, monkeypatch, email="user@example.invalid", role="admin")
     from flask import Flask
 
     from src.api import ui_auth
@@ -378,10 +403,99 @@ def test_admin_is_sent_admin_links(monkeypatch, tmp_path):
     _ui.register_routes(application)
     client = application.test_client()
     with client.session_transaction() as s:
-        s[ui_auth.SESSION_KEY] = "boss@example.invalid"
+        s[ui_auth.SESSION_KEY] = "user@example.invalid"
     # A real request, so handle_request() sees the session the client holds.
     page = client.get("/").get_data(as_text=True)
 
     import re
 
     assert "/admin/brain" in re.findall(r'href="(/admin[^"]*)"', page)
+
+
+# --- one door, one session --------------------------------------------------
+# The admin area and the voice UI had two independent session keys. Signing in
+# at `/` and following an admin link asked for the password a second time, and
+# signing out of /admin left you signed in at `/`. Neither is a second factor.
+
+
+def test_the_admin_session_key_matches_the_admin_module():
+    """ui_auth duplicates the key rather than importing it (importing admin at
+    module load would make the voice UI depend on the admin package). So the
+    value is asserted equal here -- a rename in one place would otherwise leave
+    two sessions that never see each other again."""
+    from src.api import admin as admin_mod
+
+    assert ui_auth.ADMIN_SESSION_KEY == admin_mod.SESSION_KEY
+
+
+def test_a_ui_login_for_an_admin_sets_the_admin_session(app, monkeypatch):
+    """The fixture's account is an admin. Signing in at / must open /admin too.
+
+    Two independent session keys is what produced "it asks me to sign in again"
+    on every trip from the voice UI to the admin pages: the admin gate reads
+    `admin_user`, the UI login wrote `ui_user`, and neither could see the other.
+    """
+    from src.api import auth_store
+
+    conn = admin_conn(app)
+    conn.execute("UPDATE users SET role = 'admin'")
+    conn.commit()
+
+    client = app.test_client()
+    raw = auth_store.trust_device(conn, "user@example.invalid", "portátil")
+    client.set_cookie(auth_store.DEVICE_COOKIE, raw, domain="localhost")
+    client.post("/ui-login", data={"email": "user@example.invalid",
+                                   "password": "correct horse"})
+    with client.session_transaction() as s:
+        assert s[ui_auth.SESSION_KEY] == "user@example.invalid"
+        assert s.get(ui_auth.ADMIN_SESSION_KEY) == "user@example.invalid", (
+            "an admin who signed in at / still has to sign in again at /admin"
+        )
+
+
+def test_a_plain_user_ui_login_does_not_get_an_admin_session(app, monkeypatch):
+    """A non-admin must not collect an admin session from a UI login.
+
+    The role is still resolved from the store on every request, so this is not
+    the only gate -- but a session key that says "admin" for a user whose role
+    is not is a trap for the next person who reads it.
+    """
+    from src.api import auth_store
+
+    conn = admin_conn(app)
+    client = app.test_client()
+    raw = auth_store.trust_device(conn, "user@example.invalid")
+    client.set_cookie(auth_store.DEVICE_COOKIE, raw, domain="localhost")
+    client.post("/ui-login", data={"email": "user@example.invalid",
+                                   "password": "correct horse"})
+    with client.session_transaction() as s:
+        assert s[ui_auth.SESSION_KEY] == "user@example.invalid"
+        assert ui_auth.ADMIN_SESSION_KEY not in s, (
+            "a plain user was handed an admin session"
+        )
+
+
+def test_logout_clears_both_doors(app, monkeypatch):
+    from src.api import auth_store
+
+    conn = admin_conn(app)
+    conn.execute("UPDATE users SET role = 'admin'")
+    conn.commit()
+    client = app.test_client()
+    raw = auth_store.trust_device(conn, "user@example.invalid")
+    client.set_cookie(auth_store.DEVICE_COOKIE, raw, domain="localhost")
+    client.post("/login", data={"email": "user@example.invalid",
+                                "password": "correct horse"})
+    client.get("/logout")
+    with client.session_transaction() as s:
+        assert ui_auth.SESSION_KEY not in s
+        assert ui_auth.ADMIN_SESSION_KEY not in s, (
+            "signed out of / but still signed in to /admin"
+        )
+
+
+def admin_conn(app):
+    """The store's connection, as the app fixture wired it."""
+    from src.api import admin as admin_mod
+
+    return admin_mod.get_db_connection()

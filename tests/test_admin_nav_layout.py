@@ -138,21 +138,53 @@ class TestRootNavIsARightAlignedBurger:
         assert "min-height:44px" in src
         assert "min-width:44px" in src
 
-    def test_root_page_has_no_admin_links_at_all(self):
-        """REVERSED AGAIN on 2026-09-27, by owner report: the admin panel kept
-        reappearing on `/` and, once it was a bordered box, it read as a stuck
-        hamburger. It is now absent for every viewer, admin or not.
+    def test_root_page_shows_admin_links_only_to_an_admin(self, monkeypatch):
+        """REVERSED a third time. On 2026-09-27 the admin panel was removed from
+        `/` because it kept reappearing and, as a bordered box, read as a stuck
+        hamburger. On 2026-09-29 the owner asked for the menu back, on the
+        grounds that the burger on `/` was a lookalike of the one on `/admin`.
 
-        Asserted server-side, not with CSS: `display:none` would leave the admin
-        URLs in the page source, which is the failure mode the previous version
-        of this test was written to prevent.
+        So `/` now renders the ADMIN's own nav builder, and the requirement is
+        no longer "no links" but "the same menu, filtered by role": an admin
+        gets the admin entries, and a plain user must not be SENT an admin URL.
+        Asserted on the rendered links, not on the source: the source now names
+        `/admin/brain` in a branch, and a substring check over the file would
+        fail on code that correctly does not send it.
+
+        The original concern -- disclosure of the admin surface -- is kept, and
+        is now a real test rather than an absence.
         """
+        from tests.helpers_ui_auth import make_app_with_user
+
+        for role, expect_admin in (("admin", True), ("user", False)):
+            app, client = make_app_with_user("someone@example.invalid", role, monkeypatch=monkeypatch)
+            # A real request, not a bare request context: the role is read from
+            # the session cookie, and a fresh context has a different jar, so
+            # `handle_request()` would render the "not signed in" page and the
+            # assertion would pass for the wrong reason.
+            body = client.get("/").get_data(as_text=True)
+            assert client.get("/").status_code == 200
+
+            import re
+
+            links = re.findall(r'href="(/admin[^"]*)"', body)
+            admin_links = [h for h in links if h != "/admin/logout"]
+            if expect_admin:
+                assert "/admin/brain" in admin_links, (
+                    f"an admin was not given the admin menu: {links}"
+                )
+            else:
+                assert admin_links == [], (
+                    f"admin links sent to a {role}: {admin_links}"
+                )
+            # Profile is not admin's, and stays for everyone.
+            assert 'href="/perfil"' in body
+
+        # The placeholder is still substituted, and the shared builder is used
+        # so the two pages cannot drift apart again.
         src = self._root_src()
-        assert 'admin_links_html = ""' in src, "the root page must not build admin links for anyone"
-        assert "__ADMIN_LINKS__" in src, "the placeholder must still be substituted"
-        # and no admin URL may be reachable from the root document
-        for href in ("/admin/brain", "/admin/config", "/admin/users", "/admin/logout"):
-            assert f'href="{href}"' not in src, f"{href} is still linked from /"
+        assert "__ADMIN_LINKS__" in src
+        assert "_build_nav_menu" in src, "the root page must use the shared nav"
 
     def test_admin_nav_still_works_on_the_pages_that_keep_it(self):
         """Removing them from `/` must not have removed them everywhere.

@@ -387,8 +387,23 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
 
     Memória, RAG, FlyBrain and the 3D explorer are grouped under a single
     "Cérebro" entry, per the IA decision that all brain subsystems live in one
-    section. The C páginas themselves render ``_build_subnav()`` as tabs.
+    section. The pages themselves render ``_build_subnav()`` as tabs.
+
+    The voice UI renders this same builder, so it is NOT admin-only by
+    construction. When the role is anything other than admin, the admin entries
+    are dropped here rather than relying on @admin_required to 403 them after
+    they are rendered: a link a viewer may not follow is disclosure of the
+    admin surface by accident, and a plain user clicking through a menu that
+    looks like /admin's is a worse experience than a smaller menu. Perfil and
+    the sign-out are not admin's and stay for everyone.
     """
+    is_admin = user_role != "user"
+    # Defaulting to admin when the role is not stated matters. The admin pages
+    # call this without a role (or with None) and are already behind
+    # @login_required/@admin_required, so refusing to render their own
+    # navigation to them would be a bug, not a defence. The role is passed
+    # EXACTLY where a non-admin can reach this function: the voice UI, which is
+    # the one caller outside this module.
     lang = get_language()
 
     # (endpoint, i18n key, fallback label, url)
@@ -399,6 +414,13 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
     links = [
         ("admin.config_manager", "nav.config", "Configuração", "/admin/config"),
         ("admin.user_manager", "nav.users", "Utilizadores", "/admin/users"),
+        # Profile and sign-out for the signed-in user, not just admins. The
+        # voice UI renders THIS menu, so without them a signed-in non-admin
+        # reached / through a link and had no way to reach their tokens or to
+        # sign out from anywhere in the product. The two admin-only entries
+        # above stay gated by @admin_required on their routes; a link here is
+        # navigation, not authorisation.
+        ("ui.profile", "nav.profile", "Perfil", "/perfil"),
     ]
     brain_endpoints = {
         "admin.brain_hub",
@@ -425,10 +447,19 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         # admin dashboard.
         '  <a class="nav-brand" href="/"><span class="mark">P</span><span>Phantasma</span></a>',
         '  <div class="nav-group">',
-        f'    <a href="/admin/brain" class="nav-link{" active" if brain_active else ""}">'
-        f"🧠 {t('nav.brain', lang)}</a>",
     ]
+    if is_admin:
+        parts.append(
+            f'    <a href="/admin/brain" class="nav-link{" active" if brain_active else ""}">'
+            f"🧠 {t('nav.brain', lang)}</a>"
+        )
     for endpoint, key, fallback, url in links:
+        # Perfil is for every signed-in user; the config and users pages are
+        # admin-only. This builder is shared with the voice UI, so filtering
+        # here -- not at @admin_required -- is what keeps an admin URL out of a
+        # plain user's page.
+        if not is_admin and url.startswith("/admin/"):
+            continue
         active = " active" if endpoint == current_endpoint else ""
         parts.append(
             f'    <a href="{url}" class="nav-link{active}">{t(key, lang, _fallback=fallback)}</a>'
@@ -2415,7 +2446,16 @@ def verify_otp():
 
 @admin_bp.route("/logout")
 def logout():
-    _logout_user()
+    """Sign out of BOTH doors.
+
+    `_logout_user` clears only the admin key, which used to be correct when
+    the voice UI had no session of its own. It has one now, so signing out of
+    /admin and staying signed in at / meant the logout button appeared not to
+    work -- the mirror image of the double-login complaint.
+    """
+    from src.api import ui_auth
+
+    ui_auth.logout()
     flash("Sessão terminada.")
     return redirect(url_for("admin.login"))
 

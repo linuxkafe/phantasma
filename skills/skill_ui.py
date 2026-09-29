@@ -181,10 +181,13 @@ LOGIN_PAGE = """<!DOCTYPE html>
     <input id="password" name="password" type="password"
            autocomplete="current-password" required>
     <button type="submit">Entrar</button>
+    <!-- Inside the form's box. It used to sit AFTER </form>, so it inherited
+         neither the card's max-width nor its padding and rendered flush
+         against the viewport edge, left of the panel it belongs to. -->
+    <p class="sub" style="margin:1.25rem 0 0;text-align:center">
+      <a href="/recuperar" style="color:var(--muted)">Esqueci-me a password</a>
+    </p>
   </form>
-  <p class="sub" style="margin:1.25rem 0 0;text-align:center">
-    <a href="/recuperar" style="color:var(--muted)">Esqueci-me a password</a>
-  </p>
 </body>
 </html>
 """
@@ -562,9 +565,26 @@ def profile_page():
     minted_block = ""
     if minted:
         secret, row = minted
+        # A token nobody knows how to use is a token nobody uses, so the exact
+        # call is shown with the real secret in it. The command is derived from
+        # the request rather than hardcoded, so it names the host the owner is
+        # actually on instead of a localhost that is only true for the server.
+        host = request.host_url.rstrip("/")
+        example = (
+            f"curl -X POST {host}/comando \\\n"
+            f"  -H 'Authorization: Bearer {secret}' \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"prompt\": \"liga a luz do balcão\"}}'"
+        )
         minted_block = f"""
 <p class="msg ok" role="alert"><strong>Token criado — copia-o agora,
-não voltarás a vê-lo.</strong><br><span class="mono">{secret}</span></p>"""
+não voltarás a vê-lo.</strong><br><span class="mono">{secret}</span></p>
+<div style="background:#0d0d0d;border:1px solid var(--border);border-radius:8px;
+            padding:.75rem;margin-bottom:1rem">
+  <p class="muted" style="margin:0 0 .4rem">
+    Exemplo — envia um comando com este token:</p>
+  <pre class="mono" style="margin:0;white-space:pre-wrap">{example}</pre>
+</div>"""
 
     return _auth_page(
         "O meu perfil",
@@ -691,30 +711,45 @@ def _viewer_is_admin() -> bool:
         return False
 
 
+def _admin_nav_menu() -> str:
+    """The shared navigation, built by the admin's own builder.
+
+    This used to be a hand-rolled list of `<a class="nav-link">` elements. Same
+    class names, none of the structure the design system actually drives: the
+    nav-toggle button, the collapse below 900px, the grouped Cérebro entry. The
+    result was a burger on `/` that did not look like the burger on `/admin`,
+    which is the complaint that prompted this.
+
+    Delegating gives one menu, one look, and the links stay in step with the
+    admin pages automatically. `_build_nav_menu` takes a current endpoint;
+    "ui" is not an admin endpoint, so nothing renders as `.active` -- correct,
+    since this is not an admin page.
+
+    The fallback exists because the voice UI is a skill: it is loaded by the
+    dynamic loader and must keep working even if the admin package cannot be
+    imported. Losing navigation because a menu helper is unavailable is a worse
+    failure than a plainer menu, and the two links that matter on this page --
+    profile and sign out -- are not admin's responsibility.
+    """
+    try:
+        from src.api import admin as admin_mod
+
+        return admin_mod._build_nav_menu("ui", "admin" if _viewer_is_admin() else "user")
+    except Exception:
+        logger.warning("ui: shared nav unavailable, falling back to a plain menu")
+        return (
+            '<a class="nav-link" href="/perfil">'
+            '<span class="lbl">Perfil</span></a>'
+            '<a class="nav-link" href="/logout">'
+            '<span class="lbl">Sair</span></a>'
+        )
+
+
 def handle_request():
         _css, _js = _shared_design()
-        is_admin = _viewer_is_admin()
-        # Menu links are built from the RESOLVED role, not from what the page
-        # hopes the viewer is. This used to hardcode `admin_links_html = ""`,
-        # which is why there was no menu at all on `/` for anyone: an admin had
-        # to know the URLs, and a plain user had nothing to click. Now a signed-in
-        # user always gets a menu; the admin entries are rendered only for an
-        # admin, so a display:none link never leaves an admin URL in the page of
-        # someone who may not use it.
-        links = []
-        if is_admin:
-            links.append(('/admin/brain', '🧠', 'Cérebro'))
-            links.append(('/admin', '📊', 'Dashboard'))
-            links.append(('/admin/config', '⚙️', 'Configuração'))
-            links.append(('/admin/users', '👤', 'Utilizadores'))
-        links.append(('/perfil', '🔑', 'Perfil'))
-        links.append(('/logout', '🚪', 'Sair'))
-        admin_links_html = "".join(
-            f'<a class="nav-link" href="{href}">'
-            f'<span class="ico" aria-hidden="true">{ico}</span>'
-            f'<span class="lbl">{lbl}</span></a>'
-            for href, ico, lbl in links
-        )
+        # The menu is the admin's own builder, so the burger here is the burger
+        # on /admin rather than a lookalike built from the same class names.
+        admin_links_html = _admin_nav_menu()
         return (
         """
     <!DOCTYPE html>
