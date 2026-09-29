@@ -4,17 +4,32 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.api import ui_auth
 from src.api.routes import create_app
 
 
 @pytest.fixture()
-def api_client():
-    """Flask test client with a stub pipeline exposing respond_to_text."""
+def api_client(monkeypatch):
+    """Flask test client with a stub pipeline exposing respond_to_text.
+
+    Carries a session AND a seeded store, because these tests are about the
+    ENDPOINT's behaviour -- the response shape for an empty prompt, the mapping
+    of a pipeline failure to 502 -- and the command gate refuses an anonymous
+    caller before the handler runs. Without this they were all asserting a 401
+    and calling it a 400: a test that cannot fail for the reason it exists.
+    """
+    from tests.helpers_ui_auth import seeded_store
+
+    seeded_store(monkeypatch)
     pipeline = MagicMock()
     pipeline.respond_to_text.return_value = "Hoje em Porto: céu pouco nublado."
     app = create_app(pipeline=pipeline)
     app.config["TESTING"] = True
-    return app.test_client(), pipeline
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess[ui_auth.SESSION_KEY] = "b@t.test"
+        sess[ui_auth.ADMIN_SESSION_KEY] = "b@t.test"
+    return client, pipeline
 
 
 def test_comando_returns_ok_response(api_client):

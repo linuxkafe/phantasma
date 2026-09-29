@@ -137,4 +137,12 @@ def describe() -> dict:
         "scheme": "Authorization: Bearer <token>",
         "scope": "command endpoints only; not the admin surface",
         "query_string_tokens": "not accepted (they would be logged)",
+        "second_credential": (
+            "a signed-in session; the browser is a first-class caller, not an "
+            "exception to this one"
+        ),
+        "when_unset": (
+            "browsers with a session still work; anything else is refused, so "
+            "an unset token is not an open door"
+        ),
     }

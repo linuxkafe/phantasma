@@ -245,7 +245,7 @@ app and the Discord skill.
 | Env Var | Description |
 |---------|-------------|
 | `PHANTASMA_RECOVERY_PEPPER` | Mixed into every recovery-code verifier. **Set it.** Without it the codes are protected by bcrypt alone, and a stolen copy of the database becomes a slow offline search over the code space instead of an impossible one. A warning is logged on every code issued while it is absent. |
-| `PHANTASMA_COMMAND_TOKEN` | Machine-to-machine bearer token. Unset means the command gate is off and the endpoints behave as they always have. |
+| `PHANTASMA_COMMAND_TOKEN` | Machine-to-machine bearer token: a program may send commands and read the non-admin device/reading API. It cannot reach `/admin`, the user store, or the memory editor. **Unset means browsers with a session still work and everything else is a 401** — it does not mean "open". Set it. |
 
 ## Skills System
 
@@ -265,6 +265,99 @@ supported and both are loaded by `skills/loader.py`:
 `init_skill_daemon()` for background tasks.
 
 ## REST API
+
+### Public exposure (verified 2026-09-29)
+
+`https://phantasma.linuxkafe.com` resolves to a public address, terminates TLS
+in front of this box, and forwards to it. **This service is on the internet, not
+on the LAN** — and it was answering as if it were on the LAN.
+
+Verified against the live URL before anything was changed:
+
+| Endpoint | Anonymous, before |
+|---|---|
+| `GET /get_devices` | **200** — every light, socket and appliance |
+| `GET /device_status?nickname=casa` | **200** — live power, consumption, series |
+| `GET /api/graph/audit` | **200** — the memory graph |
+| `POST /api/stt`, `POST /api/tts` | reached the handler — free CPU, readable |
+| `POST /comando`, `/device_action`, `/api/command` | reached the handler — lights |
+
+and **every** response carried `Access-Control-Allow-Origin: *`. That header is
+what made it exploitable rather than merely private: `*` tells the browser any
+site may read the response, so a page the owner visited could `fetch()` the
+inventory and send it anywhere. No vulnerability was required, only a link.
+
+**Now:** every endpoint above answers `401` without a credential, and no
+response carries a CORS origin unless it is on the allow-list.
+
+`PHANTASMA_CORS_ORIGINS` is a comma-separated list of exact origins. It is empty
+by default, and the default emits no CORS headers at all. Nothing legitimate
+needed the wildcard: the voice UI is served *by* this service, so it is
+same-origin, and a native app (the Android companion) is not a browser — the
+browser is what enforces CORS, and native HTTP clients ignore it entirely.
+
+### The pepper was breaking the thing it protected
+
+`PHANTASMA_RECOVERY_PEPPER` is documented as "Set it". Setting it broke password
+recovery and new-device codes completely, and nobody noticed for the whole time
+it was absent.
+
+`_hash_code` built `pepper|email|code` and passed it to `bcrypt.hashpw`. bcrypt
+does not truncate at 72 bytes — it raises `ValueError`. With the 28-character
+default placeholder the payload was 53 bytes and every test passed; with the
+64-character hex value the README asks for, the same payload was 88 bytes and
+**every** code raised on the first request.
+
+The payload is now SHA-256'd to a fixed 32 bytes before bcrypt, so its length
+cannot depend on the pepper or the address. The pepper is still fully mixed in —
+it is an input to the digest, not a truncation of it. Codes issued under the old
+construction no longer verify; they are single-use and short-lived, so this is
+acceptable, and `tests/test_auth_pepper_length.py` states it as a test rather
+than a comment.
+
+`hash_password` never mixed in the pepper, so **no user password was affected**.
+
+The general lesson, and it is the one worth keeping: a feature that only runs
+when the owner follows the documentation is a feature nobody has tested.
+
+
+
+`POST /comando`, `POST /device_action` and `POST /api/command` require **one of
+two credentials** — never neither:
+
+| Caller | Credential |
+|---|---|
+| Browser | the session cookie from `/login` — this is what the page uses |
+| Program | `Authorization: Bearer $PHANTASMA_COMMAND_TOKEN` |
+
+Before this, the gate began `if not command_token.enabled(): return True`, and
+the token had never been set on the production box. On a service listening on
+`0.0.0.0:5000` that meant any device on the LAN could `POST /comando` and turn
+the lights on. It also made the login look stronger than it was: `/` was behind
+a session while the endpoints behind it were not.
+
+With no token configured, browsers with a session still work and everything else
+gets a `401` — an unset token is no longer "open", it is "browsers only". To let
+programs in, set the token and restart:
+
+```bash
+sudo sh -c 'printf "\n# Authorises programs (Android, Home Assistant, Discord, shell).\n# One capability: sending commands. Not the admin surface.\nPHANTASMA_COMMAND_TOKEN=%s\n" \
+  "$(openssl rand -hex 32)" >> /opt/phantasma/.env'
+sudo service phantasma restart
+```
+
+**Consequence to expect:** until that token is set, the Discord skill cannot
+command the house and will say so in its own reply rather than failing silently.
+The browser is unaffected.
+
+Accepting a session on a POST trades the token's CSRF immunity — a cross-site
+form cannot set an `Authorization` header — for the session cookie's, so the
+cookie now sets `SameSite=Lax` and `HttpOnly` **explicitly** in
+`src/api/routes.py`. That withholds the cookie on a cross-site POST, which is
+the control that replaces the immunity; it is set in config rather than left to
+whatever a browser happens to default to. `SESSION_COOKIE_SECURE` stays off
+because the service is plain HTTP on the LAN, and a forced `Secure` cookie would
+be silently dropped by the browser and break every session.
 
 Flask server at port 5000:
 

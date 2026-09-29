@@ -35,6 +35,49 @@ def root_page_html(client) -> str:
     return HTML_COMMENT.sub("", response.get_data(as_text=True))
 
 
+def seeded_store(monkeypatch, email: str = "b@t.test", role: str = "admin",
+                 password: str = "correct horse"):
+    """A file-backed user store with one user, patched in. Returns a connection factory.
+
+    Needed whenever a test wants a session to be ACCEPTED, not merely present.
+    `ui_auth.is_authenticated()` re-resolves the address against the store on
+    every request, so a session cookie naming a user who is not in the database
+    is treated as signed out -- which is the correct behaviour for a deleted
+    account, and the reason a session set up without a store gets a 401.
+
+    Lives here because three test modules now need it, and a second copy of the
+    seed is a third thing to keep in step when the schema moves.
+    """
+    import os
+    import tempfile
+
+    from src.api import admin as admin_mod
+    from src.api import auth_store
+
+    path = os.path.join(tempfile.mkdtemp(), "seeded.db")
+
+    def _fresh():
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    seed = _fresh()
+    seed.execute(
+        "CREATE TABLE users (email TEXT PRIMARY KEY, password_hash TEXT,"
+        " role TEXT, is_active INTEGER, updated_at TEXT)"
+    )
+    seed.execute(
+        "INSERT INTO users VALUES (?,?,?,1,'now')",
+        (email, admin_mod.hash_password(password), role),
+    )
+    seed.commit()
+    auth_store.ensure_schema(seed)
+    seed.close()
+
+    monkeypatch.setattr(admin_mod, "get_db_connection", _fresh)
+    return _fresh
+
+
 def make_app_with_user(email: str, role: str, password: str = "correct horse",
                        monkeypatch=None):
     """A Flask app carrying the UI routes, with `email` signed in as `role`.

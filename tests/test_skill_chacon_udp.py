@@ -183,16 +183,30 @@ def test_ui_places_the_balcony_light_in_the_sala():
     assert "n.includes('luz')||n.includes('candeeiro')" in page
 
 
-def test_get_devices_lists_the_chacon_plug():
+def test_get_devices_lists_the_chacon_plug(monkeypatch):
     """The UI builds its tiles from `/get_devices`, which only knew the cloud
-    device dicts, so a locally-controlled device had no way to show up."""
+    device dicts, so a locally-controlled device had no way to show up.
+
+    Carries a session because that endpoint is no longer public: the service is
+    reachable from the internet, and `GET /get_devices` returned the inventory of
+    a private home to anyone who asked. This test is about whether the plug is in
+    the list, not about who may read it, so it presents the credential the real
+    page presents rather than assuming the endpoint is open.
+    """
     from unittest.mock import MagicMock
 
+    from src.api import ui_auth
     from src.api.routes import create_app
+    from tests.helpers_ui_auth import seeded_store
 
+    seeded_store(monkeypatch)
     app = create_app(pipeline=MagicMock())
     app.config["TESTING"] = True
-    resp = app.test_client().get("/get_devices")
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess[ui_auth.SESSION_KEY] = "b@t.test"
+        sess[ui_auth.ADMIN_SESSION_KEY] = "b@t.test"
+    resp = client.get("/get_devices")
 
     assert resp.status_code == 200
     toggles = resp.get_json()["devices"]["toggles"]

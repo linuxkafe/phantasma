@@ -1196,27 +1196,62 @@ def handle_request():
                 .voice-status.show { display: block; }
 
                 /* ---- Vertical layout for phones ----
-                   The whole point of the phone layout: one column, top to
-                   bottom, with the device strip capped so the conversation
-                   stays on screen. `#main` is given the remaining height and
-                   its own scroll, so the page itself never scrolls -- a phone
-                   that scrolls the whole document while you are trying to read
-                   the answer is a phone you cannot talk to. */
+                   The whole point of the phone layout: ONE COLUMN, top to
+                   bottom, and the device tiles own it. `#main` is the chat
+                   panel and it is out of the flow -- absolutely positioned,
+                   covering the tiles only while it is open -- so the tiles can
+                   use the full height below the header instead of being capped
+                   to share a viewport with a conversation nobody asked for.
+
+                   The page itself does not scroll: `#main` owns its own
+                   scrolling, because a phone that scrolls the whole document
+                   while you are reading an answer is a phone you cannot talk
+                   to, and the tiles would move out from under the thumb. */
                 @media (max-width: 768px) {
                     html, body { height: 100%; overflow: hidden; }
                     body { display: flex; flex-direction: column; }
-                    #header-strip { flex: 0 0 auto; max-height: 38vh; }
-                    #devices { flex: 0 0 auto; max-height: 22vh; overflow-y: auto; }
+                    #header-strip { flex: 0 0 auto; max-height: 34vh; }
+                    /* The tiles are the priority, so the strip is no longer
+                       capped: it takes what it needs and #devices scrolls
+                       inside itself. */
+                    #devices {
+                        flex: 1 1 auto; min-height: 0; max-height: none;
+                        width: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;
+                    }
                     #main {
-                        flex: 1 1 auto; min-height: 0; display: flex;
-                        flex-direction: column; overflow: hidden;
+                        position: absolute; inset: 0; z-index: 40;
+                        display: flex; flex-direction: column;
+                        background: #0a0a0a;
+                        /* Closed by default, and the only way it opens is the
+                           tab. transform rather than display so the fade is
+                           cheap and so a hidden panel cannot catch a tap. */
+                        transform: translateY(100%);
+                        transition: transform 0.18s ease-out;
+                        visibility: hidden;
+                    }
+                    #main.open { transform: translateY(0); visibility: visible; }
+                    /* The tab lives at the bottom, where a thumb already is,
+                       and sits ABOVE the panel in z-order so it stays reachable
+                       to dismiss it. */
+                    #chat-tab {
+                        position: fixed; right: 12px; bottom: max(12px, env(safe-area-inset-bottom));
+                        z-index: 50; display: inline-flex; align-items: center; gap: 6px;
+                        background: #181818; color: #eee; border: 1px solid #333;
+                        border-radius: 999px; padding: 10px 16px; font-size: 0.85rem;
+                        cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+                    }
+                    /* While the panel is open the tab becomes the close
+                       affordance; a panel that covers the opener would need a
+                       second, invisible way out. */
+                    #main.open ~ #chat-tab {
+                        background: #2a2a2a; border-color: #555;
                     }
                     #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
                     #chat-input-box { flex: 0 0 auto; }
                     /* The composer is the one control that must never leave the
                        screen: on iOS the keyboard covers whatever is at the
                        bottom, and the send button with it. */
-                    #chat-input-box { position: sticky; bottom: 0; background: #0a0a0a; z-index: 5; }
+                    #chat-input-box { position: static; background: #181818; }
                 }
 
 
@@ -1634,9 +1669,21 @@ def handle_request():
 
 
         <div id="main">
+            <!-- The chat is a PANEL, not a column, on a phone. The owner asked
+                 for the device tiles to own the screen and for the
+                 conversation to appear over them only when it is asked for.
+                 On a phone the tiles used to share the viewport with the log:
+                 the strip was capped at 22vh to make room, so a home with
+                 fourteen devices showed three and had to scroll a 20vh band
+                 to reach the rest. The chat takes the screen when tapped and
+                 gives it back when dismissed. -->
             <div id="chat-log"></div>
             <div id="help-toggle" onclick="toggleHelp()">Ver Comandos</div>
             <div id="cli-help"><pre id="help-content" style="color:#888; font-size:0.8em; margin:0;">...</pre></div>
+            <!-- The tab that summons it. Always present, because a panel with
+                 no opener is not a panel. -->
+            <button id="chat-tab" type="button" aria-controls="main"
+                    aria-expanded="false" aria-label="Abrir conversa">Chat</button>
             <div id="chat-input-box">
                 <textarea id="chat-input" placeholder="Mensagem..." autocomplete="off"></textarea>
                 <button id="chat-send">Enviar</button>
@@ -1968,10 +2015,15 @@ def handle_request():
             }
 
             async function handleDeviceAction(device, action) {
+                /* Open before the request, not after: the panel is where the
+                   confirmation lands, and on a phone the owner has just tapped
+                   a tile -- they are looking at the tiles. A reply that arrives
+                   into a closed panel is a reply nobody reads. */
+                openChat();
                 showTypingIndicator();
                 try {
                     const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
-                    const data = await res.json(); 
+                    const data = await res.json();
                     if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
                 } catch (e) { removeTypingIndicator(); }
             }
@@ -2145,6 +2197,46 @@ def handle_request():
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
 
+            /* ---- The chat panel, on a phone ----
+               The tiles own the screen; the conversation is summoned. Kept to
+               two functions because a panel that can be opened by three
+               different affordances and closed by none of them is a panel the
+               owner cannot get out of.
+
+               On desktop this is all inert: the media query that turns #main
+               into an overlay is max-width:768px, and the chat is a normal
+               column there, exactly as it was. The functions are still safe to
+               call -- openChat is a no-op when the panel is not a panel. */
+            const chatPanel = document.getElementById('main');
+            const chatTab = document.getElementById('chat-tab');
+            function openChat() {
+                if (!chatPanel) return;
+                chatPanel.classList.add('open');
+                if (chatTab) {
+                    chatTab.setAttribute('aria-expanded', 'true');
+                    chatTab.textContent = 'Fechar';
+                }
+            }
+            function closeChat() {
+                if (!chatPanel) return;
+                chatPanel.classList.remove('open');
+                if (chatTab) {
+                    chatTab.setAttribute('aria-expanded', 'false');
+                    chatTab.textContent = 'Chat';
+                }
+            }
+            if (chatTab && chatPanel) {
+                chatTab.onclick = () => chatPanel.classList.contains('open')
+                    ? closeChat() : openChat();
+                /* Tapping a device answers with text in the log, so the panel
+                   opens by itself there too -- otherwise a reply would be
+                   produced into a panel that is closed and never read. */
+                /* Escape closes it, for a phone with a keyboard attached. */
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && chatPanel.classList.contains('open')) closeChat();
+                });
+            }
+
 
             /* The device strip is an inner scroller inside a non-scrolling app
                shell (body is 100dvh + overflow:hidden), so a clipped row of
@@ -2302,6 +2394,12 @@ def handle_request():
                     if (data.success === false) { voiceSay(data.error || 'Não deu.', 3000); return; }
                     if (data.transcript) addToChatLog(data.transcript, 'user');
                     if (data.text) addToChatLog(data.text, 'ia');
+                    /* A spoken command always opens the panel. The transcript
+                       is the receipt: if the house heard the wrong thing, the
+                       only way to find out is to read what it thought it heard,
+                       and on a phone that text is behind a panel the owner did
+                       not open. */
+                    if (data.transcript || data.text) openChat();
                     playReply(data.audio_base64);
                 } catch (err) {
                     voiceSay('Falha de rede.', 3000);

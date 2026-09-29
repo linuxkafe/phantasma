@@ -170,6 +170,29 @@ def _pepper() -> bytes:
     return raw.encode("utf-8")
 
 
+def _code_payload(email: str, code: str) -> bytes:
+    """The bytes that get hashed, for BOTH issuing and verifying a code.
+
+    Pre-hashed with SHA-256 on purpose. bcrypt refuses inputs longer than 72
+    bytes -- it raises ValueError, it does not truncate -- and the payload is
+    `pepper|email|code`. With the default 28-char placeholder that fits, so
+    every test passed and the code shipped for months; with the 64-char hex
+    pepper the README tells the owner to set, the same payload was 88 bytes and
+    EVERY recovery and new-device code raised on the first request. The pepper
+    was not merely hardening, it was breaking the feature it protects -- and the
+    absence of the pepper was the only reason nobody had noticed.
+
+    SHA-256 collapses the input to 32 bytes, which is fixed whatever the pepper
+    or the address length, and leaves room for the bcrypt limit. The pepper is
+    still fully mixed in: it is an input to the digest, not a truncation of it.
+
+    One function, used by both paths, because hashing with one construction and
+    verifying with another is how a code becomes permanently unredeemable while
+    both sides still look correct.
+    """
+    return hashlib.sha256(f"{_pepper()}|{email.strip().lower()}|{code}".encode()).digest()
+
+
 def _hash_code(email: str, code: str) -> str:
     """bcrypt over the code, bound to the address and the purpose.
 
@@ -179,8 +202,7 @@ def _hash_code(email: str, code: str) -> str:
     """
     import bcrypt
 
-    payload = f"{_pepper()}|{email.strip().lower()}|{code}".encode("utf-8")
-    return bcrypt.hashpw(payload, bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(_code_payload(email, code), bcrypt.gensalt()).decode("utf-8")
 
 
 def _hash_token(raw: str) -> str:
@@ -291,10 +313,14 @@ def consume_code(
 
     try:
         ok = bcrypt.checkpw(
-            f"{_pepper()}|{email}|{code}".encode("utf-8"),
+            _code_payload(email, code),
             row["code_hash"].encode("utf-8"),
         )
     except (ValueError, TypeError):
+        # bcrypt raises on anything over 72 bytes rather than truncating, so
+        # a hash written by an older build, or a payload built differently
+        # here, must read as "does not verify" and not as a 500 on the owner
+        # trying to recover their password.
         logger.warning("auth: unverifiable code hash format")
         ok = False
 

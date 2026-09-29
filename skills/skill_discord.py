@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import threading
 from datetime import datetime
 from typing import Optional
@@ -60,6 +61,25 @@ client = discord.Client(intents=intents)
 # URL da API local do Phantasma (comunica com o assistant.py via HTTP para thread safety)
 PHANTASMA_API_URL = "http://127.0.0.1:5000/comando"
 
+# Command endpoints require a credential, and this is a program, not a browser:
+# it has no session and cannot log in as the owner. It therefore presents the
+# command token, exactly as the Android companion and any shell script do.
+#
+# It used to send nothing and be accepted, because the gate returned True
+# whenever PHANTASMA_COMMAND_TOKEN was unset -- so the "protection" was only
+# ever protecting a box where someone had remembered to configure it, and the
+# LAN was open everywhere else. Discord is also the one caller with a wide blast
+# radius: a message from an allowed server reaches the house, and the
+# allow-list here is a user-id check on Discord's side, not on ours.
+#
+# If the token is unset the request is now refused, and the message says why
+# rather than surfacing as a bare 401.
+_COMMAND_TOKEN = os.getenv("PHANTASMA_COMMAND_TOKEN", "").strip()
+_COMMAND_HEADERS = (
+    {"Authorization": f"Bearer {_COMMAND_TOKEN}"} if _COMMAND_TOKEN else {}
+)
+
+
 
 def _check_access(user_id, prompt_lower):
     """
@@ -116,8 +136,22 @@ async def _send_to_phantasma(prompt):
     async with httpx.AsyncClient(timeout=300) as http_client:
         try:
             payload = {"prompt": prompt}
+            if not _COMMAND_HEADERS:
+                return (
+                    "Não tenho credencial para falar com a casa. "
+                    "Define PHANTASMA_COMMAND_TOKEN no ambiente do phantasma "
+                    "e reinicia o serviço."
+                )
             # Usa a API local para processar (garante que passa pelo route_and_respond)
-            response = await http_client.post(PHANTASMA_API_URL, json=payload)
+            response = await http_client.post(
+                PHANTASMA_API_URL, json=payload, headers=_COMMAND_HEADERS
+            )
+            if response.status_code == 401:
+                return (
+                    "A casa recusou o comando (401). O "
+                    "PHANTASMA_COMMAND_TOKEN do Discord não corresponde ao do "
+                    "serviço."
+                )
             response.raise_for_status()
             data = response.json()
             return data.get("response", "...")

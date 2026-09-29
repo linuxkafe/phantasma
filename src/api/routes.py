@@ -220,18 +220,80 @@ def create_app(pipeline=None) -> Flask:
     # Session lifetime 30 days
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
+    # Session cookie hardening, set explicitly rather than inherited.
+    #
+    # HttpOnly: the session is a credential for the house now -- it authorises
+    # the command endpoints -- so script must never read it. A stolen XSS token
+    # that cannot be read back is a far smaller problem than one that can.
+    #
+    # SameSite=Lax: accepting a session on a POST trades the token's CSRF
+    # immunity for the cookie's. A cross-site form cannot set an Authorization
+    # header, so the token path was immune by construction; the session path is
+    # not, and this is the control that replaces that immunity. Lax sends the
+    # cookie on a top-level GET navigation and withholds it on a cross-site
+    # POST, which is exactly the boundary: the login form posts from a page the
+    # user already navigated to, and an attacker's page cannot. Strict would
+    # break the recovery link, which is followed from outside.
+    #
+    # Set in config, not left to the browser default. "It works because every
+    # browser happens to default to Lax" is not a control; someone setting
+    # SESSION_COOKIE_SAMESITE=None later would silently reopen it.
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    # Secure only when the site is actually served over TLS. The service is
+    # plain HTTP on the LAN, so forcing Secure here would set a cookie the
+    # browser then refuses to send back and every session would break.
+    app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE") == "1"
+
     # Store pipeline reference for route handlers
     app.pipeline = pipeline
 
     # Register admin blueprint
     app.register_blueprint(admin_bp)
 
-    # CORS for Android app
+    # CORS. Origin allow-list, and nothing by default.
+    #
+    # This used to be three unconditional headers, the worst of which was
+    # `Access-Control-Allow-Origin: *`. Verified against the live public URL on
+    # 2026-09-29: `https://phantasma.linuxkafe.com/get_devices` returned the
+    # inventory of a private home -- every light, socket and appliance -- to an
+    # anonymous caller, WITH `Access-Control-Allow-Origin: *`. That second part is
+    # what made it exploitable rather than merely private: `*` tells the browser
+    # "any site on the internet may read this response", so a page the owner
+    # visits could fetch it and send the result anywhere. No bug required, just
+    # the owner opening a link.
+    #
+    # Nothing legitimate needed `*`:
+    #   * the voice UI is served BY this service, so it is same-origin and CORS
+    #     does not apply to it at all;
+    #   * a native app (the Android companion) is not a browser -- the browser
+    #     enforces CORS, and native HTTP clients ignore it entirely. This header
+    #     was protecting nothing that existed;
+    #   * a genuinely separate web front-end can be allow-listed, which is what
+    #     PHANTASMA_CORS_ORIGINS is for.
+    #
+    # So the default is to emit no CORS headers at all, and to reflect an origin
+    # only when it is on the list. `Vary: Origin` is mandatory once the response
+    # depends on the request's origin: without it a shared cache can serve one
+    # origin's response to another.
+    _cors_origins = {
+        o.strip()
+        for o in os.getenv("PHANTASMA_CORS_ORIGINS", "").split(",")
+        if o.strip()
+    }
+
     @app.after_request
     def after_request(response):
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+        origin = request.headers.get("Origin")
+        if origin and (origin in _cors_origins or "*" in _cors_origins):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type,Authorization"
+            )
+            response.headers["Access-Control-Allow-Methods"] = (
+                "GET,PUT,POST,DELETE,OPTIONS"
+            )
+            response.headers.add("Vary", "Origin")
         return response
 
     # ============ Command authorisation ============
@@ -244,41 +306,125 @@ def create_app(pipeline=None) -> Flask:
     # exactly one capability -- sending a command -- and cannot reach the
     # memory graph, the user store or anything under /admin.
     #
-    # The gate is INACTIVE until PHANTASMA_COMMAND_TOKEN is set. That is
-    # deliberate: the service is already reachable from the LAN, the Android
-    # companion and the Discord skill call these endpoints today, and turning
-    # the gate on by default would break every existing client. Configuring the
-    # token is the moment the owner opts in. An unset token must therefore never
-    # mean "accept anything from anyone who found the port" *because the token
-    # was configured and typo'd* -- enabled() is False in that case and the
-    # request is treated exactly as before.
+    # EITHER credential is enough, and NEITHER is refused. That is the policy
+    # src/api/command_token.py has always documented, and it is not what the gate
+    # did: with PHANTASMA_COMMAND_TOKEN unset it returned True, so the endpoints
+    # were open to anything that could reach port 5000. On a box listening on
+    # 0.0.0.0:5000 that is every device on the LAN, and a command turns the
+    # lights on. The browser path was already session-gated, so the browser never
+    # needed the fallback -- it needed the session to be ACCEPTED here, which it
+    # was not.
+    #
+    # The unset case is not "accept everything", it is "accept the browser and
+    # refuse the rest": the owner's own page keeps working with nothing
+    # configured, a program is told exactly which variable to set, and an
+    # anonymous POST is a 401 rather than a light switch.
     #
     # A command is a real-world action (it turns the lights on), so this is not
     # a formality; it is also not a full authorisation system, and does not try
     # to be one. See src/api/command_token.py for the threat model and for what
     # is deliberately not implemented.
     def _command_authorized() -> bool:
-        from src.api import command_token
+        from src.api import command_token, ui_auth
+
+        # A program. Constant-time, header-only, never logged.
+        if command_token.enabled() and command_token.check_header(
+            request.headers.get("Authorization")
+        ):
+            return True
+
+        # A browser. Resolved against the user store, so a cookie naming a
+        # deleted account does not count. This is the same session that guards
+        # `/`, which is why the two doors cannot drift apart.
+        try:
+            if ui_auth.is_authenticated():
+                return True
+        except Exception:  # noqa: BLE001 - an auth probe must not open the door
+            logger.warning("Command refused: session could not be verified")
 
         if not command_token.enabled():
-            return True  # feature not opted into; behave as before
-        header = request.headers.get("Authorization")
-        if command_token.check_header(header):
-            return True
-        logger.warning("Command rejected: no or invalid bearer token")
+            # Refusing, and saying why. The previous behaviour here was to allow
+            # everything, which meant a mistyped or absent token was
+            # indistinguishable from a deliberate opt-out.
+            logger.warning(
+                "Command refused: no session and no %s configured. Set it to let "
+                "programs (Android, Home Assistant, shell) send commands.",
+                command_token.ENV_TOKEN,
+            )
+        else:
+            logger.warning("Command rejected: no valid session and no valid bearer token")
         return False
 
-    @app.before_request
-    def _require_token_for_commands():
-        # Read-only endpoints are left open on purpose: the UI renders devices,
-        # weather and help from them, and they expose nothing that cannot be
-        # read off the device list anyway. Anything that ACTS is gated.
-        if request.method not in ("POST", "PUT", "DELETE", "PATCH"):
-            return None
-        if request.path in (
+    # What the token reaches, stated once so the two gates cannot drift.
+    #
+    # Verified against the live public URL on 2026-09-29: this service is
+    # reachable from the internet at https://phantasma.linuxkafe.com, and
+    # `GET /get_devices` returned the full inventory of a private home to an
+    # anonymous caller. So the house was readable by anyone who found the URL,
+    # not just writable.
+    #
+    # The token's documented scope was "one capability: send a command". Kept
+    # here rather than widened silently: the machine credential reaches the
+    # non-admin device/reading API so the Android companion keeps working, and
+    # the command endpoints. It does NOT reach /admin, the user store, or the
+    # memory editor, and widening it to those is a deliberate act, not a
+    # consequence of this list.
+    _TOKEN_PATHS = frozenset(
+        {
+            # Commands: act on the house.
             "/comando",
             "/device_action",
             "/api/command",
+            # Read the house: what is plugged in, what it is drawing, whether it
+            # is online. Private, so it is gated like the commands.
+            "/get_devices",
+            "/api/devices",
+            "/device_status",
+            # The memory graph and the reaction log are the owner's own writing.
+            "/api/graph/audit",
+            "/api/reactions",
+            # CPU-expensive and publicly callable: an unauthenticated /api/stt
+            # is a free transcription service on someone else's electricity.
+            "/api/stt",
+            "/api/tts",
+            # Writes to the graph and the reactions.
+            "/api/reaction",
+            "/api/graph/node",
+            "/api/graph/edge",
+            "/api/graph/resolve",
+            "/api/graph/rag",
+            "/api/graph/flybrain",
+        }
+    )
+
+    # Left deliberately ungated, and each one is a decision:
+    #   /api/health  - liveness for the deploy gate and the proxy; reports
+    #                  component names and uptime, no readings, no addresses.
+    #   /api/auth    - a description of the auth mechanism, no secrets.
+    #   /help        - the command vocabulary, which is documentation.
+    #   /login and friends - they are the front door; gating them is a loop.
+    # /api/memory/* and everything under /admin are NOT here: they are the
+    # owner's own writing and the admin surface, and they keep their own
+    # session+admin gates.
+    @app.before_request
+    def _authorize_api():
+        # Preflight, for an allow-listed origin only. A browser asks before it
+        # sends the real request; without this the preflight hits a route that
+        # does not accept OPTIONS and answers 405, and the allow-list silently
+        # does not work. Not a bypass: nothing is executed here.
+        origin = request.headers.get("Origin")
+        if request.method == "OPTIONS" and origin and (
+            origin in _cors_origins or "*" in _cors_origins
+        ):
+            return ("", 204)
+
+        path = request.path
+        if path in _TOKEN_PATHS and request.method in (
+            "GET",
+            "POST",
+            "PUT",
+            "DELETE",
+            "PATCH",
         ):
             if not _command_authorized():
                 return jsonify(
