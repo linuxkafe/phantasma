@@ -1,11 +1,12 @@
-import config
-from pathlib import Path
 import json
 import logging
 import os
 import time
+from pathlib import Path
 
 from flask import jsonify, make_response, redirect, request, session, url_for
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -548,7 +549,7 @@ def profile_page():
         f"<span class='muted'>criado {_when(t['created_at'])}"
         + (f" · usado {_when(t['last_used_at'])}" if t["last_used_at"] else " · nunca usado")
         + (" · <strong>revogado</strong>" if t["revoked_at"] else "")
-        + f"</span></span>"
+        + "</span></span>"
         + ("" if t["revoked_at"] else
            f"<form method='post' style='margin:0'>"
            f"<input type='hidden' name='op' value='revoke_token'>"
@@ -678,6 +679,7 @@ def register_routes(app):
         return resp
 
     app.add_url_rule('/', 'ui', _ui_page)
+    app.add_url_rule('/api/voz', 'ui.voice', voice_endpoint, methods=["POST"])
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
     app.add_url_rule('/login', 'ui_login', login_page, methods=["GET", "POST"])
     app.add_url_rule('/logout', 'ui_logout', logout_page, methods=["GET", "POST"])
@@ -708,7 +710,6 @@ def _viewer_is_admin() -> bool:
     non-admin resolves to no admin, because the store says so.
     """
     try:
-        from src.api import admin as admin_mod
         from src.api import ui_auth
 
         if ui_auth.current_user() is not None:
@@ -719,6 +720,156 @@ def _viewer_is_admin() -> bool:
     except Exception:
         # Never let an auth probe break the device page.
         return False
+
+
+# Controls this page contributes to the shared navigation bar, rather than
+# wrapping the bar in its own markup.
+#
+# They live INSIDE .nav-bar but OUTSIDE .nav-menu, because below 900px the menu
+# becomes a full-screen overlay: anything placed inside it is hidden until the
+# burger is opened, and the burger is the thing you need to reach the voice
+# button in the first place. The mic belongs where a thumb can find it on the
+# home screen, not two taps deep.
+#
+# The voice button is one control, not two. The compact-view toggle that used to
+# sit here was removed on owner decision (2026-09-29): on a phone the vertical
+# layout already shows every device without a second layout mode, and a
+# persistent toggle only offered a way to make the page worse.
+_VOICE_BAR_CONTROLS = (
+    '<button id="voice-btn" type="button" class="nav-voice"'
+    ' aria-label="Falar um comando" title="Falar um comando">'
+    '<span class="voice-ico" aria-hidden="true"></span></button>'
+)
+
+
+def voice_endpoint():
+    """One spoken command: audio in, text out, spoken answer back.
+
+    Added 2026-09-29 for the phone. The browser records, decodes to 16 kHz mono
+    WAV, and posts it here; this transcribes, executes the command, and returns
+    the answer as both text and audio, so the whole loop is one round trip over
+    whatever connection the phone happens to have.
+
+    The audio is decoded IN THE BROWSER, not here. `soundfile` cannot read the
+    webm/opus that MediaRecorder produces on Android Chrome, and the fallback in
+    `_decode_base64_audio` -- "assume raw PCM" -- would have read the opus
+    container as 16-bit samples and handed the recogniser noise, which transcribes
+    to plausible garbage without ever reporting an error. Letting the browser
+    call `AudioContext.decodeAudioData` avoids that failure mode and avoids
+    adding ffmpeg as a production dependency for the sake of one format.
+
+    Session-gated, like the page itself. This endpoint turns light switches and
+    memory edits into a POST body, so it must not be reachable by anything that
+    cannot load `/`. The command-token gate in routes.py does not cover it: that
+    gate is opt-in and the token is not configured, so `/api/command` itself is
+    currently reachable by anything on the LAN. That hole is real, predates
+    this, and is NOT closed here -- an unknown mobile client may depend on it --
+    but this endpoint is not adding to it.
+    """
+    from src.api import ui_auth
+
+    if not ui_auth.is_authenticated():
+        return jsonify({"success": False, "error": "Sessão necessária."}), 401
+
+    started = time.perf_counter()
+    payload = request.get_json(silent=True) or {}
+    audio_b64 = payload.get("audio_base64")
+    if not audio_b64:
+        return jsonify({"success": False, "error": "Sem áudio."}), 400
+
+    # A phone on a bad connection will happily upload a very large blob. The
+    # recogniser caps its own input (stt_max_audio_seconds), so anything past
+    # this is wasted upload and wasted seconds, and the user waits either way.
+    # 12 MB of 16 kHz mono WAV is roughly three minutes -- far beyond the cap,
+    # and far below what would exhaust memory on this box.
+    if len(audio_b64) > 12 * 1024 * 1024:
+        return jsonify(
+            {"success": False, "error": "Gravação demasiado longa."}
+        ), 413
+
+    try:
+        from src.api.routes import _decode_base64_audio, _execute_llm_tts, _resample_to_16khz
+        from src.pipeline.stt import transcribe as stt_transcribe
+
+        audio, sample_rate = _decode_base64_audio(audio_b64)
+        audio = _resample_to_16khz(audio, sample_rate)
+    except Exception as exc:  # noqa: BLE001 - report, never 500 a tap on a phone
+        logger.warning("voice: audio decode failed: %s", exc)
+        return jsonify({"success": False, "error": "Não consegui ler o áudio."}), 400
+
+    # Silence is the common case for a mis-tap, and the recogniser will happily
+    # return a confident transcription of room noise. Rejecting it here means the
+    # user is told nothing was heard instead of being shown a sentence nobody
+    # said -- which they would then read aloud to their house.
+    try:
+        peak = float(abs(audio).max()) if len(audio) else 0.0
+    except (TypeError, ValueError):
+        peak = 0.0
+    if peak < 0.01:
+        return jsonify(
+            {"success": False, "error": "Não ouvi nada.", "reason": "silence"}
+        ), 200
+
+    try:
+        result = stt_transcribe(audio, language=payload.get("language") or "pt")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("voice: transcription failed: %s", exc)
+        return jsonify({"success": False, "error": "Falha ao transcrever."}), 500
+
+    if not result.success:
+        return jsonify(
+            {"success": False, "error": result.error or "Não transcrevi."}
+        ), 500
+
+    spoken = (result.data or "").strip()
+    if not spoken:
+        return jsonify(
+            {"success": False, "error": "Não percebi.", "reason": "empty"}
+        ), 200
+
+    # Dispatch through the same helpers the JSON API uses, so a spoken "liga a
+    # luz" and a typed one take exactly the same path. Duplicating the dispatch
+    # here is how the two would drift apart and the phone would quietly stop
+    # understanding the house.
+    from src.api.routes import (
+        _handle_device_command,
+        _handle_memory_command,
+        _is_device_command,
+        _is_memory_command,
+    )
+
+    lowered = spoken.lower()
+    if _is_memory_command(lowered):
+        response = _handle_memory_command(spoken)
+    elif _is_device_command(lowered):
+        response = _handle_device_command(spoken)
+    else:
+        text, audio_out, _elapsed = _execute_llm_tts(spoken, started)
+        return jsonify(
+            {
+                "success": True,
+                "transcript": spoken,
+                "text": text,
+                "audio_base64": audio_out,
+                "audio_format": "wav" if audio_out else None,
+                "processing_time_ms": (time.perf_counter() - started) * 1000,
+            }
+        )
+
+    # _handle_* return a flask Response (jsonify). Unwrap it so this endpoint
+    # has one shape for the browser instead of three.
+    body = response.get_json(silent=True) or {}
+    return jsonify(
+        {
+            "success": True,
+            "transcript": spoken,
+            "text": body.get("text") or body.get("response") or spoken,
+            "audio_base64": body.get("audio_base64"),
+            "audio_format": body.get("audio_format"),
+            "device_states": body.get("device_states"),
+            "processing_time_ms": (time.perf_counter() - started) * 1000,
+        }
+    )
 
 
 def _admin_nav_menu() -> str:
@@ -744,7 +895,11 @@ def _admin_nav_menu() -> str:
     try:
         from src.api import admin as admin_mod
 
-        return admin_mod._build_nav_menu("ui", "admin" if _viewer_is_admin() else "user")
+        return admin_mod._build_nav_menu(
+            "ui",
+            "admin" if _viewer_is_admin() else "user",
+            extra_in_bar=_VOICE_BAR_CONTROLS,
+        )
     except Exception:
         logger.warning("ui: shared nav unavailable, falling back to a plain menu")
         return (
@@ -994,63 +1149,77 @@ def handle_request():
                 }
             }
               .device-sensor { background: #252525; border: 1px solid #333; }
-              .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
-              .device-toggle.active .device-icon { filter: grayscale(0%); }
+                .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
+                .device-toggle.active .device-icon { filter: grayscale(0%); }
 
-              /* Compact view: every device visible at once, no scrollbar.
-                 The default view is deliberately capped at 34dvh and scrolls,
-                 because a capped panel is what keeps the chat above the fold on
-                 a phone. That is a real constraint, but it means a home with 14
-                 devices hides most of them behind an inner scroller that reads
-                 as a clipping bug rather than as "scroll me".
+                /* ---- Voice control in the bar ----
+                   44x44 is the touch-target floor, matched to the nav burger
+                   beside it: a control you have to aim at is not a control you
+                   use with a phone in one hand. */
+                .nav-voice {
+                    background: transparent; border: 1px solid #333; color: #ccc;
+                    border-radius: 8px; width: 44px; height: 44px; cursor: pointer;
+                    display: inline-flex; align-items: center; justify-content: center;
+                    flex: 0 0 auto; margin-left: 6px; padding: 0;
+                }
+                .nav-voice:hover { border-color: #555; }
+                .nav-voice[disabled] { opacity: 0.4; cursor: not-allowed; }
+                /* A drawn microphone rather than an emoji, so it matches the
+                   rest of the bar and does not inherit the device tiles'
+                   grayscale filter. */
+                .nav-voice .voice-ico {
+                    width: 14px; height: 14px; display: block;
+                    background: currentColor;
+                    /* capsule + stand, from one border-radius trick */
+                    border-radius: 7px 7px 4px 4px;
+                    position: relative;
+                }
+                .nav-voice .voice-ico::after {
+                    content: ''; position: absolute;
+                    left: 50%; bottom: -6px; transform: translateX(-50%);
+                    width: 4px; height: 6px; background: currentColor;
+                    border-radius: 0 0 2px 2px;
+                }
+                /* Recording: the border and the glyph go red, because the
+                   microphone is HOT and the user must be able to tell at a
+                   glance whether the house is listening. A colour change alone
+                   is not enough for every user, so the button also carries an
+                   aria-live status line (see .voice-status). */
+                .nav-voice.recording { border-color: #ef4444; color: #ef4444; }
+                .nav-voice.busy { border-color: var(--accent, #22c55e); color: var(--accent, #22c55e); }
+                .voice-status {
+                    position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
+                    background: #1e1e1e; border: 1px solid #333; color: #eee;
+                    padding: 8px 14px; border-radius: 8px; font-size: 0.8rem;
+                    max-width: 90vw; text-align: center; z-index: 60; display: none;
+                }
+                .voice-status.show { display: block; }
 
-                 This mode trades the 44px touch-target floor and the icon
-                 badge for a single dense row per room, so all of them fit. It
-                 is opt-in and remembered, and it does not change the default:
-                 the icon is still the tile, and the switch is still there, just
-                 laid out sideways. */
-              body.dev-compact #devices { overflow-y: visible; max-height: none; }
-              /* Give the strip its own row. In the default layout #devices is
-                 a capped scroller next to the nav; with the cap lifted it would
-                 otherwise sit beside the burger on one line and wrap oddly on a
-                 phone. */
-              body.dev-compact #devices { flex: 1 1 100%; min-width: 0; }
-              body.dev-compact .device-room {
-                  display: block; margin-right: 0; margin-bottom: 6px;
-                  padding-right: 0; border-right: none; width: 100%;
-              }
-              body.dev-compact .room-header {
-                  display: inline-block; margin: 0 8px 0 0; font-size: 0.6rem;
-              }
-              body.dev-compact .room-content { display: inline-flex; gap: 4px; }
-              body.dev-compact .device-toggle, body.dev-compact .device-sensor {
-                  flex-direction: row; min-width: 0; min-height: 28px;
-                  height: auto; padding: 3px 6px; border-radius: 6px; gap: 4px;
-                  background: #1e1e1e;
-              }
-              body.dev-compact .device-icon {
-                  width: 1.1rem; height: 1.1rem; font-size: 0.75rem;
-                  margin-bottom: 0; border-radius: 4px;
-              }
-              body.dev-compact .device-label, body.dev-compact .sensor-label {
-                  font-size: 0.6rem; width: auto; text-align: left;
-              }
-              body.dev-compact .device-label { max-width: 9rem; }
-              body.dev-compact .sensor-data { font-size: 0.6rem; }
-              body.dev-compact .switch { width: 26px; height: 15px; }
-              body.dev-compact .slider { width: 12px; height: 12px; }
-              body.dev-compact .slider::before { width: 11px; height: 11px; }
+                /* ---- Vertical layout for phones ----
+                   The whole point of the phone layout: one column, top to
+                   bottom, with the device strip capped so the conversation
+                   stays on screen. `#main` is given the remaining height and
+                   its own scroll, so the page itself never scrolls -- a phone
+                   that scrolls the whole document while you are trying to read
+                   the answer is a phone you cannot talk to. */
+                @media (max-width: 768px) {
+                    html, body { height: 100%; overflow: hidden; }
+                    body { display: flex; flex-direction: column; }
+                    #header-strip { flex: 0 0 auto; max-height: 38vh; }
+                    #devices { flex: 0 0 auto; max-height: 22vh; overflow-y: auto; }
+                    #main {
+                        flex: 1 1 auto; min-height: 0; display: flex;
+                        flex-direction: column; overflow: hidden;
+                    }
+                    #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+                    #chat-input-box { flex: 0 0 auto; }
+                    /* The composer is the one control that must never leave the
+                       screen: on iOS the keyboard covers whatever is at the
+                       bottom, and the send button with it. */
+                    #chat-input-box { position: sticky; bottom: 0; background: #0a0a0a; z-index: 5; }
+                }
 
-              #dev-view-toggle {
-                  background: transparent; border: 1px solid #333; color: #888;
-                  border-radius: 6px; width: 30px; height: 30px; cursor: pointer;
-                  font-size: 0.9rem; line-height: 1; align-self: center;
-                  margin-right: 6px; flex: 0 0 auto;
-              }
-              #dev-view-toggle:hover { border-color: #555; color: #ccc; }
-              #dev-view-toggle[aria-pressed="true"] {
-                  border-color: var(--accent, #22c55e); color: var(--accent, #22c555);
-              }
+
             
                 /* The icon is the tile's badge, matching pdftools ToolCard.tsx:52-53
                    -- `flex h-10 w-10 items-center justify-center rounded-lg` with
@@ -1448,30 +1617,19 @@ def handle_request():
                    the admin pages but has no toggle: on this screen a burger
                    would gate five links and nothing else. -->
               
-                  <!-- Always available, outside the burger. -->
-                  <div id="devices" aria-label="Dispositivos"></div>
-<div class="nav-bar">
-                    <!-- View toggle for the device strip: the default caps the
-                         panel and scrolls, this shows every device at once.
-                         Kept next to the devices it affects, and small enough
-                         not to compete with the nav burger. -->
-                    <button id="dev-view-toggle" type="button"
-                            title="Ver todos os dispositivos sem scroll"
-                            aria-label="Alternar vista dos dispositivos">▤</button>
-                  <!-- Admin navigation lives here, and only here. It is a
-                       right-aligned burger because the LEFT edge of this page is
-                       the brand: the layout reads left-to-right as
-                       identity -> navigation, and a menu in the top-left
-                       competes with the mark that names the thing.
-
-                       Rendered server-side only for an admin viewer, so a
-                       non-admin is not sent links they cannot use. The burger
-                       collapses the panel below 900px, matching the admin
-                       pages, which is the behaviour that shared design.js()
-                       implements. -->
-                  
-                  <nav class="nav-menu nav-menu-always" id="nav-menu" aria-label="Administração">__ADMIN_LINKS__</nav>
-              </div>
+                   <!-- Always available, outside the burger. -->
+                   <div id="devices" aria-label="Dispositivos"></div>
+                   <!-- Navigation is built by admin._build_nav_menu() and arrives
+                        whole, including its own .nav-bar and the .nav-toggle
+                        burger. This page must NOT wrap it: an earlier version did,
+                        which produced two elements with id="nav-menu" and left the
+                        burger inside the copy that the under-900px CSS hides -- so
+                        the menu could not be opened on a phone at all. The burger
+                        in /admin and the burger in / are now the same element,
+                        built by the same function, and the page-specific controls
+                        travel inside the bar via extra_in_bar. -->
+                   __ADMIN_LINKS__
+           </div>
           </div>
 
 
@@ -1987,35 +2145,6 @@ def handle_request():
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
 
-            /* Compact device view. Applied from localStorage BEFORE the tiles
-               are built, not after: rendering into the default layout and then
-               collapsing it shows a visible reflow and, on a phone, a scroll
-               bar that disappears a frame later. */
-            const DEV_COMPACT_KEY = 'phantasma.devcompact';
-            function applyDeviceView(compact) {
-                document.body.classList.toggle('dev-compact', compact);
-                const btn = document.getElementById('dev-view-toggle');
-                if (btn) {
-                    btn.setAttribute('aria-pressed', compact ? 'true' : 'false');
-                    btn.title = compact
-                        ? 'Vista compacta: todos os dispositivos visiveis'
-                        : 'Ver todos os dispositivos sem scroll';
-                }
-            }
-            function initDeviceView() {
-                let stored = null;
-                try { stored = localStorage.getItem(DEV_COMPACT_KEY); } catch (e) {}
-                applyDeviceView(stored === '1');
-                const btn = document.getElementById('dev-view-toggle');
-                if (!btn) return;
-                btn.onclick = () => {
-                    const next = !document.body.classList.contains('dev-compact');
-                    applyDeviceView(next);
-                    try { localStorage.setItem(DEV_COMPACT_KEY, next ? '1' : '0'); } catch (e) {}
-                    updateDeviceScrollHint();
-                };
-            }
-            initDeviceView();
 
             /* The device strip is an inner scroller inside a non-scrolling app
                shell (body is 100dvh + overflow:hidden), so a clipped row of
@@ -2042,6 +2171,187 @@ def handle_request():
             /* After the device tiles are in the DOM, not before -- measuring
                scrollHeight on an empty container would always report "fits". */
             setTimeout(updateDeviceScrollHint, 300);
+            initVoice();
+            /* ============ VOICE (phone) ============
+               Press to talk, release to send. One round trip: the browser
+               decodes its own recording to 16 kHz mono WAV, posts it, and gets
+               back the transcript, the answer and audio to play.
+
+               Why the decode happens HERE and not on the server: MediaRecorder
+               produces webm/opus on Android Chrome, which `soundfile` cannot
+               read. The server's fallback would have read the opus container as
+               raw 16-bit PCM and handed the recogniser noise -- which
+               transcribes into a confident, wrong sentence with no error
+               anywhere. decodeAudioData understands every format the browser
+               itself can record, and it costs ffmpeg nothing on the server.
+
+               Not covered by the pytest suite: getUserMedia, MediaRecorder and
+               AudioContext need a real device and a real microphone, and no
+               amount of asserting on this string proves the permission prompt
+               appears. What IS tested is the server half (tests/test_ui_voice.py).
+               Verified by hand on a real phone before this was called done. */
+            let _voiceStream = null, _voiceRec = null, _voiceChunks = [], _voiceBusy = false;
+            const voiceBtn = document.getElementById('voice-btn');
+            const voiceStatus = document.createElement('div');
+            voiceStatus.className = 'voice-status';
+            voiceStatus.setAttribute('role', 'status');
+            voiceStatus.setAttribute('aria-live', 'polite');
+            document.body.appendChild(voiceStatus);
+            let _voiceStatusTimer = null;
+
+            function voiceSay(msg, ms) {
+                voiceStatus.textContent = msg;
+                voiceStatus.classList.add('show');
+                clearTimeout(_voiceStatusTimer);
+                if (ms) _voiceStatusTimer = setTimeout(() => voiceStatus.classList.remove('show'), ms);
+            }
+
+            /* 16 kHz mono PCM -> WAV container. Whisper wants 16 kHz; the
+               browser records at whatever the hardware prefers (usually 48 kHz),
+               and the recogniser's accuracy on Portuguese collapses if it is fed
+               the wrong rate rather than resampled. */
+            function pcmToWav(samples) {
+                const buf = new ArrayBuffer(44 + samples.length * 2);
+                const view = new DataView(buf);
+                const wstr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+                wstr(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true);
+                wstr(8, 'WAVE'); wstr(12, 'fmt ');
+                view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+                view.setUint16(22, 1, true); view.setUint32(24, 16000, true);
+                view.setUint32(28, 32000, true); view.setUint16(32, 2, true);
+                view.setUint16(34, 16, true);
+                wstr(36, 'data'); view.setUint32(40, samples.length * 2, true);
+                for (let i = 0; i < samples.length; i++) {
+                    const s = Math.max(-1, Math.min(1, samples[i]));
+                    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+                }
+                return buf;
+            }
+
+            /* Resample to 16 kHz by linear interpolation, then average the
+               channels down to mono. Not a windowed-sinc: the recogniser is
+               trained on 16 kHz telephone-ish audio and this is well inside
+               its tolerance, while a proper filter would be a lot of code to
+               carry in a string literal. */
+            async function toMono16k(blob) {
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                const ctx = new Ctx();
+                try {
+                    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+                    const target = 16000;
+                    const frames = Math.max(1, Math.round(decoded.duration * target));
+                    const out = new Float32Array(frames);
+                    const chans = decoded.numberOfChannels;
+                    for (let c = 0; c < chans; c++) {
+                        const data = decoded.getChannelData(c);
+                        for (let i = 0; i < frames; i++) {
+                            const pos = i * decoded.sampleRate / target;
+                            const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, data.length - 1);
+                            out[i] += (data[i0] + (data[i1] - data[i0]) * (pos - i0)) / chans;
+                        }
+                    }
+                    return out;
+                } finally { ctx.close(); }
+            }
+
+            function bytesToBase64(bytes) {
+                let bin = '';
+                const CH = 0x8000;
+                for (let i = 0; i < bytes.length; i += CH) {
+                    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+                }
+                return btoa(bin);
+            }
+
+            function playReply(b64) {
+                if (!b64) return;
+                try {
+                    const bin = atob(b64);
+                    const bytes = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+                    const audio = new Audio(url);
+                    audio.onended = () => URL.revokeObjectURL(url);
+                    audio.play().catch(() => voiceSay('Resposta em texto acima.'));
+                } catch (e) { voiceSay('Resposta em texto acima.'); }
+            }
+
+            /* Send what was recorded. This runs from the recorder's onstop, NOT
+               from the click that stopped it: the final ondataavailable is
+               delivered after stop() returns, so building the blob in the click
+               handler sends a recording with its last chunk missing. The first
+               version did exactly that, and also re-entered through onstop into
+               a guard that had already been cleared -- a silent no-op that
+               looked like a permissions problem. */
+            async function sendRecording() {
+                const blob = new Blob(_voiceChunks, { type: _voiceMime || 'audio/webm' });
+                _voiceChunks = [];
+                voiceBtn.classList.remove('recording');
+                if (_voiceStream) { _voiceStream.getTracks().forEach(t => t.stop()); _voiceStream = null; }
+                if (blob.size < 2000) { voiceSay('Demasiado curto.', 2000); return; }
+                _voiceBusy = true; voiceBtn.classList.add('busy'); voiceBtn.disabled = true;
+                voiceSay('A ouvir...');
+                try {
+                    const pcm = await toMono16k(blob);
+                    const res = await fetch('/api/voz', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ audio_base64: bytesToBase64(pcmToWav(pcm)) }),
+                    });
+                    if (res.status === 401) { location.href = '/login?next=/'; return; }
+                    const data = await res.json();
+                    if (data.success === false) { voiceSay(data.error || 'Não deu.', 3000); return; }
+                    if (data.transcript) addToChatLog(data.transcript, 'user');
+                    if (data.text) addToChatLog(data.text, 'ia');
+                    playReply(data.audio_base64);
+                } catch (err) {
+                    voiceSay('Falha de rede.', 3000);
+                } finally {
+                    _voiceBusy = false; voiceBtn.classList.remove('busy'); voiceBtn.disabled = false;
+                }
+            }
+
+            function initVoice() {
+                if (!voiceBtn) return;
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia
+                    || typeof window.MediaRecorder === 'undefined') {
+                    voiceBtn.disabled = true;
+                    voiceBtn.title = 'Este navegador não suporta gravação';
+                    return;
+                }
+                let _voiceMime = 'audio/webm';
+                voiceBtn.addEventListener('click', async () => {
+                    if (_voiceRec) { _voiceRec.stop(); return; }
+                    if (_voiceBusy) return;
+                    try {
+                        _voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    } catch (err) {
+                        voiceSay('Sem acesso ao microfone.', 3000);
+                        return;
+                    }
+                    _voiceChunks = [];
+                    try {
+                        // Prefer a format the browser can also DECODE back. Every
+                        // modern browser decodes what it records, so this is belt
+                        // and braces -- the real reason for decoding in the page is
+                        // that the server cannot read these containers.
+                        const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+                            .find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m));
+                        _voiceRec = opts ? new MediaRecorder(_voiceStream, { mimeType: opts })
+                                         : new MediaRecorder(_voiceStream);
+                        _voiceMime = _voiceRec.mimeType || _voiceMime;
+                    } catch (err) {
+                        voiceSay('Gravação indisponível.', 3000);
+                        if (_voiceStream) _voiceStream.getTracks().forEach(t => t.stop());
+                        _voiceStream = null;
+                        return;
+                    }
+                    _voiceRec.ondataavailable = (e) => { if (e.data && e.data.size) _voiceChunks.push(e.data); };
+                    _voiceRec.onstop = () => { _voiceRec = null; sendRecording(); };
+                    _voiceRec.start();
+                    voiceBtn.classList.add('recording');
+                    voiceStatus.classList.remove('show');
+                });
+            }
         </script>
         <script>__SHARED_JS__</script>
     </body>

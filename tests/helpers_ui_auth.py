@@ -7,7 +7,32 @@ store to arrange that was one more copy of the same seed to keep in step.
 
 from __future__ import annotations
 
+import re
 import sqlite3
+
+# HTML comments are stripped before any structural assertion. The `/` template
+# documents its own history in comments, and one of those comments quotes
+# `id="nav-menu"` -- so a test that counts that string without stripping comments
+# counts its own documentation and "fails" against a correct page.
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+
+def root_page_html(client) -> str:
+    """The rendered `/` document, with HTML comments removed.
+
+    Structural invariants about the nav ("the burger is not inside the panel",
+    "there is exactly one nav-menu") are properties of the ASSEMBLED document,
+    not of any one source file. The nav markup is built by admin._build_nav_menu
+    and inserted into the voice UI's template, so a test that greps
+    skills/skill_ui.py for `<nav id="nav-menu">` found nothing once the two were
+    correctly de-duplicated -- the test broke, not the page.
+    """
+    response = client.get("/")
+    assert response.status_code == 200, (
+        f"expected the signed-in page, got {response.status_code}; if the "
+        f"session did not take, the helper is what is broken, not the page"
+    )
+    return HTML_COMMENT.sub("", response.get_data(as_text=True))
 
 
 def make_app_with_user(email: str, role: str, password: str = "correct horse",

@@ -71,7 +71,7 @@ def test_full_screen_overlay_is_mobile_only():
     )
 
 
-def test_root_keeps_devices_outside_the_menu():
+def test_root_keeps_devices_outside_the_menu(monkeypatch):
     """Reported: device readings should always be available, not behind a burger.
 
     Buried in the panel, the page's primary content became conditional.
@@ -82,24 +82,31 @@ def test_root_keeps_devices_outside_the_menu():
     with #devices last and flex-grow:1, the burger stayed at x=210 on a 1280px
     viewport. The invariant is therefore stated as SIBLING, in either order,
     which is what actually matters.
+
+    Checked on the RENDERED page, not on skills/skill_ui.py's source. It used to
+    grep that file for `<nav ... id="nav-menu">` and `#devices`; the nav markup
+    now comes from admin._build_nav_menu() and is inserted into that template, so
+    the grep found nothing and the test failed against a correct page. The
+    invariant is a property of the assembled document -- and only the assembled
+    document can show whether one is nested inside the other.
     """
-    src = (Path(__file__).resolve().parent.parent / "skills/skill_ui.py").read_text(
-        encoding="utf-8"
-    )
-    # The devices container must be a sibling of the nav-bar, not inside it.
-    m = re.search(r'<nav class="nav-menu[^"]*" id="nav-menu".*?</nav>', src, re.S)
-    assert m, "root nav-menu not found"
-    assert 'id="devices"' not in m.group(0), (
+    from tests.helpers_ui_auth import make_app_with_user, root_page_html
+
+    _app, client = make_app_with_user("b@t.test", "admin", monkeypatch=monkeypatch)
+    src = root_page_html(client)
+
+    menu = re.search(r'<nav[^>]*id="nav-menu".*?</nav>', src, re.S)
+    assert menu, "root nav-menu not found in the rendered page"
+    assert 'id="devices"' not in menu.group(0), (
         "the device strip must NOT be inside the hamburger panel"
     )
     # Sibling, in EITHER order -- the two are ordered by the flex layout, not by
     # the markup, and the burger has to sit after #devices to right-align.
-    bar = re.search(r'<div class="nav-bar">.*?</div>', src, re.S)
+    bar = re.search(r'<div class="nav-bar">.*?</div>\s*</div>|<div class="nav-bar">', src, re.S)
     assert bar, "root nav-bar not found"
-    devices = re.search(r'<div[^>]*id="devices".*?\n\s*</div>', src, re.S)
+    devices = re.search(r'<div id="devices"', src)
     assert devices, "root #devices not found"
     assert 'id="devices"' not in bar.group(0), "#devices must NOT be inside the nav-bar"
-    # They must not overlap: the bar's span must not contain the devices span.
     assert not (bar.start() < devices.start() < bar.end()), (
         "#devices must not be nested inside the nav-bar"
     )

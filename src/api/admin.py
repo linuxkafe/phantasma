@@ -394,7 +394,9 @@ def admin_required(view):
 # ----------------------------------------------------------------------
 
 
-def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
+def _build_nav_menu(
+    current_endpoint: str, user_role: str = None, extra_in_bar: str = ""
+) -> str:
     """Build the top navigation.
 
     Memória, RAG, FlyBrain and the 3D explorer are grouped under a single
@@ -408,6 +410,16 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
     admin surface by accident, and a plain user clicking through a menu that
     looks like /admin's is a worse experience than a smaller menu. Perfil and
     the sign-out are not admin's and stay for everyone.
+
+    ``extra_in_bar`` is how a caller adds its own control to this bar -- the
+    voice UI's device controls. It exists because the alternative was for that
+    page to wrap this output in a second ``.nav-bar`` and a second
+    ``<nav id="nav-menu">``, which is exactly what it did until 2026-09-29: two
+    elements carried ``id="nav-menu"``, the burger lived inside the copy that
+    the under-900px CSS hides, and the menu therefore could not be opened on a
+    phone at all. Duplicate ids are also invalid HTML and make
+    ``getElementById('nav-menu')`` return whichever came first. The bar is
+    built here, once, and callers contribute to it.
     """
     is_admin = user_role != "user"
     # Defaulting to admin when the role is not stated matters. The admin pages
@@ -453,8 +465,11 @@ def _build_nav_menu(current_endpoint: str, user_role: str = None) -> str:
         '<button type="button" class="nav-toggle" aria-controls="nav-menu" '
         'aria-expanded="false" aria-label="Abrir menu" '
         'data-label-open="Abrir menu" data-label-close="Fechar menu">'
-        "<span></span><span></span><span></span></button>",
-        '<nav class="nav-menu" id="nav-menu">',
+          "<span></span><span></span><span></span></button>",
+          # Caller-supplied controls, inside the bar and outside the menu, so
+          # they survive the menu collapsing into an overlay on a phone.
+          extra_in_bar,
+          '<nav class="nav-menu" id="nav-menu">',
         # The brand is the way home, and home is the device UI at "/", not the
         # admin dashboard.
         '  <a class="nav-brand" href="/"><span class="mark">P</span><span>Phantasma</span></a>',

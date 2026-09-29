@@ -93,13 +93,47 @@ All runtime configuration in `config.py` with environment variable overrides:
   `Entrada`) with a per-name icon; a click sends a natural-language command
   through the same pipeline as a voice request. Devices are listed by
   `/get_devices`, and their state by `/device_status`
-- **Weather widget** — live IPMA/Open-Meteo via `skill_weather` daemon
-- **Pipeline resilience** — `src/pipeline/noise.py` tracks the ambient noise
-  floor and `src/pipeline/quiet.py` gates replies; the LLM call gets a bounded
-  **connect** timeout (a dead Ollama host used to block with no bound at all
-  and stalled every answer) while keeping the generous read budget
+  - **Weather widget** — live IPMA/Open-Meteo via `skill_weather` daemon
+  - **Pipeline resilience** — `src/pipeline/noise.py` tracks the ambient noise
+    floor and `src/pipeline/quiet.py` gates replies; the LLM call gets a bounded
+    **connect** timeout (a dead Ollama host used to block with no bound at all
+    and stalled every answer) while keeping the generous read budget
 
-### Wake Words
+  ### Voice from the browser (phone)
+  - **Press to talk, release to send.** One round trip: the browser records,
+    decodes, and posts; the server transcribes, executes, and answers in text
+    and audio.
+  - **The audio is decoded in the browser, not the server.** MediaRecorder
+    produces `webm/opus` on Android Chrome, which `soundfile` cannot read, and
+    the old "assume raw PCM" fallback read the opus container as 16-bit samples
+    and handed the recogniser noise — which transcribes to a confident, wrong
+    sentence with no error anywhere. `AudioContext.decodeAudioData` handles
+    every format the browser itself can record, and it costs the server no
+    ffmpeg dependency.
+  - **`POST /api/voz`** — session-gated like the page, because it turns light
+    switches into a POST body. Returns `{success, transcript, text,
+    audio_base64, audio_format, processing_time_ms}`.
+  - **Silence is refused before the recogniser runs.** A mis-tap posts an empty
+    room; Whisper will happily invent a sentence for it. A peak-amplitude check
+    answers "nothing was heard" instead.
+  - **The transcript is always echoed back** into the chat log, so a mishearing
+    is visible before the user acts on the answer.
+  - **Latency is the real cost, and it is not small.** Measured on the
+    production box (i5-8500T, 6 threads) with the live service also running, a
+    1.6 s utterance takes ~12 s to transcribe with the configured `medium`
+    model, ~6 s for the LLM and ~2.5 s for the reply audio — **~20 s end to
+    end**. The web path deliberately reuses the already-loaded model rather
+    than loading a second one: the box has 15 GiB with **8 GiB of swap already
+    in use**, and a second Whisper would make the pressure worse. Lowering
+    `WHISPER_MODEL` to `small` or `base` trades accuracy for roughly 2 s and
+    1 s respectively, and helps the always-on path too.
+  - **What is not tested here:** the browser half. `getUserMedia`,
+    `MediaRecorder` and `AudioContext` need a real device and a real
+    microphone. The server contract is covered by `tests/test_ui_voice.py`, the
+    inline JavaScript is syntax-checked, and the flow was verified by hand
+    against real synthesised speech.
+
+  ### Wake Words
 - `olá fantasma` (TTS trigger, score ~0.81)
 - `hey fantasma` (score ~0.63, below persistence threshold)
 - Config: `WAKEWORD_CONFIDENCE=0.50`, `WAKEWORD_PERSISTENCE=2`
@@ -240,6 +274,7 @@ Flask server at port 5000:
 | `GET /api/info` | Server capabilities |
 | `POST /api/command` | Execute voice/text command |
 | `POST /api/stt` | Speech-to-text |
+| `POST /api/voz` | Browser voice: 16 kHz mono WAV (base64) → transcript, answer and answer audio. **Session-gated**, unlike the three above |
 | `POST /api/tts` | Text-to-speech |
 | `GET /api/devices` | List configured devices |
 | `POST /api/devices/<name>/control` | Control device |
