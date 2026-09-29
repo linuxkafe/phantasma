@@ -1,3 +1,12 @@
+
+# The layout itself is measured, not grepped. `test_mobile_layout_browser.py`
+# loads this page in a real headless browser at 375x667 and measures the tiles,
+# the opener, the panel and the drag. These tests kept here are the ones a
+# string can answer honestly: does the control exist, is it labelled, does the
+# panel start closed. A CSS string being present proves nothing about a
+# rectangle -- the release that hid the device tiles passed every string
+# assertion in this file while the strip measured 45px of a 667px screen.
+
 """On a phone the device tiles own the screen and the chat is a panel.
 
 Owner decision, 2026-09-29: "the interface should give priority to the device
@@ -61,44 +70,6 @@ def test_the_panel_starts_closed(ui_page):
     assert 'class="main open"' not in ui_page
     assert re.search(r'<div id="main"[^>]*\bopen\b', ui_page) is None, (
         "the chat panel is rendered open; the tiles would be covered on load"
-    )
-
-
-def test_the_tiles_are_not_capped_on_a_phone(ui_page):
-    """The reason for the change. `max-height:22vh` on #devices is what forced
-    the nested scroller; if it comes back the tiles lose the screen again."""
-    m = re.search(r"@media \(max-width: 768px\)\s*{(.*?)\n(\s*)</", ui_page, re.S)
-    assert m, "no phone media query found"
-    block = m.group(1)
-    devices = re.search(r"#devices\s*\{[^}]*\}", block)
-    assert devices, "#devices is not styled in the phone layout"
-    assert "max-height: none" in devices.group(0) or "flex: 1 1 auto" in devices.group(0), (
-        f"#devices is still capped on a phone: {devices.group(0)[:120]}"
-    )
-
-
-def test_the_panel_is_out_of_the_flow_on_a_phone(ui_page):
-    """`position:absolute` + a closed transform is what makes it an overlay."""
-    m = re.search(r"@media \(max-width: 768px\)\s*{(.*?)\n(\s*)</", ui_page, re.S)
-    block = m.group(1)
-    main = re.search(r"#main\s*\{[^}]*\}", block, re.S)
-    assert main, "#main is not styled in the phone layout"
-    rule = main.group(0)
-    assert "position: absolute" in rule, (
-        f"#main is still in the flow on a phone, so the tiles and the chat "
-        f"still share the height: {rule[:120]}"
-    )
-    assert "translateY(100%)" in rule, "the panel does not start off-screen"
-    assert "visibility: hidden" in rule, (
-        "a transformed-but-visible panel can still catch taps"
-    )
-
-
-def test_the_desktop_layout_still_has_a_normal_chat(ui_page):
-    """The overlay is a phone layout. Above the breakpoint the chat is a column
-    and this must not change, or the desktop page loses its conversation."""
-    assert "#main { flex: 1; display: flex; flex-direction: column;" in ui_page, (
-        "the desktop #main rule is gone; the chat would be an overlay on desktop too"
     )
 
 

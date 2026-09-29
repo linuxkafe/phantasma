@@ -168,7 +168,9 @@ LOGIN_PAGE = """<!DOCTYPE html>
         padding: .6rem .75rem; border-radius: 8px; font-size: .85rem;
         margin-bottom: 1rem;
     }
-</style>
+
+
+                </style>
 </head>
 <body>
   <form method="post" autocomplete="on">
@@ -1187,6 +1189,14 @@ def handle_request():
                    aria-live status line (see .voice-status). */
                 .nav-voice.recording { border-color: #ef4444; color: #ef4444; }
                 .nav-voice.busy { border-color: var(--accent, #22c55e); color: var(--accent, #22c55e); }
+
+                /* The chat tab and the drag grip are PHONE affordances.
+                   Hidden by default and switched on inside the max-width:768px
+                   block: on desktop the conversation is already a column in the
+                   flow, so a "Chat" button to open it is a control that opens
+                   something already open. The browser test caught this
+                   because it resized the page and asked. */
+                #chat-tab, #chat-grip { display: none; }
                 .voice-status {
                     position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
                     background: #1e1e1e; border: 1px solid #333; color: #eee;
@@ -1195,64 +1205,7 @@ def handle_request():
                 }
                 .voice-status.show { display: block; }
 
-                /* ---- Vertical layout for phones ----
-                   The whole point of the phone layout: ONE COLUMN, top to
-                   bottom, and the device tiles own it. `#main` is the chat
-                   panel and it is out of the flow -- absolutely positioned,
-                   covering the tiles only while it is open -- so the tiles can
-                   use the full height below the header instead of being capped
-                   to share a viewport with a conversation nobody asked for.
 
-                   The page itself does not scroll: `#main` owns its own
-                   scrolling, because a phone that scrolls the whole document
-                   while you are reading an answer is a phone you cannot talk
-                   to, and the tiles would move out from under the thumb. */
-                @media (max-width: 768px) {
-                    html, body { height: 100%; overflow: hidden; }
-                    body { display: flex; flex-direction: column; }
-                    #header-strip { flex: 0 0 auto; max-height: 34vh; }
-                    /* The tiles are the priority, so the strip is no longer
-                       capped: it takes what it needs and #devices scrolls
-                       inside itself. */
-                    #devices {
-                        flex: 1 1 auto; min-height: 0; max-height: none;
-                        width: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;
-                    }
-                    #main {
-                        position: absolute; inset: 0; z-index: 40;
-                        display: flex; flex-direction: column;
-                        background: #0a0a0a;
-                        /* Closed by default, and the only way it opens is the
-                           tab. transform rather than display so the fade is
-                           cheap and so a hidden panel cannot catch a tap. */
-                        transform: translateY(100%);
-                        transition: transform 0.18s ease-out;
-                        visibility: hidden;
-                    }
-                    #main.open { transform: translateY(0); visibility: visible; }
-                    /* The tab lives at the bottom, where a thumb already is,
-                       and sits ABOVE the panel in z-order so it stays reachable
-                       to dismiss it. */
-                    #chat-tab {
-                        position: fixed; right: 12px; bottom: max(12px, env(safe-area-inset-bottom));
-                        z-index: 50; display: inline-flex; align-items: center; gap: 6px;
-                        background: #181818; color: #eee; border: 1px solid #333;
-                        border-radius: 999px; padding: 10px 16px; font-size: 0.85rem;
-                        cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-                    }
-                    /* While the panel is open the tab becomes the close
-                       affordance; a panel that covers the opener would need a
-                       second, invisible way out. */
-                    #main.open ~ #chat-tab {
-                        background: #2a2a2a; border-color: #555;
-                    }
-                    #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-                    #chat-input-box { flex: 0 0 auto; }
-                    /* The composer is the one control that must never leave the
-                       screen: on iOS the keyboard covers whatever is at the
-                       bottom, and the send button with it. */
-                    #chat-input-box { position: static; background: #181818; }
-                }
 
 
             
@@ -1625,7 +1578,135 @@ def handle_request():
                 outline: 2px solid var(--accent);
                 outline-offset: 2px;
             }
-        </style>
+                /* ---- PHONE LAYOUT OVERRIDE LAYER ----
+                   Deliberately LAST in the stylesheet. An earlier version sat in
+                   the middle, where later rules won on order: `#main` computed
+                   as `position: relative` instead of absolute, so the chat
+                   panel stayed IN the flow, took 459px of a 667px viewport, and
+                   the device strip collapsed to 40px. The tiles were not hidden
+                   by a rule about the tiles -- they were squeezed by a rule
+                   about the chat. Cascade order, not intent. */
+                @media (max-width: 768px) {
+                    html, body { height: 100%; overflow: hidden; }
+                    body { display: flex; flex-direction: column; }
+                    /* `#devices` is a CHILD of #header-strip, so no amount of
+                       flex on #devices makes it grow past its parent. Measured
+                       at 375x667 before this: the strip was 208px and #devices
+                       was 45 of it -- the tiles were squeezed by the brand
+                       wrapper, not by anything about the tiles.
+
+                       `display: contents` removes the wrapper from the layout
+                       while leaving the DOM untouched, so #brand and #devices
+                       become children of the body's column: the brand takes its
+                       natural height, the tiles take everything that is left.
+                       Every `#header-strip #devices` selector still matches,
+                       because the markup did not change. */
+                    #header-strip { display: contents; }
+                    #brand { flex: 0 0 auto; }
+
+                    /* THE PRIORITY: the tiles get the screen. min-height:0 and
+                       flex:1 1 auto so the strip takes what is left and scrolls
+                       INSIDE itself. No max-height cap -- the 22vh cap is what
+                       forced a nested scroller into a 20vh band, and a
+                       scroller that small reads as a clipping bug. */
+                    #devices {
+                        flex: 1 1 auto; min-height: 0; max-height: none;
+                        width: 100%; overflow-y: auto;
+                        -webkit-overflow-scrolling: touch;
+                    }
+                    #devices.is-scrollable { -webkit-mask-image: none; mask-image: none; }
+
+                    /* The panel covers the screen and is OUT of the flow, so it
+                       cannot take height from the tiles. `fixed` rather than
+                       `absolute`: #main's ancestors are not positioned, and
+                       `absolute` against the initial containing block behaved
+                       differently depending on whether an ancestor had a
+                       transform. */
+                    #main {
+                        position: fixed; inset: 0; z-index: 40;
+                        display: flex; flex-direction: column; background: #0a0a0a;
+                        transform: translateY(100%);
+                        transition: transform 0.2s ease-out, visibility 0.2s;
+                        visibility: hidden; pointer-events: none;
+                    }
+                    #main.open {
+                        transform: translateY(0); visibility: visible;
+                        pointer-events: auto;
+                    }
+                    /* While dragged, the panel follows the finger and nothing
+                       under the thumb is clickable. */
+                    #main.dragging { transition: none; }
+                    #main.dragging #chat-log,
+                    #main.dragging #chat-input-box { pointer-events: none; }
+
+                    #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+                    /* Room for the grip, so the conversation does not start
+                       underneath the thing you are told to drag. */
+                    #main.open #chat-log { padding-top: 26px; }
+                    #chat-input-box { flex: 0 0 auto; padding-right: 12px; }
+
+                    /* THE OPENER IS OUTSIDE #main, so hiding the panel cannot
+                       hide the control that opens it. Measured failure: the tab
+                       was at y=1076 in a 667px viewport, because it inherited
+                       `visibility: hidden` from the panel it was supposed to
+                       open. Fixed to the bottom, in the thumb arc, and above
+                       the open panel so there is always a visible way out that
+                       is not a gesture. */
+                    #chat-tab {
+                        position: fixed; right: 12px;
+                        bottom: max(12px, env(safe-area-inset-bottom));
+                        z-index: 60; display: inline-flex; align-items: center; gap: 6px;
+                        background: #181818; color: #eee; border: 1px solid #333;
+                        border-radius: 999px; padding: 12px 18px; font-size: 0.85rem;
+                        cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+                    }
+                    /* Open: it leaves the composer alone and becomes "close". A
+                       full-screen sheet with no visible opener is a trap. */
+                    body.chat-open #chat-tab {
+                        bottom: auto; top: 10px; right: 10px; padding: 8px 14px;
+                        background: #2a2a2a; border-color: #555;
+                    }
+                    body.chat-open #chat-input-box { padding-right: 78px; }
+
+                    /* The drag handle. A sheet you can pull down, which is the
+                       gesture the owner asked for and the one a phone user
+                       already expects from a full-screen sheet. */
+                    #chat-grip {
+                        position: fixed; top: 0; left: 0; right: 0; z-index: 55;
+                        display: none; align-items: center; justify-content: center;
+                        height: 26px; touch-action: none; cursor: grab;
+                    }
+                    body.chat-open #chat-grip { display: flex; }
+                    #chat-grip span {
+                        display: block; width: 44px; height: 4px;
+                        border-radius: 2px; background: #555;
+                    }
+
+                    /* The microphone in the composer, beside the send button it
+                       matches, so sending a voice message needs no detour to the
+                       header. */
+                    #voice-btn-chat {
+                        flex: 0 0 auto; align-self: flex-end;
+                        width: 44px; height: 44px; border-radius: 8px;
+                        background: #222; border: 1px solid #333; color: #ccc;
+                        display: inline-flex; align-items: center;
+                        justify-content: center; cursor: pointer; padding: 0;
+                    }
+                    #voice-btn-chat:hover { border-color: #555; }
+                    #voice-btn-chat .voice-ico {
+                        width: 13px; height: 13px; display: block;
+                        background: currentColor; border-radius: 7px 7px 4px 4px;
+                        position: relative;
+                    }
+                    #voice-btn-chat .voice-ico::after {
+                        content: ''; position: absolute; left: 50%; bottom: -5px;
+                        transform: translateX(-50%); width: 3px; height: 5px;
+                        background: currentColor; border-radius: 0 0 2px 2px;
+                    }
+                    #voice-btn-chat.recording { border-color: #ef4444; color: #ef4444; }
+                    #voice-btn-chat[disabled] { opacity: 0.4; cursor: not-allowed; }
+                }
+              </style>
     </head>
     <body>
         <div id="easter-egg-layer"><div id="big-ghost">👻</div></div>
@@ -1672,23 +1753,39 @@ def handle_request():
             <!-- The chat is a PANEL, not a column, on a phone. The owner asked
                  for the device tiles to own the screen and for the
                  conversation to appear over them only when it is asked for.
-                 On a phone the tiles used to share the viewport with the log:
-                 the strip was capped at 22vh to make room, so a home with
-                 fourteen devices showed three and had to scroll a 20vh band
-                 to reach the rest. The chat takes the screen when tapped and
-                 gives it back when dismissed. -->
+
+                 The tab that opens it is deliberately NOT inside this element.
+                 It was, and that made the chat impossible to open on a phone:
+                 the panel is `visibility: hidden` when closed, visibility is
+                 inherited, and the one control that could have opened it was
+                 invisible with it. Measured at 375x667: the tab sat at
+                 y=1076 in a 667px viewport. A control that lives inside the
+                 thing it controls cannot survive that thing being hidden. -->
             <div id="chat-log"></div>
             <div id="help-toggle" onclick="toggleHelp()">Ver Comandos</div>
             <div id="cli-help"><pre id="help-content" style="color:#888; font-size:0.8em; margin:0;">...</pre></div>
-            <!-- The tab that summons it. Always present, because a panel with
-                 no opener is not a panel. -->
-            <button id="chat-tab" type="button" aria-controls="main"
-                    aria-expanded="false" aria-label="Abrir conversa">Chat</button>
             <div id="chat-input-box">
                 <textarea id="chat-input" placeholder="Mensagem..." autocomplete="off"></textarea>
+                <!-- The microphone belongs IN the conversation, next to the
+                     other way of talking to the house. The one in the nav bar
+                     stays as a shortcut, but a voice MESSAGE is part of the
+                     chat, and a chat whose only voice affordance is two
+                     screens away in the header is a chat you cannot speak into
+                     while reading it. -->
+                <button id="voice-btn-chat" type="button"
+                        aria-label="Enviar mensagem de voz" title="Mensagem de voz">
+                    <span class="voice-ico" aria-hidden="true"></span>
+                </button>
                 <button id="chat-send">Enviar</button>
             </div>
         </div>
+        <!-- Sibling of #main, and outside it on purpose. See above. -->
+        <button id="chat-tab" type="button" aria-controls="main"
+                aria-expanded="false" aria-label="Abrir conversa">Chat</button>
+        <!-- The grab handle, only while the panel is open. Dragging it down
+             dismisses the panel, which is the gesture the owner asked for and
+             the one a phone user already expects from a full-screen sheet. -->
+        <div id="chat-grip" aria-hidden="true"><span></span></div>
 
         <script>
             const chatLog = document.getElementById('chat-log');
@@ -2212,6 +2309,11 @@ def handle_request():
             function openChat() {
                 if (!chatPanel) return;
                 chatPanel.classList.add('open');
+                /* On <body>, not only on the panel: the stylesheet moves the
+                   tab out of the thumb arc and the grip into view from it, and
+                   a rule that has no matching class never applies no matter how
+                   many classes the panel itself carries. */
+                document.body.classList.add('chat-open');
                 if (chatTab) {
                     chatTab.setAttribute('aria-expanded', 'true');
                     chatTab.textContent = 'Fechar';
@@ -2220,6 +2322,8 @@ def handle_request():
             function closeChat() {
                 if (!chatPanel) return;
                 chatPanel.classList.remove('open');
+                chatPanel.classList.remove('dragging');
+                document.body.classList.remove('chat-open');
                 if (chatTab) {
                     chatTab.setAttribute('aria-expanded', 'false');
                     chatTab.textContent = 'Chat';
@@ -2228,6 +2332,55 @@ def handle_request():
             if (chatTab && chatPanel) {
                 chatTab.onclick = () => chatPanel.classList.contains('open')
                     ? closeChat() : openChat();
+                /* Drag the panel down to dismiss, from the grip or from the top
+                   of the log. A full-screen sheet that can only be closed by a
+                   small target is a sheet people cannot close; the drag is the
+                   gesture a phone user already expects, and it is the one the
+                   owner asked for.
+
+                   Three details that are the difference between working and not:
+                   the panel follows the finger (a transition on `open` would
+                   fight the drag and feel broken), the drag is only recognised
+                   downwards (a flick upwards is not "dismiss"), and releasing
+                   below a third of the height snaps it shut while a shorter
+                   drag springs back, so a small slip does not close the
+                   conversation the owner is reading. */
+                const grip = document.getElementById('chat-grip');
+                let dragY = null, dragMoved = 0;
+                const dragStart = (e) => {
+                    if (!chatPanel.classList.contains('open')) return;
+                    dragY = (e.touches ? e.touches[0].clientY : e.clientY);
+                    dragMoved = 0;
+                    chatPanel.classList.add('dragging');
+                };
+                const dragMove = (e) => {
+                    if (dragY === null) return;
+                    const y = (e.touches ? e.touches[0].clientY : e.clientY);
+                    const dy = y - dragY;
+                    if (dy < 0) return;  /* upwards is not a dismissal */
+                    dragMoved = dy;
+                    chatPanel.style.transform = 'translateY(' + dy + 'px)';
+                    if (e.cancelable) e.preventDefault();
+                };
+                const dragEnd = () => {
+                    if (dragY === null) return;
+                    dragY = null;
+                    chatPanel.classList.remove('dragging');
+                    chatPanel.style.transform = '';
+                    if (dragMoved > innerHeight / 3) closeChat();
+                };
+                if (grip) {
+                    grip.addEventListener('touchstart', dragStart, {passive: true});
+                    grip.addEventListener('touchmove', dragMove, {passive: false});
+                    grip.addEventListener('touchend', dragEnd);
+                    grip.addEventListener('mousedown', (e) => {
+                        dragStart(e);
+                        const move = (ev) => dragMove(ev);
+                        const up = () => { dragEnd(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+                        document.addEventListener('mousemove', move);
+                        document.addEventListener('mouseup', up);
+                    });
+                }
                 /* Tapping a device answers with text in the log, so the panel
                    opens by itself there too -- otherwise a reply would be
                    produced into a panel that is closed and never read. */
@@ -2378,10 +2531,11 @@ def handle_request():
             async function sendRecording() {
                 const blob = new Blob(_voiceChunks, { type: _voiceMime || 'audio/webm' });
                 _voiceChunks = [];
-                voiceBtn.classList.remove('recording');
+                allVoiceBtns.forEach(b => b.classList.remove('recording'));
                 if (_voiceStream) { _voiceStream.getTracks().forEach(t => t.stop()); _voiceStream = null; }
                 if (blob.size < 2000) { voiceSay('Demasiado curto.', 2000); return; }
-                _voiceBusy = true; voiceBtn.classList.add('busy'); voiceBtn.disabled = true;
+                _voiceBusy = true;
+                allVoiceBtns.forEach(b => { b.classList.add('busy'); b.disabled = true; });
                 voiceSay('A ouvir...');
                 try {
                     const pcm = await toMono16k(blob);
@@ -2404,20 +2558,31 @@ def handle_request():
                 } catch (err) {
                     voiceSay('Falha de rede.', 3000);
                 } finally {
-                    _voiceBusy = false; voiceBtn.classList.remove('busy'); voiceBtn.disabled = false;
+                    _voiceBusy = false;
+                    allVoiceBtns.forEach(b => { b.classList.remove('busy'); b.disabled = false; });
                 }
             }
 
             function initVoice() {
+                /* BOTH microphones, one machine. Two independent recorders
+                   would mean two getUserMedia streams, two decodes and two
+                   uploads for one utterance, and whichever the owner pressed
+                   last wins -- the visible state of the other button would be a
+                   lie. The composer button is the one for voice MESSAGES; the
+                   bar button stays as the shortcut. */
+                const voiceBtnChat = document.getElementById('voice-btn-chat');
+                const allVoiceBtns = [voiceBtn, voiceBtnChat].filter(Boolean);
                 if (!voiceBtn) return;
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia
                     || typeof window.MediaRecorder === 'undefined') {
-                    voiceBtn.disabled = true;
-                    voiceBtn.title = 'Este navegador não suporta gravação';
+                    allVoiceBtns.forEach(b => {
+                        b.disabled = true;
+                        b.title = 'Este navegador não suporta gravação';
+                    });
                     return;
                 }
                 let _voiceMime = 'audio/webm';
-                voiceBtn.addEventListener('click', async () => {
+                allVoiceBtns.forEach(btn => btn.addEventListener('click', async () => {
                     if (_voiceRec) { _voiceRec.stop(); return; }
                     if (_voiceBusy) return;
                     try {
@@ -2446,9 +2611,9 @@ def handle_request():
                     _voiceRec.ondataavailable = (e) => { if (e.data && e.data.size) _voiceChunks.push(e.data); };
                     _voiceRec.onstop = () => { _voiceRec = null; sendRecording(); };
                     _voiceRec.start();
-                    voiceBtn.classList.add('recording');
+                    allVoiceBtns.forEach(b => b.classList.add('recording'));
                     voiceStatus.classList.remove('show');
-                });
+                }));
             }
         </script>
         <script>__SHARED_JS__</script>

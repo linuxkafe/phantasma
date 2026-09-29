@@ -99,7 +99,40 @@ All runtime configuration in `config.py` with environment variable overrides:
     **connect** timeout (a dead Ollama host used to block with no bound at all
     and stalled every answer) while keeping the generous read budget
 
-  ### Voice from the browser (phone)
+  ### Phone layout
+
+The device tiles own the phone screen. The conversation is a full-screen sheet
+that appears when asked for, covers everything, and is dismissed by dragging it
+down or by the "Fechar" button that moves out of the thumb arc to avoid the
+composer.
+
+- **The opener lives outside the panel.** It was a child of `#main` first, and
+  `visibility` is inherited, so hiding the panel hid the only control that could
+  open it. Measured at 375×667: the tab sat at **y=1076 in a 667px viewport**.
+- **`#header-strip` is `display: contents` on a phone.** `#devices` is a child
+  of it, so no amount of flex on `#devices` makes it grow past its parent — the
+  strip measured 45px of a 667px screen while the wrapper had 208px. Dissolving
+  the wrapper leaves the DOM untouched (every `#header-strip #devices` selector
+  still matches) and puts the tiles in the body's column, where they get
+  everything the brand does not need.
+- **The phone overrides are the last rules in the stylesheet.** Sitting in the
+  middle, later rules won on order: `#main` computed as `position: relative`,
+  the panel stayed in the flow, and it took 459px from the tiles.
+- **Two microphones, one machine.** The one in the nav bar is a shortcut; the
+  one in the composer sends a voice *message*. They share a single
+  `getUserMedia` stream and a single recording state, because two independent
+  recorders would mean whichever was pressed last silently won.
+
+**These are measured, not asserted on strings.** `tests/test_mobile_layout_browser.py`
+loads the page in headless Chromium at 375×667 and measures rectangles: the
+strip is at least 60% of the viewport with at least 8 tiles rendered, the opener
+is inside the viewport and not inside the panel, the open panel is full-screen,
+the microphone is a 44px target in the composer, a 30px drag springs back, a
+long drag closes, and a drag upwards does nothing. It runs in the deploy gate
+(12 passed in production) and skips loudly, with a reason, where no browser
+exists.
+
+### Voice from the browser (phone)
   - **Press to talk, release to send.** One round trip: the browser records,
     decodes, and posts; the server transcribes, executes, and answers in text
     and audio.
