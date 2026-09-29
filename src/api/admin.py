@@ -1661,17 +1661,89 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
         <a href="#sonhar">↑ Dormir e Sonhar</a>
       </p>
       <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Memórias</h3>
-      <form method="post">
-        <input type="hidden" name="op" value="save_memory">
-        <select name="mem_id" style="width: 100%; margin-bottom: .75rem;">
-          {% for m in memories %}
-          <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:88] }}</option>
-          {% endfor %}
-        </select>
-        <textarea name="text" rows="6"
-          style="width: 100%; font-family: monospace;">{{ selected_text or '' }}</textarea>
-        <p style="margin-top: .75rem;"><button type="submit">Guardar texto</button></p>
-      </form>
+
+      <!-- Edit in place.
+
+           This was a <select> of every memory plus one <textarea> and one
+           "Guardar" button, on both /admin/brain and /admin/brain/knowledge.
+           To fix one memory you had to find it in a dropdown, confirm the
+           right text had loaded, submit, and re-open to check. Two forms and a
+           round trip for a one-word fix.
+
+           The risk is not cosmetic. With a dropdown there is no way to see
+           WHICH memory is about to be overwritten, so a mis-selection
+           silently rewrites the wrong row -- and the audit log records the
+           change correctly, which means the damage is at least traceable
+           after the fact, not preventable.
+
+           Now each memory is its own form with its own textarea and its own
+           save button: the target is visible next to the edit, and saving one
+           memory cannot touch another. The field names (op, mem_id, text)
+           are the ones the handler already reads, so the backend is
+           untouched.
+
+           The filter narrows rows in the browser -- no request, no round trip
+           -- because 60+ rows is not navigable by scrolling. It matches on
+           the ORIGINAL text held in data-text, not on the live textarea:
+           typing inside one memory would otherwise make it match its own
+           filter and resurrect rows the user had hidden. -->
+      {% if memories %}
+      <input type="search" id="mem-filter" placeholder="Filtrar memórias…"
+             autocomplete="off"
+             style="width: 100%; padding: .5rem; margin-bottom: .75rem;
+                    background: var(--surface); border: 1px solid var(--border);
+                    border-radius: 4px; color: var(--text); font-size: .875rem;">
+      <p id="mem-count" style="color: var(--muted); font-size: .8rem; margin: 0 0 .5rem;"></p>
+      <div id="mem-list">
+        {% for m in memories %}
+        <form method="post" class="mem-row" data-text="{{ (m.text or '')|lower|e }}">
+          <input type="hidden" name="op" value="save_memory">
+          <input type="hidden" name="mem_id" value="{{ m.id }}">
+          <div style="display: flex; gap: .5rem; align-items: flex-start;
+                      margin-bottom: .75rem;">
+            <span style="flex: 0 0 3.5rem; color: var(--muted); font-size: .8rem;
+                         padding-top: .5rem;">#{{ m.id }}</span>
+            <textarea name="text" rows="3" class="mem-text"
+                      style="flex: 1; padding: .5rem; font-family: monospace;
+                             background: var(--surface); color: var(--text);
+                             border: 1px solid var(--border); border-radius: 4px;">{{ m.text or '' }}</textarea>
+            <button type="submit" style="flex: 0 0 auto;">Guardar</button>
+          </div>
+        </form>
+        {% endfor %}
+      </div>
+      <p id="mem-empty" hidden style="color: var(--muted); font-size: .85rem; margin: .5rem 0;">
+        Nenhuma memória corresponde a esse filtro.
+      </p>
+      <script>
+      (function () {
+        var box = document.getElementById('mem-filter');
+        if (!box) return;
+        var rows = Array.prototype.slice.call(
+            document.querySelectorAll('#mem-list .mem-row'));
+        var count = document.getElementById('mem-count');
+        var empty = document.getElementById('mem-empty');
+        function apply() {
+          var q = box.value.trim().toLowerCase();
+          var shown = 0;
+          rows.forEach(function (row) {
+            var hay = row.dataset.text || '';
+            var hit = !q || hay.indexOf(q) !== -1;
+            row.hidden = !hit;
+            if (hit) shown++;
+          });
+          if (count) count.textContent = q
+              ? shown + ' de ' + rows.length + ' memórias'
+              : rows.length + ' memórias';
+          if (empty) empty.hidden = shown !== 0;
+        }
+        box.addEventListener('input', apply);
+        apply();
+      })();
+      </script>
+      {% else %}
+      <p style="color: var(--muted); font-size: .85rem;">Ainda não há memórias.</p>
+      {% endif %}
       <form method="post" style="margin-top: 1.25rem;">
         <input type="hidden" name="op" value="delete_memory">
         <input type="number" name="mem_id" placeholder="id"
@@ -1858,17 +1930,89 @@ MEMORY_TEMPLATE = (
         </table>
       </form>
       <h3 style="font-size: 1rem; margin: 1.5rem 0 .5rem;">Memórias</h3>
-      <form method="post">
-        <input type="hidden" name="op" value="save_memory">
-        <select name="mem_id" style="width: 100%; margin-bottom: .75rem;">
-          {% for m in memories %}
-          <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:88] }}</option>
-          {% endfor %}
-        </select>
-        <textarea name="text" rows="6"
-          style="width: 100%; font-family: monospace;">{{ selected_text or '' }}</textarea>
-        <p style="margin-top: .75rem;"><button type="submit">Guardar texto</button></p>
-      </form>
+
+      <!-- Edit in place.
+
+           This was a <select> of every memory plus one <textarea> and one
+           "Guardar" button, on both /admin/brain and /admin/brain/knowledge.
+           To fix one memory you had to find it in a dropdown, confirm the
+           right text had loaded, submit, and re-open to check. Two forms and a
+           round trip for a one-word fix.
+
+           The risk is not cosmetic. With a dropdown there is no way to see
+           WHICH memory is about to be overwritten, so a mis-selection
+           silently rewrites the wrong row -- and the audit log records the
+           change correctly, which means the damage is at least traceable
+           after the fact, not preventable.
+
+           Now each memory is its own form with its own textarea and its own
+           save button: the target is visible next to the edit, and saving one
+           memory cannot touch another. The field names (op, mem_id, text)
+           are the ones the handler already reads, so the backend is
+           untouched.
+
+           The filter narrows rows in the browser -- no request, no round trip
+           -- because 60+ rows is not navigable by scrolling. It matches on
+           the ORIGINAL text held in data-text, not on the live textarea:
+           typing inside one memory would otherwise make it match its own
+           filter and resurrect rows the user had hidden. -->
+      {% if memories %}
+      <input type="search" id="mem-filter" placeholder="Filtrar memórias…"
+             autocomplete="off"
+             style="width: 100%; padding: .5rem; margin-bottom: .75rem;
+                    background: var(--surface); border: 1px solid var(--border);
+                    border-radius: 4px; color: var(--text); font-size: .875rem;">
+      <p id="mem-count" style="color: var(--muted); font-size: .8rem; margin: 0 0 .5rem;"></p>
+      <div id="mem-list">
+        {% for m in memories %}
+        <form method="post" class="mem-row" data-text="{{ (m.text or '')|lower|e }}">
+          <input type="hidden" name="op" value="save_memory">
+          <input type="hidden" name="mem_id" value="{{ m.id }}">
+          <div style="display: flex; gap: .5rem; align-items: flex-start;
+                      margin-bottom: .75rem;">
+            <span style="flex: 0 0 3.5rem; color: var(--muted); font-size: .8rem;
+                         padding-top: .5rem;">#{{ m.id }}</span>
+            <textarea name="text" rows="3" class="mem-text"
+                      style="flex: 1; padding: .5rem; font-family: monospace;
+                             background: var(--surface); color: var(--text);
+                             border: 1px solid var(--border); border-radius: 4px;">{{ m.text or '' }}</textarea>
+            <button type="submit" style="flex: 0 0 auto;">Guardar</button>
+          </div>
+        </form>
+        {% endfor %}
+      </div>
+      <p id="mem-empty" hidden style="color: var(--muted); font-size: .85rem; margin: .5rem 0;">
+        Nenhuma memória corresponde a esse filtro.
+      </p>
+      <script>
+      (function () {
+        var box = document.getElementById('mem-filter');
+        if (!box) return;
+        var rows = Array.prototype.slice.call(
+            document.querySelectorAll('#mem-list .mem-row'));
+        var count = document.getElementById('mem-count');
+        var empty = document.getElementById('mem-empty');
+        function apply() {
+          var q = box.value.trim().toLowerCase();
+          var shown = 0;
+          rows.forEach(function (row) {
+            var hay = row.dataset.text || '';
+            var hit = !q || hay.indexOf(q) !== -1;
+            row.hidden = !hit;
+            if (hit) shown++;
+          });
+          if (count) count.textContent = q
+              ? shown + ' de ' + rows.length + ' memórias'
+              : rows.length + ' memórias';
+          if (empty) empty.hidden = shown !== 0;
+        }
+        box.addEventListener('input', apply);
+        apply();
+      })();
+      </script>
+      {% else %}
+      <p style="color: var(--muted); font-size: .85rem;">Ainda não há memórias.</p>
+      {% endif %}
       <form method="post" style="margin-top: 1.25rem;">
         <input type="hidden" name="op" value="delete_memory">
         <input type="number" name="mem_id" placeholder="id"
@@ -2451,19 +2595,67 @@ _MEMORY_EDIT_TEMPLATE = (
   <p style="color: var(--muted);">
     Edita o texto ou apaga. A correccao de um facto errado e do dono, nao do sistema.
   </p>
-  <form method="post">
-    <input type="hidden" name="op" value="save_memory">
-    <label for="mem_id">Memoria</label>
-    <select name="mem_id" id="mem_id" style="width:100%; margin-bottom:0.75rem;">
-      {% for m in memories %}
-      <option value="{{ m.id }}">#{{ m.id }} — {{ (m.text or '')[:90] }}</option>
-      {% endfor %}
-    </select>
-    <textarea name="text" rows="7" style="width:100%; font-family:monospace;">{{ selected_text or '' }}</textarea>
-    <p style="margin-top:0.75rem;">
-      <button type="submit" name="action" value="save">Guardar texto</button>
-    </p>
-  </form>
+  <!-- Edit in place, like /admin/brain and /admin/brain/knowledge. This one had
+       a <select> plus a separate textarea too, with the same failure mode: no
+       way to see which memory is about to be overwritten, so a mis-selection
+       rewrites the wrong row. Each memory is its own form now, target visible
+       next to the edit, and saving one cannot touch another. Same field names
+       the handler already reads. The filter is client-side: no round trip. -->
+  {% if memories %}
+  <input type="search" id="mem-filter" placeholder="Filtrar memórias…" autocomplete="off"
+         style="width:100%; padding:0.5rem; margin-bottom:0.75rem; background:var(--surface);
+                border:1px solid var(--border); border-radius:4px; color:var(--text);">
+  <p id="mem-count" style="color:var(--muted); font-size:0.8rem; margin:0 0 0.5rem;"></p>
+  <div id="mem-list">
+    {% for m in memories %}
+    <form method="post" class="mem-row" data-text="{{ (m.text or '')|lower|e }}">
+      <input type="hidden" name="op" value="save_memory">
+      <input type="hidden" name="mem_id" value="{{ m.id }}">
+      <div style="display:flex; gap:0.5rem; align-items:flex-start; margin-bottom:0.75rem;">
+        <span style="flex:0 0 3.5rem; color:var(--muted); font-size:0.8rem; padding-top:0.5rem;">#{{ m.id }}</span>
+        <textarea name="text" rows="3" class="mem-text"
+                  style="flex:1; padding:0.5rem; font-family:monospace; background:var(--surface);
+                         color:var(--text); border:1px solid var(--border); border-radius:4px;">{{ m.text or '' }}</textarea>
+        <button type="submit" name="action" value="save" style="flex:0 0 auto;">Guardar</button>
+      </div>
+    </form>
+    {% endfor %}
+  </div>
+  <p id="mem-empty" hidden style="color:var(--muted); font-size:0.85rem; margin:0.5rem 0;">
+    Nenhuma memória corresponde a esse filtro.
+  </p>
+  <script>
+  (function () {
+    var box = document.getElementById('mem-filter');
+    if (!box) return;
+    var rows = Array.prototype.slice.call(
+        document.querySelectorAll('#mem-list .mem-row'));
+    var count = document.getElementById('mem-count');
+    var empty = document.getElementById('mem-empty');
+    function apply() {
+      var q = box.value.trim().toLowerCase();
+      var shown = 0;
+      rows.forEach(function (row) {
+        // Match the ORIGINAL text, not the live textarea: typing inside one
+        // memory would otherwise make it match its own filter and resurrect
+        // rows the user had hidden.
+        var hay = row.dataset.text || '';
+        var hit = !q || hay.indexOf(q) !== -1;
+        row.hidden = !hit;
+        if (hit) shown++;
+      });
+      if (count) count.textContent = q
+          ? shown + ' de ' + rows.length + ' memórias'
+          : rows.length + ' memórias';
+      if (empty) empty.hidden = shown !== 0;
+    }
+    box.addEventListener('input', apply);
+    apply();
+  })();
+  </script>
+  {% else %}
+  <p style="color:var(--muted); font-size:0.85rem;">Ainda não há memórias.</p>
+  {% endif %}
 
   <form method="post" style="margin-top:1.5rem;">
     <input type="hidden" name="op" value="delete_memory">
@@ -3241,15 +3433,22 @@ def memory_viewer():
             _current_user_data()["role"] if _current_user_data() else "user",
         )
         return render_template_string(
-            MEMORY_TEMPLATE,
-            graph=[dict(g) for g in graph],
-        nodes=_knowledge_nodes(),
-        selected_id=sel,
-        selected_text=selected_text,
-            topic=dict(topic) if topic else None,
-            user=_current_user(),
-            subnav=_build_subnav("admin.memory_viewer"),
-            nav_menu=nav_menu,
+    MEMORY_TEMPLATE,
+    graph=[dict(g) for g in graph],
+    # `memories` was never passed to the template. The old editor's
+    # {% for m in memories %} therefore iterated nothing and the
+    # <select> rendered empty, so the only way to reach a memory was
+    # the ?mem_id= query string -- which is why editing felt like it
+    # did not work. Passing the rows is what makes the in-place
+    # editor, and the filter, able to render at all.
+    memories=[dict(m) for m in _memories],
+    nodes=_knowledge_nodes(),
+    selected_id=sel,
+    selected_text=selected_text,
+    topic=dict(topic) if topic else None,
+    user=_current_user(),
+    subnav=_build_subnav("admin.memory_viewer"),
+    nav_menu=nav_menu,
         )
     finally:
         conn.close()

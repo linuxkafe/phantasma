@@ -39,6 +39,17 @@ def hub(tmp_path, monkeypatch):
         " VALUES (1, 'node:marcador', 'node', 'no marcador do hub',"
         " 'memory', 3.0, 1.0, 1, '2026-01-01', '2026-01-01')"
     )
+    # An edge whose target matches no node, i.e. a genuinely unresolved
+    # reference. Without it the resolver section renders its "Nenhuma
+    # referência por resolver" branch and the relink control never appears.
+    con.execute(
+        "INSERT INTO memory_graph"
+        " (id, node_key, node_type, label, source, target, affinity, weight,"
+        "  touch_count, created_at, updated_at)"
+        " VALUES (2, 'edge:1->fantasma', 'edge', 'relaciona com um no que"
+        " nao existe', 'memory', 'fantasma ausente', 1.0, 1.0, 1,"
+        " '2026-01-01', '2026-01-01')"
+    )
     con.execute(
         "INSERT INTO flybrain_state (id, schema_version, data, updated_at)"
         " VALUES (1, 1, ?, '2026-01-01')"
@@ -110,8 +121,21 @@ def test_the_unified_panel_offers_the_dangling_refs(get_hub):
 
 
 def test_nodes_are_offered_as_resolve_targets(get_hub):
+    """A node must be offered as a relink target, by its own label.
+
+    This used to assert only `"<option" in body`, which was satisfied by an
+    unrelated <option>: the memory editor's `select name="mem_id"`, hundreds of
+    lines away from the resolver. So it passed for the wrong reason, and it
+    failed for the wrong reason too when the memory editor became an in-place
+    list of textareas and stopped rendering a select at all.
+
+    The assertion now names the thing under test: the resolver's select, which
+    is the one carrying data-ref, and the node's own label inside it.
+    """
     body = get_hub()
-    assert "<option" in body, "no node offered as a relink target"
+    assert 'data-ref=' in body, "the resolver select is missing"
+    # The seeded node is 'no marcador do hub'; it must appear as a choice.
+    assert "no marcador do hub" in body, "the node is not offered as a target"
 
 
 def test_hub_shows_the_topic(get_hub):
