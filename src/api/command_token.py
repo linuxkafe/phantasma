@@ -72,16 +72,39 @@ def enabled() -> bool:
 
 
 def verify(token: str | None) -> bool:
-    """True when `token` is the configured one.
+    """True when `token` is the configured one, or a live per-user token.
 
     Constant-time via `hmac.compare_digest`, which is what makes this safe to
     expose to a network: a naive `==` returns as soon as it finds a difference,
     so an attacker learns the correct prefix one byte at a time.
+
+    Two sources, in order: the per-user tokens in the store (a user can name
+    and revoke their own), then the environment token, which stays as the
+    machine-to-machine credential for the Android app and the Discord skill.
     """
     expected = configured_token()
-    if not expected or not token:
+    if expected and token and hmac.compare_digest(token, expected):
+        return True
+    if token and _store_token_valid(token):
+        return True
+    return False
+
+
+def _store_token_valid(token: str) -> bool:
+    """Resolve a per-user token against the store. Never raises.
+
+    A store failure must not open the gate, and must not 500 a command: it
+    falls back to the environment token only, which is the older, simpler
+    credential.
+    """
+    try:
+        from src.api import admin as admin_mod
+        from src.api import auth_store
+
+        return auth_store.verify_token(admin_mod.get_db_connection(), token) is not None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("command token store lookup failed: %s", e)
         return False
-    return hmac.compare_digest(token, expected)
 
 
 def check_header(header_value: str | None) -> bool:

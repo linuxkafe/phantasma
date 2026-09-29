@@ -54,6 +54,7 @@ from __future__ import annotations
 import logging
 from functools import wraps
 
+import bcrypt
 from flask import redirect, request, session, url_for
 
 logger = logging.getLogger("phantasma.auth")
@@ -66,10 +67,70 @@ SESSION_KEY = "ui_user"
 UI_LOGIN_ROUTE = "ui_login"
 NEXT_SESSION_KEY = "ui_login_next"
 
-# Compared against when the address does not exist, so a wrong address costs
-# the same wall-clock time as a right one. A real bcrypt hash of a known
-# throwaway string; the password it encodes is never used for anything.
-_TIMING_HASH = "$2b$12$C6UzMDM.H6dfI/f/IKcEe.4cCPXVF9v5p8Gm4Ck0/2Z0m1lPM1T5W"
+# A password-verified login that still owes a second factor. It holds the
+# ADDRESS and an expiry, never the password: the session cookie is signed, not
+# encrypted, so parking a password in it for the length of the challenge would
+# put the credential in the browser in readable form.
+PENDING_KEY = "ui_pending"
+PENDING_TTL_SECONDS = 600
+
+
+def start_pending_login(email: str, now: float | None = None) -> None:
+    """Park a password-verified identity that still owes a device check."""
+    import time as _time
+
+    session[PENDING_KEY] = {
+        "email": (email or "").strip().lower(),
+        "expires": (_time.time() if now is None else now) + PENDING_TTL_SECONDS,
+    }
+
+
+def take_pending() -> dict | None:
+    """Consume the pending claim, or None if absent or expired."""
+    import time as _time
+
+    claim = session.pop(PENDING_KEY, None)
+    if not claim or _time.time() > claim.get("expires", 0):
+        return None
+    return claim
+
+
+def peek_pending() -> dict | None:
+    """The pending claim, without consuming it."""
+    return session.get(PENDING_KEY)
+
+
+def complete_pending_login(email: str) -> dict | None:
+    """Turn a verified pending claim into a real session.
+
+    The claim is popped, so a code can be redeemed once. The address is taken
+    from the CLAIM, not from the form: a form field would let a browser that
+    proved one address mint a session for another.
+    """
+    claim = take_pending()
+    if claim is None or claim["email"] != (email or "").strip().lower():
+        return None
+    user = _user_row(claim["email"])
+    if user is None or not user.get("is_active", 1):
+        return None
+    session.clear()
+    session[SESSION_KEY] = user["email"]
+    session.permanent = True
+    logger.info("ui auth: device verified for %s (role=%s)", user["email"], user.get("role"))
+    return user
+
+# Verified against when the address does not exist, so that a missing address
+# costs the same wall-clock time as a real check. A wrong address otherwise
+# returns in microseconds while a right one spends ~100ms in bcrypt, which is
+# enough to enumerate the user store.
+#
+# It is a bcrypt hash of a THROWAWAY string, computed here rather than pasted
+# in, so that no hash-shaped literal sits in the source: the plaintext below is
+# not a credential, is not used anywhere else, and grants access to nothing.
+_TIMING_PASSWORD = "timing-equaliser-not-a-credential"
+_TIMING_HASH = bcrypt.hashpw(
+    _TIMING_PASSWORD.encode("utf-8"), bcrypt.gensalt()
+).decode("utf-8")
 
 
 def _user_row(email: str) -> dict | None:
@@ -93,6 +154,17 @@ def _user_row(email: str) -> dict | None:
         return None
     finally:
         conn.close()
+
+
+def find_user(email: str) -> dict | None:
+    """Public alias for the row lookup.
+
+    The login flow needs the identity AFTER the password has passed, and
+    `authenticate` deliberately returns only a boolean so that the unknown
+    address and the wrong password take the same branch. This is that second
+    step, and it is only ever reached once the password is proven.
+    """
+    return _user_row(email)
 
 
 def current_user() -> dict | None:

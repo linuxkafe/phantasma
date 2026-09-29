@@ -3,8 +3,9 @@ from pathlib import Path
 import json
 import logging
 import os
+import time
 
-from flask import jsonify, make_response, redirect, request, url_for
+from flask import jsonify, make_response, redirect, request, session, url_for
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +67,48 @@ def login_page():
         # `next` from the query string, validated as a local path by the module:
         # an absolute URL on a login form is an open redirect, i.e. phishing.
         ui_auth.remember_next(request.args.get("next"))
-        if ui_auth.login(email, password):
+        if not ui_auth.authenticate(email, password):
+            logger.warning("ui login failed from %s", request.remote_addr)
+            return render_login_page(error="Email ou password inválidos.")
+        # authenticate() answers a boolean on purpose: the same branch for an
+        # unknown address and a wrong password. The identity is resolved
+        # separately, AFTER the password passed.
+        user = ui_auth.find_user(email)
+        if user is None:
+            return render_login_page(error="Email ou password inválidos.")
+
+        # Second factor for a device this account has not trusted before. A
+        # password is a bearer secret and it gets typed into phones and
+        # laptops; once one is compromised every login from it is. This only
+        # costs a mail for a device the owner has not used before, and the
+        # device then stops costing anything.
+        from src.api import auth_store
+
+        conn = _auth_store()[1]
+        if auth_store.is_device_trusted(
+            conn, user["email"], request.cookies.get(auth_store.DEVICE_COOKIE, "")
+        ):
+            ui_auth.login(email, password)
             return redirect(ui_auth.take_next())
-        logger.warning("ui login failed from %s", request.remote_addr)
-        error = "Email ou password inválidos."
+
+        device_code = auth_store.request_code(
+            conn, user["email"], "new_device", request.remote_addr
+        )
+        if device_code:
+            _send_ui_mail(
+                user["email"],
+                "pHantasma — novo dispositivo",
+                "Entrou-se na tua conta a partir de um dispositivo novo.\n\n"
+                f"Código: {device_code}\n\n"
+                f"Válido durante {auth_store.CODE_TTL_SECONDS // 60} minutos.\n"
+                "Se não foste tu, ignora este email e muda a password.",
+                otp=device_code,
+            )
+        ui_auth.start_pending_login(user["email"])
+        return redirect(url_for("ui.verify_new_device"))
+
+        ui_auth.login(email, password)
+        return redirect(ui_auth.take_next())
 
     return render_login_page(error=error)
 
@@ -143,6 +182,9 @@ LOGIN_PAGE = """<!DOCTYPE html>
            autocomplete="current-password" required>
     <button type="submit">Entrar</button>
   </form>
+  <p class="sub" style="margin:1.25rem 0 0;text-align:center">
+    <a href="/recuperar" style="color:var(--muted)">Esqueci-me a password</a>
+  </p>
 </body>
 </html>
 """
@@ -153,6 +195,402 @@ def render_login_page(error=None):
     if error:
         block = f'<p class="error" role="alert">{error}</p>'
     return make_response(LOGIN_PAGE.replace("__ERROR__", block))
+
+
+def _send_ui_mail(to, subject, body, otp=None):
+    """Send through the admin mailer, which knows the SMTP settings.
+
+    Delegating rather than re-implementing: a second SMTP path is a second set
+    of credentials to get wrong, and the admin one already falls back to a
+    console print so development still works.
+    """
+    try:
+        from src.api import admin as admin_mod
+
+        admin_mod._send_mail(to, subject, body, otp)
+        return True
+    except Exception:
+        logger.exception("ui auth: could not send mail")
+        return False
+
+
+def _auth_store():
+    from src.api import admin as admin_mod
+    from src.api import auth_store
+
+    return auth_store, admin_mod.get_db_connection()
+
+
+def forgot_password():
+    """Step 1: ask for the code.
+
+    The response is identical whether or not the address is in the store. This
+    form is reachable by anyone, so a different answer for "no such user" is a
+    free oracle for the user list -- and a password-recovery flow is exactly
+    where someone goes looking for one.
+    """
+    if request.method == "GET":
+        return render_recover_page()
+
+    from src.api import ratelimit
+
+    if not ratelimit.login_limiter.allow(ratelimit.client_key()):
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código."
+        )
+    email = (request.form.get("email") or "").strip()
+    auth_store, conn = _auth_store()
+    code = auth_store.request_code(conn, email, "recover", request.remote_addr)
+    if code:
+        _send_ui_mail(
+            email,
+            "pHantasma — recuperação de password",
+            "Recebeste um pedido para redefinir a tua password.\n\n"
+            f"Código: {code}\n\n"
+            f"Válido durante {auth_store.CODE_TTL_SECONDS // 60} minutos.\n"
+            "Se não foste tu, ignora este email: nada muda.",
+            otp=code,
+        )
+    # Same page either way, including for an unknown address.
+    return _render_recover(
+        neutral="Se o endereço existir, enviámos um código.",
+        email=email,
+    )
+
+
+def reset_password():
+    """Step 2: code + new password.
+
+    Consumes the code first, then applies the policy. A code that passes and a
+    password that fails must not leave the code alive to be retried: it was
+    already spent, and keeping it alive would let a second guess at the policy
+    reuse a captured code.
+    """
+    if request.method == "GET":
+        return redirect(url_for("ui.forgot"))
+
+    from src.api import ratelimit
+
+    if not ratelimit.login_limiter.allow(ratelimit.client_key()):
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código.",
+            error="Demasiadas tentativas. Tenta mais tarde.",
+        )
+    email = (request.form.get("email") or "").strip()
+    code = (request.form.get("code") or "").strip()
+    password = request.form.get("password") or ""
+    confirm = request.form.get("confirm") or ""
+    auth_store, conn = _auth_store()
+
+    if not auth_store.consume_code(conn, email, code, "recover"):
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código.",
+            email=email,
+            error="O código não é válido ou expirou. Pede outro.",
+        )
+    if password != confirm:
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código.",
+            email=email,
+            error="As passwords não coincidem.",
+        )
+    problem = auth_store.password_problem(password)
+    if problem:
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código.",
+            email=email,
+            error=problem,
+        )
+    if not auth_store.set_password(conn, email, password):
+        return _render_recover(
+            neutral="Se o endereço existir, enviámos um código.",
+            email=email,
+            error="Não foi possível alterar a password.",
+        )
+    # A password change that leaves the old devices trusted is a change the
+    # thief rides straight through.
+    auth_store.revoke_devices(conn, email)
+    logger.info("ui auth: password reset completed for %s", email)
+    return render_recover_page(
+        done="Password alterada. Entra com a nova password."
+    )
+
+
+def verify_new_device():
+    """Second factor for a device this account has not trusted before.
+
+    The password was already verified by the login step; what is missing is the
+    second factor. So the login step parks a SHORT-LIVED, already-verified
+    pending claim in the session -- never the password, and never a full
+    session -- and this endpoint turns that claim into a real session once the
+    code is redeemed.
+
+    Parking the password would be the obvious shortcut and it is wrong: the
+    password would sit in the cookie (signed, not encrypted) for the whole
+    window. The pending claim carries only the address and an expiry, and it is
+    destroyed on use.
+    """
+    if request.method == "GET":
+        return render_verify_page()
+
+    from src.api import ratelimit, ui_auth
+
+    pending = session.get(ui_auth.PENDING_KEY)
+    if not pending or time.time() > pending.get("expires", 0):
+        # No live claim: the browser did not come through the login step, or
+        # the claim expired. Either way, start over rather than ask for a code
+        # that would be redeemed for an identity this browser never proved.
+        return render_verify_page(
+            error="A sessão expirou. Entra novamente.", restart=True
+        )
+    if not ratelimit.login_limiter.allow(ratelimit.client_key()):
+        return render_verify_page(error="Demasiadas tentativas. Tenta mais tarde.")
+
+    email = pending["email"]
+    code = (request.form.get("code") or "").strip()
+    auth_store, conn = _auth_store()
+    if not auth_store.consume_code(conn, email, code, "new_device"):
+        return render_verify_page(error="O código não é válido ou expirou.", email=email)
+
+    ui_auth.complete_pending_login(email)
+    raw = auth_store.trust_device(conn, email, request.form.get("label") or None)
+    response = make_response(redirect("/"))
+    response.set_cookie(
+        auth_store.DEVICE_COOKIE,
+        raw,
+        httponly=True,
+        samesite="Lax",
+        secure=request.is_secure,
+        max_age=60 * 60 * 24 * auth_store.TOKEN_SKEW_DAYS,
+    )
+    return response
+
+
+_AUTH_CSS = """
+    :root { --bg:#0a0a0a; --surface:#171717; --border:#262626; --text:#fafafa;
+            --muted:#737373; --accent:#22c55e; --danger:#ef4444; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100dvh; display:flex; align-items:center;
+           justify-content:center; padding:1.5rem; background:var(--bg);
+           color:var(--text); font-family:Inter,-apple-system,BlinkMacSystemFont,
+           "Segoe UI",Roboto,sans-serif; }
+    .card { width:100%; max-width:24rem; background:var(--surface);
+            border:1px solid var(--border); border-radius:12px; padding:2rem 1.5rem; }
+    h1 { margin:0 0 .25rem; font-size:1.35rem; }
+    p.sub { margin:0 0 1.5rem; color:var(--muted); font-size:.85rem; }
+    label { display:block; font-size:.72rem; color:var(--muted); margin:0 0 .35rem;
+            text-transform:uppercase; letter-spacing:.04em; }
+    input { width:100%; padding:.7rem; margin-bottom:1rem; background:var(--bg);
+            color:var(--text); border:1px solid var(--border); border-radius:8px;
+            font-size:1rem; min-height:44px; }
+    input:focus-visible, button:focus-visible { outline:2px solid var(--accent);
+        outline-offset:2px; }
+    button { width:100%; padding:.7rem; border:none; border-radius:8px;
+             background:var(--accent); color:#05240f; font-size:1rem;
+             font-weight:600; cursor:pointer; min-height:44px; }
+    button.secondary { background:transparent; color:var(--muted);
+                       border:1px solid var(--border); margin-top:.5rem; }
+    .msg { padding:.6rem .75rem; border-radius:8px; font-size:.85rem;
+           margin-bottom:1rem; }
+    .msg.err { background:#2a1416; border:1px solid #7f1d1d; color:#fca5a5; }
+    .msg.ok { background:#0f2417; border:1px solid #166534; color:#86efac; }
+    .msg.neutral { background:#151515; border:1px solid var(--border);
+                   color:var(--muted); }
+    code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                  font-size:.85em; word-break:break-all; }
+    ul.plain { list-style:none; padding:0; margin:0 0 1rem; }
+    ul.plain li { padding:.5rem 0; border-bottom:1px solid var(--border);
+                 font-size:.85rem; display:flex; justify-content:space-between;
+                 gap:.5rem; align-items:center; }
+    .muted { color:var(--muted); font-size:.78rem; }
+"""
+
+
+def _auth_page(title, body_html, sub=""):
+    sub_html = f'<p class="sub">{sub}</p>' if sub else ""
+    return make_response(
+        f"""<!DOCTYPE html>
+<html lang="pt"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pHantasma</title><style>{_AUTH_CSS}</style></head>
+<body><div class="card"><h1>{title}</h1>{sub_html}{body_html}</div></body></html>"""
+    )
+
+
+def _render_recover(neutral=None, error=None, email=""):
+    """The recovery form. `neutral` is the answer for every outcome."""
+    block = ""
+    if error:
+        block += f'<p class="msg err" role="alert">{error}</p>'
+    if neutral:
+        block += f'<p class="msg neutral" role="status">{neutral}</p>'
+    return _auth_page(
+        "Recuperar password",
+        f"""{block}
+<form method="post" action="{url_for('ui.reset')}">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username"
+         value="{email}" required>
+  <label for="code">Código recebido</label>
+  <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+  <label for="password">Nova password</label>
+  <input id="password" name="password" type="password"
+         autocomplete="new-password" required>
+  <label for="confirm">Repetir a password</label>
+  <input id="confirm" name="confirm" type="password"
+         autocomplete="new-password" required>
+  <button type="submit">Definir nova password</button>
+</form>
+<form method="post" action="{url_for('ui.forgot')}">
+  <button class="secondary" type="submit">Pedir outro código</button>
+</form>
+<a class="muted" href="{url_for('ui_login')}">Voltar ao início de sessão</a>""",
+        sub="Enviamos um código por email se o endereço existir.",
+    )
+
+
+def render_recover_page(error=None, done=None, email=""):
+    block = ""
+    if error:
+        block += f'<p class="msg err" role="alert">{error}</p>'
+    if done:
+        block += f'<p class="msg ok" role="status">{done}</p>'
+    return _auth_page(
+        "Recuperar password",
+        f"""{block}
+<form method="post" action="{url_for('ui.forgot')}">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required>
+  <button type="submit">Enviar código</button>
+</form>
+<a class="muted" href="{url_for('ui_login')}">Voltar ao início de sessão</a>""",
+        sub="Enviamos um código por email se o endereço existir.",
+    )
+
+
+def render_verify_page(error=None, email="", restart=False):
+    """Second factor for a new device."""
+    if restart:
+        return _auth_page(
+            "Sessão expirada",
+            f"""<p class="msg err" role="alert">{error or "A sessão expirou."}</p>
+<form method="post" action="{url_for('ui_login')}">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password"
+         autocomplete="current-password" required>
+  <button type="submit">Entrar</button>
+</form>""",
+        )
+    block = f'<p class="msg err" role="alert">{error}</p>' if error else ""
+    return _auth_page(
+        "Novo dispositivo",
+        f"""{block}
+<p class="sub">Enviámos um código para o email desta conta.</p>
+<form method="post" action="{url_for('ui.verify_new_device')}">
+  <label for="code">Código</label>
+  <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+  <label for="label">Nome do dispositivo (opcional)</label>
+  <input id="label" name="label" placeholder="ex.: telemóvel da cozinha">
+  <button type="submit">Confirmar</button>
+</form>""",
+    )
+
+
+def profile_page():
+    """The user's own page: tokens and trusted devices.
+
+    A token is shown exactly once, at creation, and cannot be recovered
+    afterwards -- a list that re-displays secrets is a password list with a
+    nicer header. The profile therefore shows prefixes and timestamps, and the
+    secret lives in the response to the creation POST alone.
+    """
+    from src.api import ui_auth
+
+    user = ui_auth.current_user()
+    if user is None:
+        return redirect(url_for(ui_auth.UI_LOGIN_ROUTE))
+    email = user["email"]
+    auth_store, conn = _auth_store()
+
+    minted = None
+    if request.method == "POST":
+        op = request.form.get("op")
+        if op == "create_token":
+            name = (request.form.get("name") or "").strip() or "token"
+            secret, row = auth_store.create_token(conn, email, name)
+            minted = (secret, row)
+        elif op == "revoke_token":
+            auth_store.revoke_token(conn, email, int(request.form.get("id") or 0))
+        elif op == "revoke_device":
+            auth_store.revoke_devices(conn, email)
+
+    tokens = auth_store.list_tokens(conn, email)
+    devices = auth_store.list_devices(conn, email)
+
+    def _when(ts):
+        if not ts:
+            return "—"
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+    token_rows = "".join(
+        f"<li><span><strong>{t['name']}</strong> "
+        f"<span class='mono muted'>{t['prefix']}…</span><br>"
+        f"<span class='muted'>criado {_when(t['created_at'])}"
+        + (f" · usado {_when(t['last_used_at'])}" if t["last_used_at"] else " · nunca usado")
+        + (" · <strong>revogado</strong>" if t["revoked_at"] else "")
+        + f"</span></span>"
+        + ("" if t["revoked_at"] else
+           f"<form method='post' style='margin:0'>"
+           f"<input type='hidden' name='op' value='revoke_token'>"
+           f"<input type='hidden' name='id' value='{t['id']}'>"
+           f"<button class='secondary' type='submit' "
+           f"style='padding:.3rem .6rem;min-height:0'>Revogar</button></form>")
+        + "</li>"
+        for t in tokens
+    ) or "<li class='muted'>Sem tokens.</li>"
+
+    device_rows = "".join(
+        f"<li><span>{d.get('label') or 'dispositivo'}<br>"
+        f"<span class='muted'>visto {_when(d['last_seen_at'])}"
+        + (" · <strong>revogado</strong>" if d["revoked_at"] else "")
+        + "</span></span></li>"
+        for d in devices
+    ) or "<li class='muted'>Sem dispositivos.</li>"
+
+    minted_block = ""
+    if minted:
+        secret, row = minted
+        minted_block = f"""
+<p class="msg ok" role="alert"><strong>Token criado — copia-o agora,
+não voltarás a vê-lo.</strong><br><span class="mono">{secret}</span></p>"""
+
+    return _auth_page(
+        "O meu perfil",
+        f"""{minted_block}
+<p class="sub">{email} · {user.get('role', 'user')}</p>
+<h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Tokens de automação</h2>
+<p class="muted">Um token permite a outras aplicações enviar comandos.
+Não dá acesso a esta página, a memórias nem à administração.</p>
+<ul class="plain">{token_rows}</ul>
+<form method="post">
+  <input type="hidden" name="op" value="create_token">
+  <label for="name">Nome do token</label>
+  <input id="name" name="name" placeholder="ex.: Home Assistant">
+  <button type="submit">Criar token</button>
+</form>
+<h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Dispositivos</h2>
+<ul class="plain">{device_rows}</ul>
+<form method="post">
+  <input type="hidden" name="op" value="revoke_device">
+  <button class="secondary" type="submit">Revogar todos os dispositivos</button>
+</form>
+<form method="post" action="{url_for('ui_logout')}">
+  <button class="secondary" type="submit">Sair</button>
+</form>
+<a class="muted" href="/">Voltar ao painel</a>""",
+    )
 
 
 def _shared_design():
@@ -218,6 +656,11 @@ def register_routes(app):
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
     app.add_url_rule('/login', 'ui_login', login_page, methods=["GET", "POST"])
     app.add_url_rule('/logout', 'ui_logout', logout_page, methods=["GET", "POST"])
+    app.add_url_rule('/recuperar', 'ui.forgot', forgot_password, methods=["GET", "POST"])
+    app.add_url_rule('/recuperar/codigo', 'ui.reset', reset_password, methods=["GET", "POST"])
+    app.add_url_rule('/verificar-dispositivo', 'ui.verify_new_device',
+                     verify_new_device, methods=["GET", "POST"])
+    app.add_url_rule('/perfil', 'ui.profile', profile_page, methods=["GET", "POST"])
 
 def handle_weather_api():
     if not os.path.exists(WEATHER_CACHE_FILE): return jsonify({"error": "No cache data"})
@@ -264,6 +707,7 @@ def handle_request():
             links.append(('/admin', '📊', 'Dashboard'))
             links.append(('/admin/config', '⚙️', 'Configuração'))
             links.append(('/admin/users', '👤', 'Utilizadores'))
+        links.append(('/perfil', '🔑', 'Perfil'))
         links.append(('/logout', '🚪', 'Sair'))
         admin_links_html = "".join(
             f'<a class="nav-link" href="{href}">'
