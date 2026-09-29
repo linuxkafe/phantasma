@@ -53,6 +53,7 @@ def _update_single_value(device_id, watts, extra=None):
 
 # --- API ---
 CURRENT_TOKEN = None
+_TAG_CATALOG = None
 def _get_headers(): return {"Authorization": f"VPS {CURRENT_TOKEN}", "Accept": "application/json"}
 
 def _login():
@@ -107,6 +108,8 @@ def _fetch_readings(device_id):
                         "carbon_g": last.get("ReadCarbon"),
                         "granularity": last.get("Granularity"),
                         "series": series,
+                        "tag_name": _tag_catalog().get(str(device_id), {}).get("name", ""),
+                        "tag_kind": _tag_kind(device_id),
                     }
     except Exception: pass
     return None
@@ -192,8 +195,18 @@ def get_status_for_device(nickname):
         entry = cache[target_id]
         watts = entry["val"]
         out = {"power_w": round(watts, 1)}
+        kind = entry.get("tag_kind") or _tag_kind(target_id)
 
-        if _is_stuck(entry):
+        if kind == "actuator":
+            # An actuator tag holds a switch state, not a measurement. This tag
+            # (169809) returned a rock-steady 1.0, which the on/off threshold
+            # read as "the oven is drawing 1000 W" -- a switch position dressed
+            # up as a wattage. Say what the tag is instead.
+            out["state"] = "unknown"
+            out["state_inferred"] = True
+            out["tag_kind"] = "actuator"
+            out["note"] = "esta etiqueta e um atuador (on/off), nao uma potencia"
+        elif _is_stuck(entry):
             # A reading that has not moved in an hour is not a measurement.
             out["state"] = "unknown"
             out["state_inferred"] = True
@@ -203,6 +216,8 @@ def get_status_for_device(nickname):
             out["state"] = "on" if watts > ON_THRESHOLD_W else "off"
             out["state_inferred"] = True
 
+        if entry.get("tag_name"):
+            out["tag_name"] = entry["tag_name"]
         out.update({k: v for k, v in entry.items() if k not in ("val", "ts", "history")})
         return out
 
@@ -217,6 +232,52 @@ def _set_state(device_id, state_on):
         resp = httpx.put(url, json={"Value": val}, headers=_get_headers(), timeout=10, verify=False)
         return resp.status_code in [200, 204]
     except Exception: return False
+
+def _tag_catalog(token=None):
+    """Every tag in the account: id -> metadata (name, device, unit).
+
+    The tag list is the only place that says WHAT a tag measures. A tag id in
+    CLOOGY_DEVICES is opaque, and on this install the same kind of number means
+    different things: 169806 is "Active Power+" of the oven plug, and 169809 is
+    its "Actuator". Reading an Actuator as watts produced a rock-steady 1.0 kW
+    that looked like a plausible measurement and was not one at all.
+
+    Cached because it changes only when the owner re-pairs a device.
+    """
+    global _TAG_CATALOG
+    if _TAG_CATALOG is not None:
+        return _TAG_CATALOG
+    _TAG_CATALOG = {}
+    if not _ensure_auth():
+        return _TAG_CATALOG
+    try:
+        r = httpx.get("https://api.cloogy.com/api/1.4/tags", headers=_get_headers(), timeout=15, verify=False)
+        if r.status_code == 200:
+            for t in r.json().get("List", []) or []:
+                _TAG_CATALOG[str(t.get("Id"))] = {
+                    "name": t.get("Name") or "",
+                    "device_id": t.get("DeviceId"),
+                    "communicate": t.get("Communicate"),
+                }
+    except Exception:
+        pass
+    return _TAG_CATALOG
+
+
+def _tag_kind(device_id):
+    """'actuator' | 'power' | 'energy' | '' for a tag id."""
+    meta = _tag_catalog().get(str(device_id))
+    if not meta:
+        return ""
+    name = (meta.get("name") or "").lower()
+    if "actuator" in name:
+        return "actuator"
+    if "power" in name:
+        return "power"
+    if "energy" in name:
+        return "energy"
+    return ""
+
 
 def _describe(name, d):
     """Answer from a reading, naming only the fields that actually have values.
@@ -278,6 +339,11 @@ def handle(user_prompt_lower, user_prompt_full):
         _update_single_value(target_id, d["power_w"], extra={
             k: v for k, v in d.items() if k not in ("power_w", "series")
         })
+        if d.get("tag_kind") == "actuator":
+            return (
+                f"O {target_name} esta ligado a um atuador, nao a um medidor de "
+                f"consumo, por isso nao tenho leituras para te dar."
+            )
         if _stuck_for(d.get("series") or []):
             return _describe_stuck(target_name)
         return _describe(target_name, d)

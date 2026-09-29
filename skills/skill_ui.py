@@ -1,9 +1,12 @@
 import config
 from pathlib import Path
 import json
+import logging
 import os
 
-from flask import jsonify, make_response
+from flask import jsonify, make_response, redirect, request, url_for
+
+logger = logging.getLogger(__name__)
 
 TRIGGER_TYPE = "none"
 TRIGGERS = []
@@ -36,6 +39,120 @@ t.setAttribute('aria-label',o?'Fechar menu':'Abrir menu');}
 s(false);t.addEventListener('click',function(){s(!m.classList.contains('open'));});
 document.addEventListener('keydown',function(e){if(e.key==='Escape')s(false);});});})();
 """
+
+
+def login_page():
+    """Password login for the voice UI.
+
+    Rate limited BEFORE any credential work, for the same reason the admin
+    login is: an unthrottled password endpoint is a free oracle and a free
+    spam vector. The failure message is identical for an unknown address and a
+    wrong password, so the form cannot be used to enumerate the user store.
+    """
+    from src.api import ratelimit, ui_auth
+
+    error = None
+    if request.method == "POST":
+        if not ratelimit.login_limiter.allow(ratelimit.client_key()):
+            retry = ratelimit.login_limiter.retry_after(ratelimit.client_key())
+            return (
+                render_login_page(
+                    error=f"Demasiadas tentativas. Tenta de novo em {retry}s."
+                ),
+                429,
+            )
+        email = (request.form.get("email") or "").strip()
+        password = request.form.get("password") or ""
+        # `next` from the query string, validated as a local path by the module:
+        # an absolute URL on a login form is an open redirect, i.e. phishing.
+        ui_auth.remember_next(request.args.get("next"))
+        if ui_auth.login(email, password):
+            return redirect(ui_auth.take_next())
+        logger.warning("ui login failed from %s", request.remote_addr)
+        error = "Email ou password inválidos."
+
+    return render_login_page(error=error)
+
+
+def logout_page():
+    from src.api import ui_auth
+
+    ui_auth.logout()
+    return redirect(url_for(ui_auth.UI_LOGIN_ROUTE))
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pHantasma</title>
+<style>
+    /* The login page shares the app's palette on purpose: a login that looks
+       like a different product is how phishing gets believed. */
+    :root { --bg: #0a0a0a; --surface: #171717; --border: #262626;
+            --text: #fafafa; --muted: #737373; --accent: #22c55e; }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; min-height: 100dvh; display: flex; align-items: center;
+        justify-content: center; padding: 1.5rem;
+        background: var(--bg); color: var(--text);
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    form {
+        width: 100%; max-width: 22rem; background: var(--surface);
+        border: 1px solid var(--border); border-radius: 12px; padding: 2rem 1.5rem;
+    }
+    h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    p.sub { margin: 0 0 1.5rem; color: var(--muted); font-size: .85rem; }
+    label { display: block; font-size: .75rem; color: var(--muted);
+            margin: 0 0 .35rem; text-transform: uppercase; letter-spacing: .04em; }
+    input[type=email], input[type=password] {
+        width: 100%; padding: .7rem; margin-bottom: 1rem;
+        background: var(--bg); color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px; font-size: 1rem;
+    }
+    /* 44px is the touch-target floor; below it the field is hard to hit on a
+       phone, and a login you cannot tap is a login that fails. */
+    input[type=email], input[type=password], button { min-height: 44px; }
+    input:focus-visible, button:focus-visible {
+        outline: 2px solid var(--accent); outline-offset: 2px;
+    }
+    button {
+        width: 100%; padding: .7rem; border: none; border-radius: 8px;
+        background: var(--accent); color: #05240f; font-size: 1rem;
+        font-weight: 600; cursor: pointer;
+    }
+    .error {
+        background: #2a1416; border: 1px solid #7f1d1d; color: #fca5a5;
+        padding: .6rem .75rem; border-radius: 8px; font-size: .85rem;
+        margin-bottom: 1rem;
+    }
+</style>
+</head>
+<body>
+  <form method="post" autocomplete="on">
+    <h1>👻 pHantasma</h1>
+    <p class="sub">Entrar para controlar a casa.</p>
+    __ERROR__
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username"
+           required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password"
+           autocomplete="current-password" required>
+    <button type="submit">Entrar</button>
+  </form>
+</body>
+</html>
+"""
+
+
+def render_login_page(error=None):
+    block = ""
+    if error:
+        block = f'<p class="error" role="alert">{error}</p>'
+    return make_response(LOGIN_PAGE.replace("__ERROR__", block))
 
 
 def _shared_design():
@@ -71,6 +188,26 @@ def register_routes(app):
     # listener is not in that copy either. Pinning the document keeps the css,
     # the js and the markup in the same version.
     def _ui_page():
+        # `/` is the house-control surface: the device tiles, the chat, and the
+        # buttons that switch the lights. It was open to anything that could
+        # reach port 5000, which made the admin login decorative -- the same
+        # box served the house to anyone who asked for it.
+        #
+        # The gate is a session, and the loopback bypass is deliberately NOT
+        # honoured here: that bypass grants ADMIN to any local process, and
+        # extending an admin bypass to the light switches would let anything
+        # running on this host, and anything that could be induced to make a
+        # request (an SSRF in a dependency), turn the lights on. A program
+        # integrates with the command token instead, which carries exactly one
+        # capability and cannot read this page.
+        from src.api import ui_auth
+
+        if not ui_auth.is_authenticated():
+            try:
+                return redirect(url_for(ui_auth.UI_LOGIN_ROUTE, next=request.path))
+            except Exception:
+                # A missing route must not turn "please log in" into a 500.
+                return ("401 Unauthorized", 401)
         resp = make_response(handle_request())
         resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         resp.headers['Pragma'] = 'no-cache'
@@ -79,6 +216,8 @@ def register_routes(app):
 
     app.add_url_rule('/', 'ui', _ui_page)
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
+    app.add_url_rule('/login', 'ui_login', login_page, methods=["GET", "POST"])
+    app.add_url_rule('/logout', 'ui_logout', logout_page, methods=["GET", "POST"])
 
 def handle_weather_api():
     if not os.path.exists(WEATHER_CACHE_FILE): return jsonify({"error": "No cache data"})
@@ -94,22 +233,16 @@ def _viewer_is_admin() -> bool:
     source, which is disclosure by accident. The real gate remains
     @admin_required on the routes; not sending a link the viewer cannot use is
     the honest behaviour on top of it.
+
+    `/` is behind a session now, so this reads that session and never the
+    loopback admin bypass: a bypassed local request is admin in /admin/*, but
+    it is not signed in as a user here, and `handle_request` is only reached
+    once a real session exists.
     """
     try:
-        from flask import request
+        from src.api import ui_auth
 
-        addr = request.remote_addr or ""
-        # Same loopback rule as src/api/localauth.py, reused rather than
-        # reimplemented: a second copy of this check is how the two drift.
-        from src.api.localauth import bypass_identity
-
-        ident = bypass_identity(addr)
-        if ident is not None:
-            return ident.get("role") == "admin"
-        from src.api.admin import _current_user_data
-
-        ident = _current_user_data()
-        return bool(ident) and ident.get("role") == "admin"
+        return ui_auth.is_admin()
     except Exception:
         # Never let an auth probe break the device page.
         return False
@@ -118,11 +251,26 @@ def _viewer_is_admin() -> bool:
 def handle_request():
         _css, _js = _shared_design()
         is_admin = _viewer_is_admin()
-        # No admin links on the root page. Reverses the 2026-09-27 decision
-        # to keep them visible: the owner reported twice that the panel still
-        # showed on `/`, and once it was a bordered box it read as a stuck
-        # hamburger. Admin lives behind /admin/* now, reached by URL.
-        admin_links_html = ""
+        # Menu links are built from the RESOLVED role, not from what the page
+        # hopes the viewer is. This used to hardcode `admin_links_html = ""`,
+        # which is why there was no menu at all on `/` for anyone: an admin had
+        # to know the URLs, and a plain user had nothing to click. Now a signed-in
+        # user always gets a menu; the admin entries are rendered only for an
+        # admin, so a display:none link never leaves an admin URL in the page of
+        # someone who may not use it.
+        links = []
+        if is_admin:
+            links.append(('/admin/brain', '🧠', 'Cérebro'))
+            links.append(('/admin', '📊', 'Dashboard'))
+            links.append(('/admin/config', '⚙️', 'Configuração'))
+            links.append(('/admin/users', '👤', 'Utilizadores'))
+        links.append(('/logout', '🚪', 'Sair'))
+        admin_links_html = "".join(
+            f'<a class="nav-link" href="{href}">'
+            f'<span class="ico" aria-hidden="true">{ico}</span>'
+            f'<span class="lbl">{lbl}</span></a>'
+            for href, ico, lbl in links
+        )
         return (
         """
     <!DOCTYPE html>
@@ -173,13 +321,49 @@ def handle_request():
                    chat. */
                 height: 240px; max-height: 34dvh; flex: 0 1 auto; z-index: 50; 
             }
+
+            /* Desktop: the header may take the space it needs, and the chat
+               does not need to be a fixed share.
+
+               The phone rules above exist for a 375x667 screen where the header
+               and the chat compete for the same 667px, and there the cap is
+               load-bearing: without it the chat loses ~100px. On a desktop the
+               same cap just wastes the middle of the screen -- there is room
+               for all fourteen devices AND a full chat, and forcing a
+               percentage split means one of the two is always short.
+
+               So above 900px the header grows to fit its content (the device
+               strip stops being a scroller there and simply wraps), the chat
+               takes whatever is left, and neither is a fixed percentage of the
+               other. Below 900px everything above applies unchanged, because
+               the phone is the case where the trade is real. */
+            @media (min-width: 901px) {
+                #header-strip {
+                    height: auto;
+                    max-height: none;
+                    flex: 0 0 auto;
+                }
+                #header-strip #devices {
+                    overflow-y: visible;
+                    max-height: none;
+                    flex: 1 1 auto;
+                }
+            }
             #brand {
                 display: flex; flex-direction: column; align-items: center; justify-content: center;
+                /* The brand is the identity block and nothing else. It was
+                   width:210px with a right border, which on a wide desktop
+                   spent fixed space on a logo while the device strip -- the
+                   part that runs out of room -- was capped at 34dvh and
+                   scrolled. Below 900px it is still width:100% and still
+                   carries the border, because there the rule is what separates
+                   the header from the list. */
                 width: 210px; height: 100%;
                 border-right: 1px solid #333; background: #151515;
                 cursor: pointer; user-select: none; z-index: 10;
                 padding: 10px; box-sizing: border-box;
                 position: relative; overflow: hidden;
+                flex: 0 0 auto;
             }
             #brand:active { background: #222; }
 
@@ -276,12 +460,19 @@ def handle_request():
             #nav-menu::-webkit-scrollbar { width: 4px; }
             #nav-menu::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 
-            .device-room {
-                display: inline-flex; flex-direction: column;
-                margin-right: 15px; margin-bottom: 15px;
-                padding-right: 15px; border-right: 1px solid #333;
-                vertical-align: top;
-            }
+              .device-room {
+                  display: inline-flex; flex-direction: column;
+                  margin-right: 15px; margin-bottom: 15px;
+                  /* No divider between rooms. The rooms are already separated
+                     by their own headers and by 15px of space; the rule made a
+                     row of devices read as a table with columns, which it is
+                     not -- the tiles under "Sala" and under "WC" share nothing
+                     and switching off one does not affect the other. The only
+                     line left on the page is the one above the chat input,
+                     which is a real boundary: that is where the user types. */
+                  padding-right: 0; border-right: none;
+                  vertical-align: top;
+              }
             .room-header { font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 8px; text-transform: uppercase; }
             .room-content { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -313,9 +504,64 @@ def handle_request():
                     flex-grow: 0;
                 }
             }
-            .device-sensor { background: #252525; border: 1px solid #333; }
-            .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
-            .device-toggle.active .device-icon { filter: grayscale(0%); }
+              .device-sensor { background: #252525; border: 1px solid #333; }
+              .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
+              .device-toggle.active .device-icon { filter: grayscale(0%); }
+
+              /* Compact view: every device visible at once, no scrollbar.
+                 The default view is deliberately capped at 34dvh and scrolls,
+                 because a capped panel is what keeps the chat above the fold on
+                 a phone. That is a real constraint, but it means a home with 14
+                 devices hides most of them behind an inner scroller that reads
+                 as a clipping bug rather than as "scroll me".
+
+                 This mode trades the 44px touch-target floor and the icon
+                 badge for a single dense row per room, so all of them fit. It
+                 is opt-in and remembered, and it does not change the default:
+                 the icon is still the tile, and the switch is still there, just
+                 laid out sideways. */
+              body.dev-compact #devices { overflow-y: visible; max-height: none; }
+              /* Give the strip its own row. In the default layout #devices is
+                 a capped scroller next to the nav; with the cap lifted it would
+                 otherwise sit beside the burger on one line and wrap oddly on a
+                 phone. */
+              body.dev-compact #devices { flex: 1 1 100%; min-width: 0; }
+              body.dev-compact .device-room {
+                  display: block; margin-right: 0; margin-bottom: 6px;
+                  padding-right: 0; border-right: none; width: 100%;
+              }
+              body.dev-compact .room-header {
+                  display: inline-block; margin: 0 8px 0 0; font-size: 0.6rem;
+              }
+              body.dev-compact .room-content { display: inline-flex; gap: 4px; }
+              body.dev-compact .device-toggle, body.dev-compact .device-sensor {
+                  flex-direction: row; min-width: 0; min-height: 28px;
+                  height: auto; padding: 3px 6px; border-radius: 6px; gap: 4px;
+                  background: #1e1e1e;
+              }
+              body.dev-compact .device-icon {
+                  width: 1.1rem; height: 1.1rem; font-size: 0.75rem;
+                  margin-bottom: 0; border-radius: 4px;
+              }
+              body.dev-compact .device-label, body.dev-compact .sensor-label {
+                  font-size: 0.6rem; width: auto; text-align: left;
+              }
+              body.dev-compact .device-label { max-width: 9rem; }
+              body.dev-compact .sensor-data { font-size: 0.6rem; }
+              body.dev-compact .switch { width: 26px; height: 15px; }
+              body.dev-compact .slider { width: 12px; height: 12px; }
+              body.dev-compact .slider::before { width: 11px; height: 11px; }
+
+              #dev-view-toggle {
+                  background: transparent; border: 1px solid #333; color: #888;
+                  border-radius: 6px; width: 30px; height: 30px; cursor: pointer;
+                  font-size: 0.9rem; line-height: 1; align-self: center;
+                  margin-right: 6px; flex: 0 0 auto;
+              }
+              #dev-view-toggle:hover { border-color: #555; color: #ccc; }
+              #dev-view-toggle[aria-pressed="true"] {
+                  border-color: var(--accent, #22c55e); color: var(--accent, #22c555);
+              }
             
                 /* The icon is the tile's badge, matching pdftools ToolCard.tsx:52-53
                    -- `flex h-10 w-10 items-center justify-center rounded-lg` with
@@ -713,9 +959,16 @@ def handle_request():
                    the admin pages but has no toggle: on this screen a burger
                    would gate five links and nothing else. -->
               
-              <!-- Always available, outside the burger. -->
-              <div id="devices" aria-label="Dispositivos"></div>
+                  <!-- Always available, outside the burger. -->
+                  <div id="devices" aria-label="Dispositivos"></div>
 <div class="nav-bar">
+                    <!-- View toggle for the device strip: the default caps the
+                         panel and scrolls, this shows every device at once.
+                         Kept next to the devices it affects, and small enough
+                         not to compete with the nav burger. -->
+                    <button id="dev-view-toggle" type="button"
+                            title="Ver todos os dispositivos sem scroll"
+                            aria-label="Alternar vista dos dispositivos">▤</button>
                   <!-- Admin navigation lives here, and only here. It is a
                        right-aligned burger because the LEFT edge of this page is
                        the brand: the layout reads left-to-right as
@@ -1244,6 +1497,36 @@ def handle_request():
                 } catch (e) {}
             }
             function toggleHelp() { document.getElementById('cli-help').classList.toggle('open'); }
+
+            /* Compact device view. Applied from localStorage BEFORE the tiles
+               are built, not after: rendering into the default layout and then
+               collapsing it shows a visible reflow and, on a phone, a scroll
+               bar that disappears a frame later. */
+            const DEV_COMPACT_KEY = 'phantasma.devcompact';
+            function applyDeviceView(compact) {
+                document.body.classList.toggle('dev-compact', compact);
+                const btn = document.getElementById('dev-view-toggle');
+                if (btn) {
+                    btn.setAttribute('aria-pressed', compact ? 'true' : 'false');
+                    btn.title = compact
+                        ? 'Vista compacta: todos os dispositivos visiveis'
+                        : 'Ver todos os dispositivos sem scroll';
+                }
+            }
+            function initDeviceView() {
+                let stored = null;
+                try { stored = localStorage.getItem(DEV_COMPACT_KEY); } catch (e) {}
+                applyDeviceView(stored === '1');
+                const btn = document.getElementById('dev-view-toggle');
+                if (!btn) return;
+                btn.onclick = () => {
+                    const next = !document.body.classList.contains('dev-compact');
+                    applyDeviceView(next);
+                    try { localStorage.setItem(DEV_COMPACT_KEY, next ? '1' : '0'); } catch (e) {}
+                    updateDeviceScrollHint();
+                };
+            }
+            initDeviceView();
 
             /* The device strip is an inner scroller inside a non-scrolling app
                shell (body is 100dvh + overflow:hidden), so a clipped row of
