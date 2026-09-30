@@ -78,17 +78,74 @@ def test_the_open_and_close_functions_exist(ui_page):
         assert name in ui_page, f"{name} is missing"
 
 
-def test_a_device_action_opens_the_panel(ui_page):
-    """A reply from a tile is produced into the log. If the panel is closed, the
-    owner sees the light change and no confirmation."""
+def _code_only(text: str) -> str:
+    """The block with its comments removed.
+
+    A shape assertion that matches prose is a shape assertion that lies. These
+    functions are heavily commented -- which is good -- and the first version of
+    `test_a_device_action_does_not_open_the_panel` failed because the COMMENT
+    explaining that `openChat()` was removed still contained the characters
+    "openChat()". The code was right and the test was reading the essay next to
+    it. Strip `/* ... */` and `// ...` and assert on what runs.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _handle_device_action(ui_page):
     m = re.search(
-        r"async function handleDeviceAction\(device, action\) \{(.*?)\n\s{12}\}",
+        r"async function handleDeviceAction\(device, action, tile\) \{(.*?)\n            \}",
         ui_page, re.S,
     )
     assert m, "handleDeviceAction not found"
-    assert "openChat()" in m.group(1), (
-        "switching a device from a tile does not open the panel, so the "
-        "confirmation lands where nobody is looking"
+    return _code_only(m.group(1))
+
+
+def test_a_device_action_does_not_open_the_panel(ui_page):
+    """Owner instruction, 2026-09-30: switching a device must not open the
+    conversation. It writes the reply to the log in the background and leaves the
+    conversation closed.
+
+    This test used to assert the OPPOSITE -- that a device action DOES open the
+    panel -- with a comment saying a reply into a closed panel is a reply nobody
+    reads. It was pinned here since 2026-09-2x and every deploy enforced it, so
+    the behaviour was not an accident anyone had to look for: it was a rule.
+
+    The behaviour it was protecting did not exist. The front end only ever read
+    `data.response`, and every error from /device_action answers with `message`
+    and no `response`, so a failed action opened the panel onto nothing. Measured
+    on the old code, both ways: success wrote the reply, 502 left the log
+    byte-for-byte unchanged. The panel opening was not delivering the failure.
+
+    The failure now has somewhere to go that is not the panel: the log, and the
+    tile that was touched. Covered behaviourally, with a real browser and a
+    stubbed endpoint, in tests/test_mobile_owner_complaints.py -- these are the
+    code-shape guards, and those are the ones that would catch it.
+    """
+    assert "openChat()" not in _handle_device_action(ui_page), (
+        "switching a device still opens the conversation: the owner asked for it "
+        "to be written in the background instead"
+    )
+
+
+def test_a_device_action_does_not_drop_a_failure(ui_page):
+    """The hole the old rule was covering, closed in the place that matters.
+
+    Every non-2xx from /device_action carries `message` and no `response`. The
+    old front end branched on `data.response` alone, so the backend's own
+    explanation of why it could not switch the light was discarded on the floor
+    -- the switch stayed in the state the page had optimistically claimed for it,
+    and nothing said otherwise.
+    """
+    body = _handle_device_action(ui_page)
+    assert "data.message" in body, (
+        "the backend's error message is not read: a failed action is still "
+        "discarded, and now it is discarded silently because the panel no "
+        "longer opens to cover for it"
+    )
+    assert "markTileResult" in body, (
+        "the tile is not told how the action went: the eye is on the tile that "
+        "was touched, not on a log nobody has opened"
     )
 
 

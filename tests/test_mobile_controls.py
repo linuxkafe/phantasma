@@ -897,6 +897,42 @@ def test_a_recording_actually_reaches_the_server(page):
     )
 
 
+def test_a_spoken_command_still_opens_the_conversation(page):
+    """The scope guard for "activating a device must not open the chat".
+
+    Switching a light is not a request to read. TALKING to the house is: the
+    transcript is the receipt, and if it heard the wrong thing the only way to
+    find out is to read what it thought it heard. So `sendRecording` opens the
+    panel on purpose, and it must keep doing so.
+
+    This is here because the change that stopped device actions from opening the
+    chat is one careless edit away from stopping this one too, and nothing else
+    in the suite would have noticed.
+    """
+    page.evaluate(
+        """() => {const prev = window.fetch;
+            window.fetch = async (u, o) => {
+                if (String(u).includes('/api/voz')) {
+                    return {status: 200, ok: true, json: async () => ({
+                        success: true, transcript: 'liga a luz', text: 'Ligado.'})};
+                }
+                return prev(u, o);
+            };}"""
+    )
+    assert not page.evaluate(
+        "() => document.getElementById('main').classList.contains('open')"
+    )
+    box = _press(page, "#voice-btn", 600)
+    _release(page, "#voice-btn", box)
+    page.wait_for_timeout(900)
+    assert page.evaluate(
+        "() => document.getElementById('main').classList.contains('open')"
+    ), "a spoken command stopped opening the conversation: the transcript is the "\
+       "receipt and the panel is the only place to read it"
+    log = page.evaluate("() => document.getElementById('chat-log').textContent")
+    assert "liga a luz" in log, f"the transcript is not in the log: {log!r}"
+
+
 def test_the_container_is_sent_untouched(page):
     """No browser-side decodeAudioData, no hand-written resampler, no
     hand-written WAV. The three steps that failed on a real phone are gone, and

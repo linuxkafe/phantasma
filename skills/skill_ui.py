@@ -1272,7 +1272,19 @@ def handle_request():
                 }
             }
                 .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
-                .device-toggle.active .device-icon { filter: grayscale(0%); }
+                  .device-toggle.active .device-icon { filter: grayscale(0%); }
+                  /* The last action on this tile did not happen. Red EDGES, not
+                     a red fill: the switch has to stay readable, because the
+                     honest thing it now shows is the state the device is really
+                     in, and covering it in colour would hide the correction the
+                     user most needs to see. The reason is in the title. */
+                  .device-toggle.action-failed {
+                      border-color: #ef4444;
+                      box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.55);
+                  }
+                  .device-toggle.action-failed .device-label { color: #f87171; }
+                  .device-toggle.action-failed .device-icon { opacity: .55; }
+
 
                 /* ---- Voice control in the bar ----
                    44x44 is the touch-target floor, matched to the nav burger
@@ -2633,18 +2645,86 @@ def handle_request():
                 } catch (e) { removeTypingIndicator(); addToChatLog('Erro rede.', 'ia'); }
             }
 
-            async function handleDeviceAction(device, action) {
-                /* Open before the request, not after: the panel is where the
-                   confirmation lands, and on a phone the owner has just tapped
-                   a tile -- they are looking at the tiles. A reply that arrives
-                   into a closed panel is a reply nobody reads. */
-                openChat();
+            async function handleDeviceAction(device, action, tile) {
+                /* Does NOT open the conversation, on owner instruction: switching
+                   a light is not a request to read. The old code called
+                   openChat() here, before the request, with a comment saying a
+                   reply into a closed panel is a reply nobody reads.
+
+                   That reasoning does not survive contact with the endpoint. On
+                   ANY failure -- 400, 500, 502 -- /device_action answers with
+                   `{"status":"error","message":...}` and NO `response` key, and
+                   the front end only ever looked at `data.response`. So the
+                   panel used to slam open, the typing indicator appeared and
+                   vanished, and the failure was dropped on the floor. Measured,
+                   both ways, with the action stubbed:
+
+                       success  -> chat opened, "Luz da Sala ligada." in the log
+                       502      -> chat opened, log byte-for-byte unchanged
+
+                   Opening the chat was not delivering the failure. It was only
+                   interrupting. The reply still goes to the log, in the
+                   background, and the log is the transcript -- the conversation
+                   is there when you go and read it, which is the point of a
+                   transcript.
+
+                   What does NOT happen in the background is a failure going
+                   unnoticed, because the eye is on the tile that was just
+                   touched, not on a panel. So the error is written to the log
+                   AND shown on the tile, and the switch goes back to the state
+                   the device is really in rather than holding the state we
+                   optimistically claimed for it. */
                 showTypingIndicator();
                 try {
                     const res = await fetch('/device_action', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({device, action}) });
                     const data = await res.json();
-                    if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
-                } catch (e) { removeTypingIndicator(); }
+                    removeTypingIndicator();
+                    if (data.response) {
+                        addToChatLog(data.response, 'ia');
+                        markTileResult(tile, true, data.response);
+                    } else {
+                        /* The branch that used not exist. `data.response` being
+                           absent was treated as "nothing to say" and the
+                           backend's own explanation was thrown away. */
+                        const why = data.message || data.status || `HTTP ${res.status}`;
+                        addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia');
+                        markTileResult(tile, false, why);
+                    }
+                } catch (e) {
+                    removeTypingIndicator();
+                    const why = (e && e.message) ? e.message : 'erro de rede';
+                    addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia');
+                    markTileResult(tile, false, why);
+                }
+            }
+            /* The result of an action, on the tile that was touched. Success
+               clears the mark; failure keeps it until the next poll brings the
+               truth, and puts the reason in the title, which is where a phone
+               reads it. The switch is returned to what the device is really
+               doing: the front end set it optimistically the instant it was
+               tapped, and for up to five seconds that was a lie the size of a
+               light that is not on. */
+            function markTileResult(tile, ok, why) {
+                if (!tile) return;
+                const input = tile.querySelector('input[type=checkbox]');
+                tile.classList.toggle('action-failed', !ok);
+                /* `title` is the device's real name, put there at creation, and
+                   it is the only place a phone can show a reason. Appending the
+                   reason rather than replacing the name keeps both. */
+                const name = tile.getAttribute('data-device-name') || tile.title.split(' — ')[0];
+                tile.setAttribute('data-device-name', name);
+                if (ok) {
+                    tile.removeAttribute('data-action-why');
+                    tile.title = name;
+                    return;
+                }
+                tile.setAttribute('data-action-why', why);
+                tile.title = `${name} — ${why}`;
+                if (input) {
+                    input.checked = !input.checked;
+                    tile.classList.toggle('active', input.checked);
+                    tile.dataset.state = input.checked ? 'on' : 'off';
+                }
             }
 
             /* What a tile actually says.
@@ -2747,7 +2827,7 @@ def handle_request():
                 const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
                 const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
                 input.onchange = () => {
-                    handleDeviceAction(device, input.checked ? 'ligar' : 'desligar');
+                    handleDeviceAction(device, input.checked ? 'ligar' : 'desligar', div);
                     div.dataset.state = input.checked ? 'on' : 'off';
                     if(input.checked) div.classList.add('active'); else div.classList.remove('active');
                 };
@@ -2802,6 +2882,15 @@ def handle_request():
                     }
                     element.style.opacity = data.state === 'unreachable' ? 0.3 : 1;
                     input.disabled = false; element.classList.add('loaded');
+                    /* A healthy poll supersedes the last failed action. The red
+                       mark means "the last thing I asked for did not happen", and
+                       a device that has come back and is reporting its state is
+                       the newer truth. Without this the mark outlives the fault
+                       it was reporting: the owner fixes the switch, the tile goes
+                       green, and it is still wearing the failure. */
+                    if (data.state !== 'unreachable' && element.classList.contains('action-failed')) {
+                        markTileResult(element, true, '');
+                    }
                     /* The name is written on every poll, from the one source, and
                        never depends on the reading. It used to be written only in
                        the `else` branch and recomputed there from a second

@@ -76,7 +76,11 @@ READINGS = {
 }
 
 STUB_JS = """
-window.__stubHits = {devices: 0, status: 0, matched: 0};
+window.__stubHits = {devices: 0, status: 0, matched: 0, action: 0};
+/* Set by a test before it taps a tile: 'ok' or 'erro'. The error shape is the
+   backend's own -- `message`, no `response`, status 502 -- because the whole
+   point is that this is a shape the front end used to throw away. */
+window.__actionMode = 'ok';
 window.fetch = async function (url) {
   const u = String(url);
   /* decodeURIComponent, not the raw slice: the page asks for
@@ -90,6 +94,14 @@ window.fetch = async function (url) {
   let nick = raw;
   try { nick = decodeURIComponent(raw); } catch (e) {}
   const json = (o) => ({json: async () => o, ok: true, status: 200});
+  if (u.includes('device_action')) {
+    window.__stubHits.action++;
+    if (window.__actionMode === 'erro') {
+      return {json: async () => ({status: 'error', message: 'Sem resposta'}),
+              ok: false, status: 502};
+    }
+    return json({status: 'ok', response: 'Luz ligada.'});
+  }
   if (u.includes('get_devices')) {
     window.__stubHits.devices++;
     return json({devices: {status: __SENSORS__, toggles: __TOGGLES__}});
@@ -106,11 +118,11 @@ window.fetch = async function (url) {
   return json({});
 };
 """
-
 STUB_JS = (STUB_JS
            .replace("__SENSORS__", json.dumps(SENSORS))
            .replace("__TOGGLES__", json.dumps(TOGGLES))
            .replace("__READINGS__", json.dumps(READINGS)))
+
 
 
 def _browser_available() -> bool:
@@ -577,3 +589,150 @@ def test_the_reading_says_how_old_it_is(page):
 def test_an_unreachable_sensor_says_so_in_the_header(page):
     rooms = {r["room"]: r for r in _rooms(page)}
     assert rooms["WC"]["readings"], "the WC sensor produced nothing at all"
+
+
+# ------------------------------------------------ activating a device ----
+
+def _tap(page, device, checked=True):
+    """Flip a tile's switch the way a thumb does: set it and fire `change`."""
+    page.evaluate(
+        """([dev, want]) => {
+             const t = [...document.querySelectorAll('.device-toggle')]
+                 .find(x => x.title.startsWith(dev));
+             if (!t) throw new Error('no such tile: ' + dev);
+             const i = t.querySelector('input[type=checkbox]');
+             i.checked = want;
+             i.dispatchEvent(new Event('change', {bubbles: true}));
+           }""",
+        [device, checked],
+    )
+    page.wait_for_timeout(900)
+
+
+def _tile(page, device="Luz da Sala"):
+    # textContent, not innerText: with the panel closed #chat-log is
+    # `visibility: hidden`, and innerText of a non-rendered subtree is the empty
+    # string. The first version of these tests read an empty log and looked
+    # exactly like "the reply was dropped".
+    return page.evaluate(
+        """(dev) => {
+             const t = [...document.querySelectorAll('.device-toggle')]
+                 .find(x => x.title.startsWith(dev));
+             const i = t.querySelector('input[type=checkbox]');
+             return {estado: t.dataset.state, marcado: i.checked,
+                     falhou: t.classList.contains('action-failed'),
+                     porque: t.getAttribute('data-action-why'),
+                     titulo: t.title,
+                     borda: getComputedStyle(t).borderTopColor,
+                     log: document.getElementById('chat-log').textContent};
+           }""",
+        device,
+    )
+
+
+def test_activating_a_device_does_not_open_the_chat(page):
+    """The instruction: "a ativacao de dispositivos nao precisa de abrir o chat,
+    basta escrever no chat em background"."""
+    assert not page.evaluate(
+        "() => document.getElementById('main').classList.contains('open')"
+    )
+    _tap(page, "Luz da Sala")
+    assert not page.evaluate(
+        "() => document.getElementById('main').classList.contains('open')"
+    ), "flipping a switch opened the conversation"
+
+
+def test_the_reply_is_still_written_in_the_background(page):
+    """Background, not discarded. The log is the transcript: the conversation is
+    there to be read when you go and read it."""
+    _tap(page, "Luz da Sala")
+    log = _tile(page)["log"]
+    assert "Luz ligada." in log, f"the reply never reached the log: {log!r}"
+
+
+def test_a_failed_action_reaches_the_log(page):
+    """The old code read only `data.response`, and every error answer from
+    /device_action carries `message` and no `response`. Measured on the old
+    code, both ways, with the action stubbed:
+
+        success  -> chat opened, "Luz da Sala ligada." in the log
+        502      -> chat opened, log byte-for-byte unchanged
+
+    So the panel was opening onto nothing. The backend's own explanation of why
+    it could not do it was being dropped, and the chat opening was not what was
+    delivering the failure -- it was only interrupting.
+    """
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala")
+    log = _tile(page)["log"]
+    assert "Sem resposta" in log, (
+        f"the backend's message was dropped again: {log!r}"
+    )
+    assert "Não foi possível" in log, f"no failure was recorded at all: {log!r}"
+
+
+def test_a_failed_action_does_not_open_the_chat(page):
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala")
+    assert not page.evaluate(
+        "() => document.getElementById('main').classList.contains('open')"
+    ), "a FAILED action opened the conversation: that is the interruption the "\
+       "owner is complaining about, and it is worst when it fails"
+
+
+def test_a_failed_switch_goes_back_to_the_truth(page):
+    """The front end sets the switch optimistically the instant it is tapped.
+    Holding that claim for up to five seconds after the action failed is a lie
+    the size of a light that is not on."""
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala", checked=True)
+    t = _tile(page)
+    assert t["marcado"] is False, (
+        f"the switch still shows ON after the action failed: {t}"
+    )
+    assert t["estado"] == "off", f"the tile still claims {t['estado']}: {t}"
+
+
+def test_a_failed_action_is_marked_on_the_tile(page):
+    """The eye is on the tile that was just touched, not on a panel that is now
+    closed. This is the channel the failure needs, and it is why closing the
+    chat is safe: nothing is lost by not opening it."""
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala")
+    t = _tile(page)
+    assert t["falhou"], f"the tile carries no sign that the action failed: {t}"
+    assert t["porque"], f"no reason recorded: {t}"
+    assert "Sem resposta" in t["titulo"], (
+        f"the reason is not in the title, which is where a phone reads it: {t}"
+    )
+    assert t["borda"] == "rgb(239, 68, 68)", f"the tile is not marked in red: {t}"
+
+
+def test_the_mark_clears_when_the_device_answers_again(page):
+    """Otherwise the red mark outlives the fault: the owner fixes the switch,
+    the tile goes green, and it is still wearing the failure."""
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala")
+    assert _tile(page)["falhou"]
+    page.evaluate("() => refreshDeviceStates()")
+    page.wait_for_timeout(900)
+    t = _tile(page)
+    assert not t["falhou"], f"a healthy device is still marked as failed: {t}"
+    assert t["titulo"] == "Luz da Sala", t["titulo"]
+
+
+def test_a_successful_action_clears_a_previous_failure(page):
+    page.evaluate("() => { window.__actionMode = 'erro'; }")
+    _tap(page, "Luz da Sala")
+    assert _tile(page)["falhou"]
+    page.evaluate("() => { window.__actionMode = 'ok'; }")
+    _tap(page, "Luz da Sala", checked=True)
+    t = _tile(page)
+    assert not t["falhou"], f"the tile is still marked after a success: {t}"
+
+
+# The voice path's scope guard lives in tests/test_mobile_controls.py, which
+# already has a fake MediaRecorder: a spoken command still opens the
+# conversation on purpose, and asserting that needs a real recording, not a
+# window.fetch swap. Duplicating that harness here would have been a worse test
+# of a better thing.
