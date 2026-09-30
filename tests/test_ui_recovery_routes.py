@@ -334,7 +334,22 @@ def test_device_verification_without_a_pending_login_is_refused(env):
 
 
 def test_a_device_code_cannot_be_redeemed_twice(env):
-    app, _db, sent = env
+    """Single use survives the "a superseded code still works" change.
+
+    That change (2026-09-30) lets a code that is merely superseded -- a second
+    request arrived while the first was still inside its own 900s window -- be
+    redeemed, so a user who asked twice and read the FIRST email is not locked
+    out. It must NOT weaken single use: a code already redeemed stays dead, and
+    redeeming it from a fresh session is still refused.
+
+    The property is asserted twice over, because the reason phrase is no longer
+    one fixed sentence: the response must NOT be a redirect into a session (the
+    old signal was 200-with-an-error vs 302), AND the database must show the
+    code consumed with no session established. Asserting on the database is
+    stronger than asserting on a message, and a message can be reworded without
+    the property changing -- which is exactly the trap this test fell into once.
+    """
+    app, db, sent = env
     c = app.test_client()
     c.post("/login", data={"email": "owner@x.test", "password": "password-boa"})
     code = _code_from(sent)
@@ -343,7 +358,20 @@ def test_a_device_code_cannot_be_redeemed_twice(env):
     c2 = app.test_client()
     c2.post("/login", data={"email": "owner@x.test", "password": "password-boa"})
     r = c2.post("/verificar-dispositivo", data={"code": code})
-    assert "não é válido" in r.get_data(as_text=True)
+    # Refused: still on the verification page, not redirected into a session.
+    assert r.status_code == 200, f"a redeemed code was accepted a second time: {r.status_code}"
+    assert "Entrar" not in r.headers.get("Location", "")
+    # And the code is still spent, in the store itself.
+    row = db.execute(
+        "SELECT consumed FROM auth_codes WHERE email = 'owner@x.test'"
+        " ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["consumed"] == 1, "the spent code is no longer marked consumed"
+    # No second device was trusted off the back of a spent code.
+    trusted = db.execute(
+        "SELECT COUNT(*) FROM trusted_devices WHERE email = 'owner@x.test'"
+    ).fetchone()[0]
+    assert trusted == 1, f"a spent code trusted a second device: {trusted} devices"
 
 
 def test_a_wrong_password_does_not_send_a_device_code(env):

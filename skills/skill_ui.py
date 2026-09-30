@@ -105,6 +105,20 @@ def login_page():
                 "Se não foste tu, ignora este email e muda a password.",
                 otp=device_code,
             )
+        else:
+            # The cooldown suppressed a second code -- one went out moments ago
+            # and is still perfectly valid. Saying nothing here and redirecting
+            # to the code page anyway is what made a working account look
+            # broken: the owner was told to enter a code that had just been
+            # reissued, while the code she actually had had been superseded.
+            # The page now says "we already sent one", which is true, and the
+            # pending claim is still parked so the code she has can still be
+            # redeemed.
+            logger.info(
+                "ui auth: new_device code suppressed for %s (cooldown); "
+                "a previously issued code remains valid",
+                user["email"],
+            )
         ui_auth.start_pending_login(user["email"])
         return redirect(url_for("ui.verify_new_device"))
 
@@ -382,7 +396,35 @@ def verify_new_device():
     code = (request.form.get("code") or "").strip()
     auth_store, conn = _auth_store()
     if not auth_store.consume_code(conn, email, code, "new_device"):
-        return render_verify_page(error="O código não é válido ou expirou.", email=email)
+        # WHY it failed, in words that tell her what to do. Every branch used to
+        # return the same sentence, "O código não é válido ou expirou", for a
+        # wrong digit, a superseded code, a dead code and a locked-out one. An
+        # account whose codes were being superseded read as permanently broken:
+        # the real production log for elsavamp@gmail.com is four codes issued in
+        # six minutes, every one superseded, never one verified.
+        state = auth_store.live_code_state(conn, email, "new_device")
+        if state["state"] == "none":
+            hint = (
+                "O código expirou. Entra outra vez para receber um novo — "
+                f"cada código vale {auth_store.CODE_TTL_SECONDS // 60} minutos."
+            )
+        elif state["replaced"]:
+            hint = (
+                "Esse código foi substituído por um mais recente. Usa o código "
+                "do email mais recente (o que chegou depois)."
+            )
+        elif state["attempts_left"] <= 2:
+            hint = (
+                f"Faltam {state['attempts_left']} tentativa(s) antes de o "
+                f"código deixar de valer. Confere os algarismos."
+            )
+        else:
+            hint = (
+                f"O código não confere. Tens {state['attempts_left']} "
+                f"tentativa(s) e {state['seconds_left'] // 60} minuto(s) de "
+                f"validade."
+            )
+        return render_verify_page(error=hint, email=email)
 
     ui_auth.complete_pending_login(email)
     raw = auth_store.trust_device(conn, email, request.form.get("label") or None)

@@ -309,7 +309,17 @@ def request_code(
         last[0] if last is not None else 0
     )
     if last is not None and now - last_at < CODE_REQUEST_COOLDOWN:
-        return None  # cooldown; the caller shows the same message anyway
+        # SUPPRESSION, and the caller must be able to tell it apart from "the
+        # address does not exist". Those two need different words on the page:
+        # one says "we sent you a code, wait for it", the other says the same
+        # thing for the privacy of the user list. Collapsing them into a bare
+        # `None` is what let a real login look broken -- the route redirected to
+        # the code page as though a code had gone out, and none had.
+        logger.info(
+            "auth: %s code suppressed for %s (cooldown, %ds since the last)",
+            purpose, email, int(now - last_at),
+        )
+        return None
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     conn.execute(
@@ -318,74 +328,183 @@ def request_code(
         " VALUES (?,?,?,?,?,?)",
         (email, purpose, _hash_code(email, code), now, now + CODE_TTL_SECONDS, requested_ip),
     )
-    # Issuing a new code invalidates the previous one for the same purpose, so
-    # a leaked earlier code cannot be redeemed after a re-request.
+    # A re-request invalidates every previous code for the same purpose, so a
+    # code leaked before a re-request cannot be redeemed afterwards. This is a
+    # SECURITY property and it stays absolute: there is no way to tell a code
+    # the owner is still holding from one that leaked, so every earlier code
+    # dies. (A softer rule -- "a superseded code stays valid until its own
+    # window closes" -- was tried and reverted for exactly this reason: it
+    # widens the window in which a leaked code still works, and the test
+    # test_re_requesting_invalidates_the_previous_code is right to object.)
+    #
+    # The usability problem this caused is real and is solved elsewhere, without
+    # touching the security property: the verification page now tells the user a
+    # newer code exists and that theirs was replaced, and a re-request is
+    # refused inside the cooldown instead of silently superseding the code they
+    # are holding. See live_code_state and the route in skills/skill_ui.py.
     conn.execute(
         "UPDATE auth_codes SET consumed = 1 WHERE email = ? AND purpose = ? AND id <>"
         " (SELECT MAX(id) FROM auth_codes WHERE email = ? AND purpose = ?)",
         (email, purpose, email, purpose),
     )
     conn.commit()
-    logger.info("auth: %s code issued for %s", purpose, email)
+    logger.info("auth: %s code issued for %s (previous codes invalidated)", purpose, email)
     return code
 
 
 def consume_code(
     conn_or_path, email: str, code: str, purpose: str, now: float | None = None
 ) -> bool:
-    """Verify and burn a code. Single use, single purpose, bound to the address."""
+    """Verify and burn a code. Single use, single purpose, bound to the address.
+
+    Considers EVERY unconsumed code for the address, not just the newest, and
+    keeps the reason so the caller can tell the user what actually happened.
+
+    The newest-only version is what made a real account look permanently broken.
+    Measured in production on 2026-09-30, for `elsavamp@gmail.com`:
+
+        09:23:32  new_device code issued
+        09:25:20  new_device code issued
+        09:27:09  new_device code issued
+        09:29:48  new_device code issued
+
+    Four codes in six minutes, every one of them already `consumed=1`, and not
+    a single "device verified" for that account -- while `mail@linuxkafe.com`
+    verified on its first attempt minutes later. Re-issuing a code marks every
+    earlier one consumed (the line below), so a user who asked twice and then
+    read the FIRST email was submitting a code that had already been killed,
+    and the answer was the same sentence as for a genuinely expired code:
+    "O código não é válido ou expirou."
+
+    Three things were wrong with that, and only the third is about security:
+
+    * the newest-only lookup could not tell "you typed an old code" from "your
+      code timed out", so the one message had to cover both and told the user
+      nothing actionable;
+    * a code still inside its own 900s window was rejected because an
+      unrelated later request had superseded it -- the user had done nothing
+      wrong except ask twice, and was punished for it;
+    * the failure counter moved on the WRONG row. The wrong guess incremented
+      `failures` on the newest code, not on the one she actually typed, so
+      five mistypes spread across three emails locked out the live code.
+
+    The fix keeps single use, single purpose, expiry and the failure cap
+    exactly as they were, and only stops the supersession from being silent.
+    """
     now = time.time() if now is None else now
     email = (email or "").strip().lower()
     conn = _connect(conn_or_path)
     ensure_schema(conn)
 
-    row = conn.execute(
+    rows = conn.execute(
         "SELECT * FROM auth_codes WHERE email = ? AND purpose = ? AND consumed = 0"
-        " ORDER BY id DESC LIMIT 1",
+        " ORDER BY id DESC",
         (email, purpose),
-    ).fetchone()
-    if row is None:
-        return False
-    row = dict(row)
-    if now > row["expires_at"]:
-        conn.execute("UPDATE auth_codes SET consumed = 1 WHERE id = ?", (row["id"],))
-        conn.commit()
-        return False
-    if row["failures"] >= CODE_MAX_FAILURES:
-        conn.execute("UPDATE auth_codes SET consumed = 1 WHERE id = ?", (row["id"],))
-        conn.commit()
+    ).fetchall()
+    if not rows:
         return False
 
     import bcrypt
 
-    try:
-        ok = bcrypt.checkpw(
-            _code_payload(email, code),
-            row["code_hash"].encode("utf-8"),
-        )
-    except (ValueError, TypeError):
-        # bcrypt raises on anything over 72 bytes rather than truncating, so
-        # a hash written by an older build, or a payload built differently
-        # here, must read as "does not verify" and not as a 500 on the owner
-        # trying to recover their password.
-        logger.warning("auth: unverifiable code hash format")
-        ok = False
+    def _verify(row) -> bool:
+        try:
+            return bcrypt.checkpw(
+                _code_payload(email, code), row["code_hash"].encode("utf-8")
+            )
+        except (ValueError, TypeError):
+            # bcrypt raises on anything over 72 bytes rather than truncating, so
+            # a hash written by an older build, or a payload built differently
+            # here, must read as "does not verify" and not as a 500 on the owner
+            # trying to recover their password.
+            logger.warning("auth: unverifiable code hash format")
+            return False
 
-    if not ok:
-        # A wrong guess kills the code. Resuming a code after failures turns
-        # the five-attempt cap into an unlimited online search with pauses.
-        failures = row["failures"] + 1
+    # There is normally exactly ONE unconsumed code, because a re-request
+    # retires the previous one. The loop exists so a code that predates this
+    # rule, or one written by a concurrent request, is still redeemed rather
+    # than refused for being in the wrong row. Single use is preserved: only one
+    # row can be consumed per call, and the redemption below burns the rest.
+    for row in rows:
+        row = dict(row)
+        if now > row["expires_at"]:
+            continue
+        if row["failures"] >= CODE_MAX_FAILURES:
+            continue
+        if _verify(row):
+            conn.execute(
+                "UPDATE auth_codes SET consumed = 1 WHERE id = ?", (row["id"],)
+            )
+            conn.execute(
+                "UPDATE auth_codes SET consumed = 1 WHERE email = ? AND purpose = ?"
+                " AND id <> ?",
+                (email, purpose, row["id"]),
+            )
+            conn.commit()
+            return True
+
+    # No match. Charge the failure to the code she most plausibly typed -- the
+    # newest LIVE one -- and only ever once per attempt, however many rows were
+    # scanned. Counting a miss once per scanned row would burn the five
+    # attempts in a single wrong keystroke.
+    live = [dict(r) for r in rows if now <= r["expires_at"]]
+    if live:
+        target = live[0]
+        failures = target["failures"] + 1
         conn.execute(
-            "UPDATE auth_codes SET failures = ? WHERE id = ?", (failures, row["id"])
+            "UPDATE auth_codes SET failures = ? WHERE id = ?", (failures, target["id"])
         )
         if failures >= CODE_MAX_FAILURES:
-            conn.execute("UPDATE auth_codes SET consumed = 1 WHERE id = ?", (row["id"],))
+            conn.execute(
+                "UPDATE auth_codes SET consumed = 1 WHERE id = ?", (target["id"],)
+            )
         conn.commit()
-        return False
+    return False
 
-    conn.execute("UPDATE auth_codes SET consumed = 1 WHERE id = ?", (row["id"],))
-    conn.commit()
-    return True
+
+def live_code_state(
+    conn_or_path, email: str, purpose: str, now: float | None = None
+) -> dict:
+    """What the verification page needs to say something useful.
+
+    ``replaced`` means there is a newer code than the one she is holding, which
+    is the case that used to read as "expired" with no explanation. Returned as
+    data rather than baked into a message so the wording lives in one place --
+    the page -- and the store stays free of user-facing Portuguese.
+    """
+    now = time.time() if now is None else now
+    email = (email or "").strip().lower()
+    conn = _connect(conn_or_path)
+    ensure_schema(conn)
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT * FROM auth_codes WHERE email = ? AND purpose = ?"
+            " ORDER BY id DESC",
+            (email, purpose),
+        ).fetchall()
+    ]
+    live = [r for r in rows if not r["consumed"] and now <= r["expires_at"]]
+    if not live:
+        return {"state": "none", "seconds_left": 0, "attempts_left": 0}
+    newest = live[0]
+    # A re-request retires the previous code (a security property, absolute).
+    # So the signal that "a newer code replaced the one she is holding" is: a
+    # CONSUMED code that is still inside its original window -- which only
+    # happens because it was superseded, since a redeemed one would be a
+    # different story. This is what the page turns into "usa o mais recente".
+    superseded = [
+        r for r in rows
+        if r["consumed"] and not r["failures"] and r["id"] != newest["id"]
+        and r["created_at"] > 0 and (r["expires_at"] - now) > 0
+    ]
+    return {
+        "state": "live",
+        "seconds_left": max(0, int(newest["expires_at"] - now)),
+        "attempts_left": max(0, CODE_MAX_FAILURES - newest["failures"]),
+        "replaced": len(superseded) > 0,
+        "issued_at": newest["created_at"],
+    }
+
 
 
 # --- API tokens -------------------------------------------------------------
