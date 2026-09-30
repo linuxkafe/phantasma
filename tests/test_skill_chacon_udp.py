@@ -173,14 +173,25 @@ def test_ui_places_the_balcony_light_in_the_sala():
 
     Two separate causes, and fixing only one leaves it invisible: the name
     carries no room word, so it fell through to "Geral" instead of "Sala".
+
+    The second assertion used to check the icon table for the bulb rule, which
+    conflated two unrelated things: the icon is chosen by `getDeviceIcon` and
+    the room by `getRoomName`, and the device being invisible was a ROOM
+    problem. The icons were replaced by SVG on 2026-09-29 and the string this
+    test grepped for stopped existing, which is why it is written against the
+    two functions separately now -- and it still fails if the room mapping
+    regresses, which is the part that ever mattered here.
     """
     from skills.skill_ui import handle_request
 
     page = handle_request()
-    assert 'n.includes("balcao") || n.includes("balcão")' in page
-    # The icon must stay the existing bulb rule rather than the default ⚡,
-    # which is what a generic plug would get.
-    assert "n.includes('luz')||n.includes('candeeiro')" in page
+    # The room mapping: this is the one that made the tile invisible.
+    assert 'n.includes("balcao") || n.includes("balcão")' in page, (
+        "the balcony no longer maps to the Sala room, so its tile disappears"
+    )
+    # The icon: SVG now, and a bulb for a light.
+    assert "function getDeviceIcon(name)" in page
+    assert "icon('luz')" in page, "a light no longer gets the bulb icon"
 
 
 def test_get_devices_lists_the_chacon_plug(monkeypatch):

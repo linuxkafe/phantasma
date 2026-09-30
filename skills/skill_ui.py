@@ -734,14 +734,20 @@ def _viewer_is_admin() -> bool:
 # home screen, not two taps deep.
 #
 # The voice button is one control, not two. The compact-view toggle that used to
-# sit here was removed on owner decision (2026-09-29): on a phone the vertical
-# layout already shows every device without a second layout mode, and a
-# persistent toggle only offered a way to make the page worse.
-_VOICE_BAR_CONTROLS = (
-    '<button id="voice-btn" type="button" class="nav-voice"'
-    ' aria-label="Falar um comando" title="Falar um comando">'
-    '<span class="voice-ico" aria-hidden="true"></span></button>'
-)
+# The voice button used to be injected into the navigation bar here. It is now
+# in the dock, at the bottom of the phone, for two measured reasons: the bar is
+# a menu that closes, and the chat pill that sits bottom-right was painted over
+# the microphone -- `elementFromPoint` at the mic's centre returned the pill, so
+# the mic could not be tapped at all.
+#
+# Two microphones would also be a duplicated element id, which is invalid HTML
+# and made `getElementById` return whichever came first.
+#
+# The compact-view toggle that also used to sit here was removed on owner
+# decision (2026-09-29): on a phone the vertical layout already shows every
+# device without a second layout mode, and a persistent toggle only offered a
+# way to make the page worse.
+_VOICE_BAR_CONTROLS = ""
 
 
 def voice_endpoint():
@@ -1169,19 +1175,6 @@ def handle_request():
                 /* A drawn microphone rather than an emoji, so it matches the
                    rest of the bar and does not inherit the device tiles'
                    grayscale filter. */
-                .nav-voice .voice-ico {
-                    width: 14px; height: 14px; display: block;
-                    background: currentColor;
-                    /* capsule + stand, from one border-radius trick */
-                    border-radius: 7px 7px 4px 4px;
-                    position: relative;
-                }
-                .nav-voice .voice-ico::after {
-                    content: ''; position: absolute;
-                    left: 50%; bottom: -6px; transform: translateX(-50%);
-                    width: 4px; height: 6px; background: currentColor;
-                    border-radius: 0 0 2px 2px;
-                }
                 /* Recording: the border and the glyph go red, because the
                    microphone is HOT and the user must be able to tell at a
                    glance whether the house is listening. A colour change alone
@@ -1216,6 +1209,27 @@ def handle_request():
                    only the badge box was missing, so the glyph sat loose on the
                    tile background. Styled here rather than wrapped in the JS
                    builder (line 540) so the DOM contract is untouched. */
+                /* The SVG fills the badge and inherits the tile's colour, so the
+                   grayscale filter for "off" applies to the glyph exactly as it
+                   applied to the emoji. Sized in the same units as the badge so
+                   it cannot drift from it, and `display:block` because an
+                   inline SVG leaves a baseline gap inside a flex box. */
+                .device-icon svg { width: 62%; height: 62%; display: block; }
+                /* The microphone, drawn. The old version was a CSS capsule plus
+                   a `::after` stand, which read as a blob at 16px and was not an
+                   icon at all -- the owner asked for an icon and a glyph. */
+                .mic-svg { width: 22px; height: 22px; display: block; }
+                #voice-btn-chat .mic-svg { width: 19px; height: 19px; }
+                .ia-avatar svg { width: 62%; height: 62%; display: block; }
+                /* Explicit, not a percentage. `#brand-logo` is sized by its
+                   font-size and has no width of its own, so 62% of nothing is
+                   0x0 -- measured: the brand rendered at 0x0, which looks exactly
+                   like "the SVG failed to load". */
+                #brand-logo svg { width: 1em; height: 1em; display: block; }
+                #main-weather-icon svg, #main-moon-icon svg {
+                    width: 1em; height: 1em; display: block;
+                }
+                #big-ghost svg { width: 1em; height: 1em; display: block; }
                 .device-icon {
                     display: flex; align-items: center; justify-content: center;
                     flex: 0 0 auto;
@@ -1604,6 +1618,48 @@ def handle_request():
                     #header-strip { display: contents; }
                     #brand { flex: 0 0 auto; }
 
+                    /* THE BURGER GOES TO THE TOP, on owner instruction, and to
+                       the top-RIGHT: that is the corner a right thumb reaches on
+                       a phone held in one hand, and it is where every other app
+                       puts it. It was inside the brand strip, bottom-right, which
+                       is also fine -- except it shared the bottom band with the
+                       dock and the two competed for the same corner. Fixed to the
+                       top of the viewport, out of the brand's way. */
+                    .nav-bar {
+                        position: fixed; top: 8px; right: 8px; z-index: 65;
+                        margin: 0; display: flex; align-items: center;
+                    }
+                    #nav-menu {
+                        /* The menu was 306px tall -- 46vh -- which wrapped the
+                           sign-out into a second flex column and pushed it to
+                           x=365, off a 375px screen. Every entry is a single row
+                           and the panel scrolls if the list is ever longer. */
+                        max-height: calc(100vh - 24px);
+                        overflow-y: auto; align-content: flex-start;
+                        width: min(78vw, 320px);
+                    }
+                    #nav-menu .nav-group { flex-direction: column; align-items: stretch; width: 100%; }
+                    #nav-menu .nav-brand { display: none; }
+                    #nav-menu .nav-spacer, #nav-menu .nav-sep { display: none; }
+                    #nav-menu .nav-link { width: 100%; min-height: 48px; }
+
+                    /* ALL TILES BY DEFAULT, on owner instruction. The rooms were
+                       laid out in a ROW with `flex-shrink: 0`, so the strip
+                       measured 857px of content inside a 375px box with
+                       `overflow-x: hidden`: 7 of 17 switches were painted outside
+                       the edge and unreachable, while `scrollWidth == innerWidth`
+                       so the "no side scroll" test passed. Rooms stack, tiles
+                       wrap inside a room, and the strip scrolls vertically only. */
+                    #devices { flex-direction: column; align-items: stretch; }
+                    .device-room {
+                        display: block; width: 100%; margin-right: 0;
+                        border-right: 0; padding-right: 0;
+                    }
+                    .room-content {
+                        display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start;
+                    }
+                    .room-header { display: block; margin: 10px 0 6px; }
+
                     /* THE PRIORITY: the tiles get the screen. min-height:0 and
                        flex:1 1 auto so the strip takes what is left and scrolls
                        INSIDE itself. No max-height cap -- the 22vh cap is what
@@ -1645,28 +1701,73 @@ def handle_request():
                     #main.open #chat-log { padding-top: 26px; }
                     #chat-input-box { flex: 0 0 auto; padding-right: 12px; }
 
-                    /* THE OPENER IS OUTSIDE #main, so hiding the panel cannot
-                       hide the control that opens it. Measured failure: the tab
-                       was at y=1076 in a 667px viewport, because it inherited
-                       `visibility: hidden` from the panel it was supposed to
-                       open. Fixed to the bottom, in the thumb arc, and above
-                       the open panel so there is always a visible way out that
-                       is not a gesture. */
+                    /* ---- THE DOCK: one prominent bar, bottom of the screen ----
+                       Pull it up to open the conversation, push it down to get
+                       back to the tiles. Full width, because the ask was a bar
+                       and not a pill, and because a 71px pill in the corner is
+                       something a thumb misses while a 60px band across the
+                       bottom is not. The microphone sits inside it, so "talk to
+                       the house" and "read the conversation" are the same place
+                       and the two cannot overlap. */
+                    #chat-dock {
+                        position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+                        display: flex; align-items: stretch; gap: 0;
+                        background: #141414; border-top: 1px solid #2e2e2e;
+                        padding-bottom: env(safe-area-inset-bottom);
+                        box-shadow: 0 -4px 18px rgba(0,0,0,0.55);
+                    }
                     #chat-tab {
-                        position: fixed; right: 12px;
-                        bottom: max(12px, env(safe-area-inset-bottom));
-                        z-index: 60; display: inline-flex; align-items: center; gap: 6px;
-                        background: #181818; color: #eee; border: 1px solid #333;
-                        border-radius: 999px; padding: 12px 18px; font-size: 0.85rem;
-                        cursor: pointer; box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+                        flex: 1 1 auto; display: flex; flex-direction: column;
+                        align-items: center; justify-content: center; gap: 4px;
+                        min-height: 60px; padding: 8px 12px;
+                        background: transparent; border: 0; color: #ddd;
+                        font-size: 0.8rem; letter-spacing: 0.02em; cursor: pointer;
+                        /* The handle you actually grab. Wide, high-contrast, and
+                           the visual top of the bar, because the bar is the
+                           affordance and the word "Chat" is only its label. */
+                        touch-action: none;
                     }
-                    /* Open: it leaves the composer alone and becomes "close". A
-                       full-screen sheet with no visible opener is a trap. */
-                    body.chat-open #chat-tab {
-                        bottom: auto; top: 10px; right: 10px; padding: 8px 14px;
-                        background: #2a2a2a; border-color: #555;
+                    #dock-grip {
+                        display: block; width: 56px; height: 5px; border-radius: 3px;
+                        background: #6b6b6b; box-shadow: 0 0 0 1px #0a0a0a;
                     }
-                    body.chat-open #chat-input-box { padding-right: 78px; }
+                    #dock-label { color: #cfcfcf; }
+                    #chat-dock .nav-voice {
+                        width: 60px; min-width: 60px; align-self: stretch;
+                        margin: 0; border: 0; border-left: 1px solid #2e2e2e;
+                        border-radius: 0; background: #1c1c1c; color: #eee;
+                    }
+                    #chat-dock                    #chat-dock                    /* Open: the dock is the way back, and it moves out of the
+                       way of the composer rather than hiding under it. */
+                    body.chat-open #chat-dock { z-index: 70; }
+                    body.chat-open #chat-tab { color: #fff; }
+                    body.chat-open #dock-grip { background: #9a9a9a; }
+                    /* Room for the dock while it is on screen. */
+                    body:not(.chat-open) #chat-log { padding-bottom: 0; }
+
+                    /* ---- THE PERSIANA (roller blind) ----
+                       The panel unrolls downward from its own top edge rather
+                       than sliding up as a rectangle. Implemented with
+                       clip-path, because a translate alone reads as a sheet
+                       moving; an edge that travels down the screen while the
+                       content beneath it is revealed reads as a blind being
+                       pulled down, which is what was asked for. */
+                    #main {
+                        clip-path: inset(0 0 100% 0);
+                        opacity: 0.98;
+                    }
+                    #main.open {
+                        animation: persiana-abrir 0.26s ease-out both;
+                    }
+                    @keyframes persiana-abrir {
+                        from { clip-path: inset(0 0 100% 0); }
+                        to   { clip-path: inset(0 0 0 0); }
+                    }
+                    @keyframes persiana-fechar {
+                        from { clip-path: inset(0 0 0 0); }
+                        to   { clip-path: inset(0 0 100% 0); }
+                    }
+                    #main.closing { animation: persiana-fechar 0.2s ease-in both; }
 
                     /* The drag handle. A sheet you can pull down, which is the
                        gesture the owner asked for and the one a phone user
@@ -1693,37 +1794,27 @@ def handle_request():
                         justify-content: center; cursor: pointer; padding: 0;
                     }
                     #voice-btn-chat:hover { border-color: #555; }
-                    #voice-btn-chat .voice-ico {
-                        width: 13px; height: 13px; display: block;
-                        background: currentColor; border-radius: 7px 7px 4px 4px;
-                        position: relative;
-                    }
-                    #voice-btn-chat .voice-ico::after {
-                        content: ''; position: absolute; left: 50%; bottom: -5px;
-                        transform: translateX(-50%); width: 3px; height: 5px;
-                        background: currentColor; border-radius: 0 0 2px 2px;
-                    }
                     #voice-btn-chat.recording { border-color: #ef4444; color: #ef4444; }
                     #voice-btn-chat[disabled] { opacity: 0.4; cursor: not-allowed; }
                 }
               </style>
     </head>
     <body>
-        <div id="easter-egg-layer"><div id="big-ghost">👻</div></div>
+        <div id="easter-egg-layer"><div id="big-ghost"><svg class='ghost-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z'/><circle cx='9.5' cy='11' r='1.2'/><circle cx='14.5' cy='11' r='1.2'/></svg></div></div>
 
           <div id="header-strip">
               <div id="brand" onclick="triggerEasterEgg()">
                   <div id="sky-stage">
                       <div class="sky-element" title="Meteorologia">
-                          <div id="main-weather-icon">☁️</div>
+                          <div id="main-weather-icon"><svg class='ghost-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z'/></svg></div>
                           <div id="main-weather-temp">--°</div>
                       </div>
                       <div class="sky-element" title="Fase Lunar">
-                          <div id="main-moon-icon">🌑</div>
+                          <div id="main-moon-icon"></div>
                       </div>
                   </div>
                   <div id="ghost-stage">
-                      <div id="brand-logo" class="ghost-normal">👻</div>
+                      <div id="brand-logo" class="ghost-normal"><svg class='ghost-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z'/><circle cx='9.5' cy='11' r='1.2'/><circle cx='14.5' cy='11' r='1.2'/></svg></div>
                       <div id="aqi-indicator" title="Qualidade do Ar"></div>
                   </div>
                   <div id="brand-name">pHantasma</div>
@@ -1774,14 +1865,33 @@ def handle_request():
                      while reading it. -->
                 <button id="voice-btn-chat" type="button"
                         aria-label="Enviar mensagem de voz" title="Mensagem de voz">
-                    <span class="voice-ico" aria-hidden="true"></span>
+                    <svg class='mic-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='9' y='2.5' width='6' height='11' rx='3'/><path d='M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7'/></svg>
                 </button>
                 <button id="chat-send">Enviar</button>
             </div>
         </div>
-        <!-- Sibling of #main, and outside it on purpose. See above. -->
-        <button id="chat-tab" type="button" aria-controls="main"
-                aria-expanded="false" aria-label="Abrir conversa">Chat</button>
+        <!-- THE DOCK. One prominent bar at the bottom of a phone: pull it up (or
+             tap it) and the conversation unrolls over the screen; push it down
+             and the tiles come back. It replaces the small pill that used to sit
+             bottom-right, which was both too easy to miss and sitting on top of
+             the microphone -- measured: the element at the centre of the
+             microphone was the pill, so the mic could not be tapped.
+
+             The microphone lives HERE, in the dock, not in the navigation bar.
+             Two reasons, both measured: the nav bar is a menu that closes, and
+             the pill covered the mic. A voice control that is only reachable
+             while some other panel is open is not a voice control. -->
+        <div id="chat-dock" role="group" aria-label="Conversa e voz">
+            <button id="chat-tab" type="button" aria-controls="main"
+                    aria-expanded="false" aria-label="Abrir conversa">
+                <span id="dock-grip" aria-hidden="true"></span>
+                <span id="dock-label">Chat</span>
+            </button>
+            <button id="voice-btn" type="button" class="nav-voice"
+                    aria-label="Falar com o Phantasma" title="Falar com o Phantasma">
+                <svg class='mic-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='9' y='2.5' width='6' height='11' rx='3'/><path d='M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7'/></svg>
+            </button>
+        </div>
         <!-- The grab handle, only while the panel is open. Dragging it down
              dismisses the panel, which is the gesture the owner asked for and
              the one a phone user already expects from a full-screen sheet. -->
@@ -1805,19 +1915,82 @@ def handle_request():
             }
 
             // --- UI HELPERS ---
-            function getDeviceIcon(name) {
-                const n = name.toLowerCase();
-                if (n.includes('aspirador')||n.includes('robot')) return '🤖';
-                if (n.includes('luz')||n.includes('candeeiro')) return '💡';
-                if (n.includes('exaustor')||n.includes('ventoinha')) return '💨';
-                if (n.includes('desumidificador')) return '💧';
-                if (n.includes('gás')||n.includes('fumo')) return '🔥';
-                if (n.includes('carro')||n.includes('carrinha')||n.includes('veículo')) return '🚗';
-                if (n.includes('forno')) return '♨️';
-                if (n.includes('tomada')||n.includes('ficha')) return '⚡';
-                return '⚡';
+            /* Device icons as inline SVG, not emoji.
+               Emoji were replaced on owner instruction (2026-09-29), and the
+               reasons are not only taste:
+
+               * They render differently on every platform. The same light was a
+                 yellow bulb on iOS, a white bulb on Android and a flat glyph on
+                 desktop, so the page did not look like itself across devices.
+               * They ignore the tile's own `filter: grayscale(100%)`, so a
+                 device that is OFF still shouted its colour while the switch
+                 beside it said off.
+               * A single catch-all `⚡` was the answer for anything unrecognised
+                 -- `porta`, `ar`, `camera` all rendered as a lightning bolt, so
+                 the icon was actively lying about the device. The fallback here
+                 is a plain device outline: honest and neutral.
+               * Emoji are one to two font-em wide and shift with the system
+                 font, which is why the brand measured 7.7 x 19.2px for a 2.5rem
+                 badge. A 24x24 viewBox does not move.
+
+               `currentColor` throughout, so the icon inherits the tile state and
+               the grayscale filter applies to it like to the tile. */
+            const SVG = {
+                luz: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.3 1 2.1h5c0-.8.4-1.6 1-2.1A6 6 0 0 0 12 3Z"/>',
+                aspirador: '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
+                exaustor: '<circle cx="12" cy="12" r="2.5"/><path d="M12 9.5c0-4 1-6 4-6-1 3-1 6-4 6ZM14.5 12c4 0 6 1 6 4-3-1-6-1-6-4ZM12 14.5c0 4-1 6-4 6 1-3 1-6 4-6ZM9.5 12c-4 0-6-1-6-4 3 1 6 1 6 4Z"/>',
+                desumidificador: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11Z"/>',
+                gas: '<path d="M12 2c2 4-1 5 1 8 1.5 2.5 4 3 4 6a5 5 0 0 1-10 0c0-2 1-3 1-5 1 1.5 2 1.5 2 0 .5-3-1-5 2-9Z"/>',
+                carro: '<path d="M5 11l1.5-4.5A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.5L19 11v6h-2v-2H7v2H5v-6Z"/><circle cx="7.5" cy="13" r="1"/><circle cx="16.5" cy="13" r="1"/>',
+                forno: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/><rect x="7" y="12" width="10" height="5" rx="1"/>',
+                tomada: '<path d="M7 3v6M17 3v6"/><rect x="4" y="9" width="16" height="12" rx="3"/><path d="M10 14h4"/>',
+                sensor: '<path d="M12 3v3M5.6 5.6l2.1 2.1M18.4 5.6l-2.1 2.1"/><circle cx="12" cy="12" r="2.5"/><path d="M3.5 12a8.5 8.5 0 0 1 17 0M6.5 15.5a5.5 5.5 0 0 1 11 0"/>',
+                /* The honest answer for anything unrecognised. */
+                dispositivo: '<rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M9 7h6M10 17h4"/>',
+            };
+            /* Weather and moon, as SVG. Same reasons as the device icons: they
+               rendered differently per platform, and `innerText` on an emoji is
+               the only reason the moon ever appeared at all. */
+            const _wrap = (inner) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + inner + '</svg>';
+            const AQI = {
+                good: _wrap('<path d="M12 3c5 3 7 7 7 10a7 7 0 0 1-14 0c0-3 2-7 7-10Z"/><path d="M12 20V9"/>'),
+                moderate: _wrap('<circle cx="12" cy="12" r="8"/><path d="M8 14h.01M16 14h.01M9 17h.01M15 17h.01"/>'),
+                bad: _wrap('<circle cx="12" cy="12" r="8"/><path d="M9 10h.01M15 10h.01"/><path d="M8.5 15.5c2 2 5 2 7 0"/>'),
+            };
+            const WEATHER = {
+                sun: _wrap('<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/>'),
+                partly: _wrap('<circle cx="9" cy="9" r="3.2"/><path d="M9 2.6v1.8M2.6 9h1.8M4.6 4.6l1.3 1.3"/><path d="M8 20h9a3.5 3.5 0 0 0 0-7 5 5 0 0 0-9.5 1.5A2.8 2.8 0 0 0 8 20Z"/>'),
+                rain: _wrap('<path d="M7 15a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 6.2 3.9 3.9 0 0 1 17 15H7Z"/><path d="M9 18l-1 3M13 18l-1 3M17 18l-1 3"/>'),
+                fog: _wrap('<path d="M4 10h16M6 14h12M4 18h16"/>'),
+            };
+            const MOON = {
+                new: _wrap('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16Z" fill="currentColor" stroke="none"/>'),
+                crescent: _wrap('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16 10 10 0 0 1 0-16Z" fill="currentColor" stroke="none"/>'),
+                full: _wrap('<circle cx="12" cy="12" r="8" fill="currentColor" stroke="none"/>'),
+                waning: _wrap('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16 10 10 0 0 0 0-16Z" fill="currentColor" stroke="none"/>'),
+            };
+            const GHOST_SVG = '<svg class=&apos;ghost-svg&apos; viewBox=&apos;0 0 24 24&apos; fill=&apos;none&apos; stroke=&apos;currentColor&apos; stroke-width=&apos;1.6&apos; stroke-linecap=&apos;round&apos; stroke-linejoin=&apos;round&apos; aria-hidden=&apos;true&apos;><path d=&apos;M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z&apos;/><circle cx=&apos;9.5&apos; cy=&apos;11&apos; r=&apos;1.2&apos;/><circle cx=&apos;14.5&apos; cy=&apos;11&apos; r=&apos;1.2&apos;/></svg>';
+            const CLOUD_SVG = '<svg class=&apos;ghost-svg&apos; viewBox=&apos;0 0 24 24&apos; fill=&apos;none&apos; stroke=&apos;currentColor&apos; stroke-width=&apos;1.6&apos; stroke-linecap=&apos;round&apos; stroke-linejoin=&apos;round&apos; aria-hidden=&apos;true&apos;><path d=&apos;M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z&apos;/></svg>';
+
+            function icon(kind) {
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                     + 'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" '
+                     + 'aria-hidden="true" focusable="false">' + SVG[kind] + '</svg>';
             }
-            
+            function getDeviceIcon(name) {
+                const n = (name || '').toLowerCase();
+                if (n.includes('aspirador') || n.includes('robot') || n.includes('aspir')) return icon('aspirador');
+                if (n.includes('luz') || n.includes('candeeiro') || n.includes('lamp')) return icon('luz');
+                if (n.includes('exaustor') || n.includes('ventoinha') || n.includes('ventilador')) return icon('exaustor');
+                if (n.includes('desumidificador') || n.includes('humidific')) return icon('desumidificador');
+                if (n.includes('gás') || n.includes('gas') || n.includes('fumo') || n.includes('dete')) return icon('gas');
+                if (n.includes('carro') || n.includes('carrinha') || n.includes('veículo') || n.includes('carregador')) return icon('carro');
+                if (n.includes('forno') || n.includes('oven')) return icon('forno');
+                if (n.includes('tomada') || n.includes('ficha') || n.includes('chuveiro') || n.includes('termo')) return icon('tomada');
+                if (n.includes('sensor') || n.includes('temperatura') || n.includes('humidade')) return icon('sensor');
+                return icon('dispositivo');
+            }
+
             function getRoomName(name) {
                 const n = name.toLowerCase();
                 if (n.includes("wc") || n.includes("banho")) return "WC";
@@ -1844,7 +2017,7 @@ def handle_request():
             function showTypingIndicator() {
                 if (document.getElementById('typing-indicator-row')) return;
                 const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'msg-row ia'; 
-                const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻';
+                const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerHTML = GHOST_SVG;
                 const bubble = document.createElement('div'); bubble.className = 'typing-indicator'; 
                 bubble.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
                 row.append(avatar, bubble); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
@@ -2078,7 +2251,7 @@ def handle_request():
             function addToChatLog(text, sender = 'ia') {
                 removeTypingIndicator(); 
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
-                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerText = '👻'; row.appendChild(avatar); }
+                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerHTML = GHOST_SVG; row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 // Stable per-message id. Without it `message_id` was always the
                 // empty string, so the endpoint's 30s rate limit keyed on
@@ -2129,7 +2302,12 @@ def handle_request():
                 const container = getOrCreateRoomContainer(getRoomName(device));
                 const div = document.createElement('div'); div.className = 'device-toggle'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'toggle';
-                const icon = document.createElement('span'); icon.className = 'device-icon'; icon.innerText = getDeviceIcon(device);
+                const icon = document.createElement('span'); icon.className = 'device-icon';
+                /* innerHTML, not innerText. The icon is markup now, and with
+                   innerText the browser renders the <svg> source as visible text
+                   inside the tile. Nothing warns you about that: the string is
+                   valid, the element exists, and the badge simply shows code. */
+                icon.innerHTML = getDeviceIcon(device);
                 const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
                 const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
                 input.onchange = () => {
@@ -2241,27 +2419,56 @@ def handle_request():
                     }
                     const today = data.forecast[0];
                     let wType = today.idWeatherType;
-                    let wIcon = '☁️';
+                    let wIcon = CLOUD_SVG;
                     let ghostClass = 'ghost-normal';
-                    if (wType === 1) { wIcon = '☀️'; ghostClass = 'ghost-sun'; }
-                    else if (wType <= 5) { wIcon = '⛅'; ghostClass = 'ghost-normal'; }
-                    else if (wType <= 15) { wIcon = '🌧️'; ghostClass = 'ghost-rain'; }
-                    else if (wType >= 16) { wIcon = '🌫️'; ghostClass = 'ghost-normal'; }
-                    document.getElementById('main-weather-icon').innerText = wIcon;
+                    if (wType === 1) { wIcon = WEATHER.sun; ghostClass = 'ghost-sun'; }
+                    else if (wType <= 5) { wIcon = WEATHER.partly; ghostClass = 'ghost-normal'; }
+                    else if (wType <= 15) { wIcon = WEATHER.rain; ghostClass = 'ghost-rain'; }
+                    else if (wType >= 16) { wIcon = WEATHER.fog; ghostClass = 'ghost-normal'; }
+                    document.getElementById('main-weather-icon').innerHTML = wIcon;
                     document.getElementById('main-weather-temp').innerText = `${Math.round(today.tMax)}°`;
                     const ghost = document.getElementById('brand-logo');
                     ghost.className = ''; ghost.classList.add(ghostClass);
-                    let mIcon = '🌑'; const moon = data.moon_phase || "";
-                    if (moon.includes("Crescente")) mIcon = '🌓'; else if (moon.includes("Cheia")) mIcon = '🌕'; else if (moon.includes("Minguante")) mIcon = '🌗';
-                    document.getElementById('main-moon-icon').innerText = mIcon;
+                    /* The moon as a disc with a terminator, not a face. An empty
+                       string was worse than the emoji it replaced: the phase
+                       element then rendered nothing at all, which is a silent
+                       loss of a reading rather than a change of style. */
+                    let mIcon = MOON.new; const moon = data.moon_phase || "";
+                    if (moon.includes("Crescente")) mIcon = MOON.crescent;
+                    else if (moon.includes("Cheia")) mIcon = MOON.full;
+                    else if (moon.includes("Minguante")) mIcon = MOON.waning;
+                    document.getElementById('main-moon-icon').innerHTML = mIcon;
                     document.querySelector('.sky-element[title="Fase Lunar"]').title = moon || "Fase Lunar";
                     const aqi = data.aqi; const aqiEl = document.getElementById('aqi-indicator');
                     if (aqi !== undefined) {
-                        if (aqi <= 50) { aqiEl.innerText = '🍃'; aqiEl.title = `AQI ${aqi} (Bom)`; }
-                        else if (aqi <= 100) { aqiEl.innerText = '😷'; aqiEl.title = `AQI ${aqi} (Moderado)`; }
-                        else { aqiEl.innerText = '☠️'; aqiEl.title = `AQI ${aqi} (Mau)`; }
+                        /* Air quality, as SVG and not emoji. A leaf for "good"
+                           and a skull for "bad" is a cartoon reading of a number
+                           that matters, and the emoji rendered differently per
+                           platform for the same measurement. */
+                        if (aqi <= 50) { aqiEl.innerHTML = AQI.good; aqiEl.title = `AQI ${aqi} (Bom)`; }
+                        else if (aqi <= 100) { aqiEl.innerHTML = AQI.moderate; aqiEl.title = `AQI ${aqi} (Moderado)`; }
+                        else { aqiEl.innerHTML = AQI.bad; aqiEl.title = `AQI ${aqi} (Mau)`; }
                     } else { aqiEl.innerText = ''; }
                 } catch(e) {}
+            }
+
+            /* Fetch every device's state once, and return how long it took.
+
+               Extracted because the states used to arrive only when the
+               5-second poll first fired: every switch was `disabled` and inert
+               for the first 5.29s of every page load. A person cannot throw a
+               switch they have not waited for, and a UI that is visibly
+               assembled but not yet usable reads as broken.
+               Also wrapped in its own try/catch: `loadDevicesStructure` has one
+               around the whole body, and a throw inside the poll setup used to
+               be swallowed silently, taking the first update with it. */
+            async function refreshDeviceStates() {
+                const t0 = performance.now();
+                await Promise.all(ALL_DEVICES_ELEMENTS.map(i =>
+                    i.type === 'toggle' ? fetchDeviceStatus(i) : fetchSensorStatus(i)
+                ));
+                updateHomePower();
+                return performance.now() - t0;
             }
 
             async function loadDevicesStructure() {
@@ -2271,17 +2478,17 @@ def handle_request():
                     if (data.devices?.status) data.devices.status.forEach(d => allDevices.push({name: d, type: 'sensor'}));
                     if (data.devices?.toggles) data.devices.toggles.forEach(d => allDevices.push({name: d, type: 'toggle'}));
                     const grouped = {};
-                    ROOMS_ORDER.forEach(r => grouped[r] = []); 
+                    ROOMS_ORDER.forEach(r => grouped[r] = []);
                     allDevices.forEach(d => grouped[getRoomName(d.name)].push(d));
                     for (const room of ROOMS_ORDER) {
                         const devs = grouped[room];
                         if (devs && devs.length > 0) devs.forEach(d => { if (d.type === 'sensor') createSensor(d.name); else createToggle(d.name); });
                     }
                     updateHomePower(); updateWeather();
-                    setInterval(() => {
-                        ALL_DEVICES_ELEMENTS.forEach(i => i.type==='toggle'?fetchDeviceStatus(i):fetchSensorStatus(i));
-                        updateHomePower(); 
-                    }, 5000);
+                    /* Prime the states before the first paint settles, so the
+                       switches are live when they are first seen. */
+                    await refreshDeviceStates();
+                    setInterval(refreshDeviceStates, 5000);
                     setInterval(updateWeather, 600000);
                 } catch (e) {}
             }
@@ -2369,6 +2576,39 @@ def handle_request():
                     chatPanel.style.transform = '';
                     if (dragMoved > innerHeight / 3) closeChat();
                 };
+                /* PULL UP TO OPEN. The dock is the bar, so the bar is the
+                   handle: dragging it upwards opens the conversation and the
+                   panel follows the finger, the same direct manipulation as
+                   closing it. Half the gesture is not needed -- the dock is only
+                   ever dragged to open, so a third of the height is enough and a
+                   short but deliberate pull counts. */
+                const dock = document.getElementById('chat-dock');
+                if (dock) {
+                    let upY = null, upMoved = 0;
+                    const upStart = (e) => {
+                        if (chatPanel.classList.contains('open')) return;
+                        if (e.target && e.target.id === 'voice-btn') return;
+                        upY = (e.touches ? e.touches[0].clientY : e.clientY);
+                        upMoved = 0;
+                    };
+                    const upMove = (e) => {
+                        if (upY === null) return;
+                        const y = (e.touches ? e.touches[0].clientY : e.clientY);
+                        const dy = upY - y;          /* upwards is positive */
+                        if (dy < 0) return;
+                        upMoved = dy;
+                        if (e.cancelable) e.preventDefault();
+                    };
+                    const upEnd = () => {
+                        if (upY === null) return;
+                        upY = null;
+                        if (upMoved > 60) openChat();
+                    };
+                    dock.addEventListener('touchstart', upStart, {passive: true});
+                    dock.addEventListener('touchmove', upMove, {passive: false});
+                    dock.addEventListener('touchend', upEnd);
+                }
+
                 if (grip) {
                     grip.addEventListener('touchstart', dragStart, {passive: true});
                     grip.addEventListener('touchmove', dragMove, {passive: false});
@@ -2416,7 +2656,6 @@ def handle_request():
             /* After the device tiles are in the DOM, not before -- measuring
                scrollHeight on an empty container would always report "fits". */
             setTimeout(updateDeviceScrollHint, 300);
-            initVoice();
             /* ============ VOICE (phone) ============
                Press to talk, release to send. One round trip: the browser
                decodes its own recording to 16 kHz mono WAV, posts it, and gets
@@ -2615,6 +2854,18 @@ def handle_request():
                     voiceStatus.classList.remove('show');
                 }));
             }
+
+            /* initVoice() LAST, and deliberately: it used to be called near the
+               top of this script while `const voiceBtn` was declared twenty
+               lines below it, which is a temporal dead zone access -- a
+               ReferenceError thrown before any listener was attached. The page
+               rendered two microphones, neither disabled, neither doing
+               anything, and the status element never entered the DOM. Function
+               declarations hoist, so `typeof initVoice === 'function'` was true
+               and the code looked present.
+
+               Called from the end, after every binding it touches exists. */
+            initVoice();
         </script>
         <script>__SHARED_JS__</script>
     </body>

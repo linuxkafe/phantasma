@@ -478,7 +478,7 @@ def _build_nav_menu(
     if is_admin:
         parts.append(
             f'    <a href="/admin/brain" class="nav-link{" active" if brain_active else ""}">'
-            f"🧠 {t('nav.brain', lang)}</a>"
+            f'<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.15em"><path d="M9.5 4a2.5 2.5 0 0 0-2.5 2.5A2 2 0 0 0 5 8.5v2A2.5 2.5 0 0 0 7 13v2.5A2.5 2.5 0 0 0 9.5 18H11V4H9.5Z"/><path d="M14.5 4a2.5 2.5 0 0 1 2.5 2.5A2 2 0 0 1 19 8.5v2a2.5 2.5 0 0 1-2 2.5v2.5A2.5 2.5 0 0 1 14.5 18H13V4h1.5Z"/></svg> {t("nav.brain", lang)}</a>'
         )
     for endpoint, key, fallback, url in links:
         # Perfil is for every signed-in user; the config and users pages are
@@ -881,7 +881,7 @@ DASHBOARD_TEMPLATE = (
             <div style="color: var(--muted); font-size: 0.875rem; margin-top: 0.25rem;">Chaves de Configuração</div>
         </div>
         <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; text-align: center;">
-            <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🧠</div>
+            <div style="font-size: 2.5rem; margin-bottom: 0.5rem;"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.15em"><path d="M9.5 4a2.5 2.5 0 0 0-2.5 2.5A2 2 0 0 0 5 8.5v2A2.5 2.5 0 0 0 7 13v2.5A2.5 2.5 0 0 0 9.5 18H11V4H9.5Z"/><path d="M14.5 4a2.5 2.5 0 0 1 2.5 2.5A2 2 0 0 1 19 8.5v2a2.5 2.5 0 0 1-2 2.5v2.5A2.5 2.5 0 0 1 14.5 18H13V4h1.5Z"/></svg></div>
             <div style="font-size: 1.5rem; font-weight: 700; color: var(--accent);">{{ memory_count }}</div>
             <div style="color: var(--muted); font-size: 0.875rem; margin-top: 0.25rem;">Memórias Guardadas</div>
         </div>
@@ -1302,7 +1302,7 @@ BRAIN_TEMPLATE = (
 {{ nav_menu|safe }}
 <main class="page">
   <div class="page-head">
-    <h1 class="page-title">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</h1>
+    <h1 class="page-title"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.15em"><path d="M9.5 4a2.5 2.5 0 0 0-2.5 2.5A2 2 0 0 0 5 8.5v2A2.5 2.5 0 0 0 7 13v2.5A2.5 2.5 0 0 0 9.5 18H11V4H9.5Z"/><path d="M14.5 4a2.5 2.5 0 0 1 2.5 2.5A2 2 0 0 1 19 8.5v2a2.5 2.5 0 0 1-2 2.5v2.5A2.5 2.5 0 0 1 14.5 18H13V4h1.5Z"/></svg> {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</h1>
     <p class="page-sub">{% if lang == 'en' %}Memory, RAG, reinforcement and 3D graph on one screen.{% else %}Memória, RAG, reforço e grafo 3D num só ecrã.{% endif %}</p>
   </div>
   {{ subnav|safe }}

@@ -101,6 +101,65 @@ All runtime configuration in `config.py` with environment variable overrides:
 
   ### Phone layout
 
+Measured in headless Chromium at 375x667, and every number below was read off a
+rendered page rather than asserted on a CSS string. A mobile-UI audit on
+2026-09-29 found four defects that every string-based test had passed, two of
+them in features I had just reported as working.
+
+**The dock.** One full-width bar at the bottom: pull it up (or tap it) and the
+conversation unrolls over the screen, push it down or drag the grip and the
+tiles come back. A 71px pill in the corner was what a thumb misses, and it was
+also painted over the microphone — `elementFromPoint` at the mic's centre
+returned the pill, so the mic could not be tapped at all.
+
+**The blind, not a slide.** Opening animates `clip-path: inset(0 0 100% 0)` →
+`inset(0)`, so an edge travels down the screen while the content beneath it is
+revealed. A `translate` alone reads as a rectangle moving; this reads as a
+roller blind being pulled down.
+
+**The burger is at the top right** — the corner a right thumb reaches on a
+phone held in one hand, and no longer competing with the dock for the bottom
+one. It was 44×44 at (323, 8). The menu also stops hiding the sign-out: it was
+306px tall and wrapped "Sair" into a second flex column at x=365 of a 375px
+screen, so signing out was off-screen on the page whose job includes signing
+out.
+
+**Every device is visible by default.** The rooms were laid out in a row with
+`flex-shrink: 0`, so the strip held 857px of content in a 375px box with
+`overflow-x: hidden`: 7 of 17 switches were painted outside the edge and
+unreachable, while `scrollWidth == innerWidth` so the no-side-scroll test
+passed. Rooms stack and tiles wrap now; 13 tiles, 0 cut off, no scroll needed.
+
+**Icons are SVG, not emoji.** Emoji rendered differently per platform — the
+same light was a yellow bulb on iOS and a white one on Android — ignored the
+tile's grayscale filter, so an "off" device still shouted colour, and a
+catch-all `⚡` meant `porta`, `ar` and `camera` all rendered as a lightning
+bolt. Each device type has a drawn icon, the fallback is a neutral device
+outline, and `currentColor` means the grayscale still works. The brand, the
+weather, the moon phases and the air-quality indicator are SVG too; zero emoji
+glyphs remain in the rendered page.
+
+**Two microphones, one machine.** The dock one is always visible; the composer
+one sends a voice message inside the conversation. They share a single
+`getUserMedia` stream and a single recording state, so neither can win silently.
+
+**Device states are live when the page has loaded.** They arrived 5.29s late on
+the first tick of a 5-second interval, so every switch was inert for five
+seconds of every load. A person cannot throw a switch they have not waited for.
+
+**What the browser tests assert** (`tests/test_mobile_controls.py`,
+`tests/test_mobile_layout_browser.py`, 33 tests, run in the deploy gate): the
+page raises no JavaScript error; a tap on the microphone reaches
+`getUserMedia`; nothing is painted over it and it is 44×44 or larger; no switch
+is outside the strip; the states are not still disabled at 1.5s; every icon
+slot holds a sized SVG; the brand SVG is not 0×0; no emoji is rendered; the
+burger is in the top 20% and right half; the sign-out is on screen; the dock is
+at least 90% of the width and 56px tall with a 40px grip; pulling it up opens
+the panel; opening is a `clip-path` blind and not a translate; the dock stays
+above the open panel; the desktop layout is unchanged.
+
+### Phone layout
+
 The device tiles own the phone screen. The conversation is a full-screen sheet
 that appears when asked for, covers everything, and is dismissed by dragging it
 down or by the "Fechar" button that moves out of the thumb arc to avoid the

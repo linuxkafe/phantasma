@@ -81,9 +81,33 @@ def test_the_burger_is_a_sibling_of_the_menu_not_a_child(ui_page):
         "the mobile CSS hides"
     )
     between = ui_page[toggle:nav_open]
-    assert 'id="voice-btn"' in between, (
-        "the voice button must sit in the bar, outside the collapsible menu, or "
-        "it is unreachable on a phone"
+    assert "<nav" not in between, "the burger is inside the <nav> it is meant to toggle"
+
+
+def test_the_voice_button_is_not_in_the_navigation_menu(ui_page):
+    """The microphone must survive the menu collapsing.
+
+    It used to be injected into the navigation bar, and a mobile audit measured
+    49.6% of its 44x44 target covered by the chat pill, with a fourth of the
+    grid unclickable -- and the pill covered its centre, so it could not be
+    tapped at all. It now lives in the dock at the bottom of the screen, which
+    is where a thumb is, and where nothing is painted over it.
+
+    The invariant is the one that matters: the voice control is not inside the
+    collapsible panel, so hiding the panel cannot hide the ability to talk to the
+    house.
+    """
+    assert 'id="voice-btn"' in ui_page, "there is no voice button at all"
+    nav_open = ui_page.find('<nav class="nav-menu"')
+    nav_close = ui_page.find("</nav>", nav_open)
+    assert nav_open != -1 and nav_close != -1
+    assert 'id="voice-btn"' not in ui_page[nav_open:nav_close], (
+        "the microphone is inside the collapsible menu: on a phone it is "
+        "unreachable until the menu is open, which is circular"
+    )
+    assert 'id="chat-dock"' in ui_page, (
+        "the voice button has no dock: it should be in the bar at the bottom, "
+        "where a thumb reaches and nothing covers it"
     )
 
 
