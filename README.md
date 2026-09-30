@@ -331,8 +331,8 @@ purpose, single-use, and destroyed by a wrong guess rather than paused.
 **`/perfil`** issues per-user API tokens, shown once at creation and never
 re-displayable, revocable one at a time. A token is one capability: send
 commands. It cannot read this page, the memories, or the admin surface.
-`PHANTASMA_COMMAND_TOKEN` remains as the machine credential for the Android
-app and the Discord skill.
+`PHANTASMA_COMMAND_TOKEN` remains as the machine credential for the Discord
+skill and any other program on the network.
 
 | Env Var | Description |
 |---------|-------------|
@@ -385,8 +385,10 @@ response carries a CORS origin unless it is on the allow-list.
 `PHANTASMA_CORS_ORIGINS` is a comma-separated list of exact origins. It is empty
 by default, and the default emits no CORS headers at all. Nothing legitimate
 needed the wildcard: the voice UI is served *by* this service, so it is
-same-origin, and a native app (the Android companion) is not a browser — the
-browser is what enforces CORS, and native HTTP clients ignore it entirely.
+same-origin. Every client that is not a browser — the Discord skill, a script,
+anything using `PHANTASMA_COMMAND_TOKEN` — is outside the browser's CORS
+enforcement entirely, so a wildcard would have bought nothing and cost the
+origin check.
 
 ### The pepper was breaking the thing it protected
 
@@ -433,7 +435,7 @@ gets a `401` — an unset token is no longer "open", it is "browsers only". To l
 programs in, set the token and restart:
 
 ```bash
-sudo sh -c 'printf "\n# Authorises programs (Android, Home Assistant, Discord, shell).\n# One capability: sending commands. Not the admin surface.\nPHANTASMA_COMMAND_TOKEN=%s\n" \
+sudo sh -c 'printf "\n# Authorises programs (Home Assistant, Discord, shell).\n# One capability: sending commands. Not the admin surface.\nPHANTASMA_COMMAND_TOKEN=%s\n" \
   "$(openssl rand -hex 32)" >> /opt/phantasma/.env'
 sudo service phantasma restart
 ```
@@ -521,30 +523,26 @@ pHantasma/
 │   ├── skill_feedback.py # ++/-- feedback
 │   ├── skill_weather.py  # Weather daemon
 │   └── skill_*.py        # Device/skill modules
-├── android/              # Android companion app (Kotlin/Compose)
 ├── aes/                  # AES project tracking
 ├── docs/                 # Project documentation
 └── Makefile              # Quality gates and commands
 ```
 
-## Android Companion App
+## Mobile
 
-The `android/` directory contains a complete Kotlin/Jetpack Compose app implementing:
-- mDNS discovery (`_phantasma._http._tcp.`)
-- REST API client (Ktor + Kotlinx Serialization) for all endpoints
-- Voice interaction: 16kHz PCM recording → Base64 → `/api/command` → Base64 TTS playback
-- Material 3 dark theme (pHantasma green), 4 screens: Home, Devices, Memory, Settings
-- Device dashboard with toggle/control actions
-- Memory viewer with add/delete
-- Settings: manual IP override, theme, auto-discover toggle
+There is no native app. The interface is the one served at `/`: it is
+responsive, and the same page is the phone interface. Voice is push-to-talk on
+screen (hold to record, release to send) with TTS playback, and the house is
+controlled from the device tiles. The only requirement is that the phone
+reaches the service — over the LAN, or through a tunnel.
 
-**Build & Test (requires Android SDK):**
-```bash
-cd android
-./gradlew assembleDebug          # Build debug APK
-./gradlew test                   # Run unit tests
-# APK at: app/build/outputs/apk/debug/app-debug.apk
-```
+The reason is the one that matters for a house. The app was bound to a second,
+divergent command endpoint (`/api/command`, whose handlers were stubs that
+answered "Comando de dispositivo executado." without touching a device). Because
+it had its own client contract, the fix that made the web path real could not
+reach it — and the phone kept confirming switches that never happened. That is
+the whole class of bug this project keeps hitting: two paths to the same house.
+One interface, one dispatch path, one thing to keep correct.
 
 ## Privacy
 

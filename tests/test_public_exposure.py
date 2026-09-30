@@ -169,16 +169,16 @@ def test_a_session_still_reads_everything_the_page_needs(store):
 
 
 def test_the_machine_token_can_still_read_the_house(anon, monkeypatch, store):
-    """The Android companion is not a browser and has no session. Without this it
-    loses the device list, and the only way to keep it is to leave the house
+    """A program on the network is not a browser and has no session. Without this
+    it loses the device list, and the only way to keep it is to leave the house
     public -- which is the thing being fixed."""
     monkeypatch.setenv(command_token.ENV_TOKEN, "a-real-looking-token-value")
     res = anon.get(
         "/get_devices", headers={"Authorization": "Bearer a-real-looking-token-value"}
     )
     assert res.status_code != 401, (
-        "a valid machine token was refused the device list; the Android "
-        "companion would break, and the alternative is not leaving it open"
+        "a valid machine token was refused the device list; the Discord skill "
+        "and any script would break, and the alternative is not leaving it open"
     )
 
 

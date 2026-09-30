@@ -1,7 +1,7 @@
 """
 pHantasma REST API Routes
 
-Flask endpoints for Android app and CLI integration.
+Flask endpoints for CLI and programmatic integration.
 
 Endpoints:
 - GET /health, /api/health: Health check
@@ -299,9 +299,10 @@ def create_app(pipeline=None) -> Flask:
     # Nothing legitimate needed `*`:
     #   * the voice UI is served BY this service, so it is same-origin and CORS
     #     does not apply to it at all;
-    #   * a native app (the Android companion) is not a browser -- the browser
-    #     enforces CORS, and native HTTP clients ignore it entirely. This header
-    #     was protecting nothing that existed;
+    #   * a non-browser client (the Discord skill, Home Assistant, a script) is
+    #     not a browser -- the browser enforces CORS, and non-browser HTTP
+    #     clients ignore it entirely. This header was protecting nothing that
+    #     existed;
     #   * a genuinely separate web front-end can be allow-listed, which is what
     #     PHANTASMA_CORS_ORIGINS is for.
     #
@@ -381,7 +382,7 @@ def create_app(pipeline=None) -> Flask:
             # indistinguishable from a deliberate opt-out.
             logger.warning(
                 "Command refused: no session and no %s configured. Set it to let "
-                "programs (Android, Home Assistant, shell) send commands.",
+                "programs (Home Assistant, Discord, shell) send commands.",
                 command_token.ENV_TOKEN,
             )
         else:
@@ -398,10 +399,10 @@ def create_app(pipeline=None) -> Flask:
     #
     # The token's documented scope was "one capability: send a command". Kept
     # here rather than widened silently: the machine credential reaches the
-    # non-admin device/reading API so the Android companion keeps working, and
-    # the command endpoints. It does NOT reach /admin, the user store, or the
-    # memory editor, and widening it to those is a deliberate act, not a
-    # consequence of this list.
+    # non-admin device/reading API so programs that are not browsers keep
+    # working, and the command endpoints. It does NOT reach /admin, the user
+    # store, or the memory editor, and widening it to those is a deliberate act,
+    # not a consequence of this list.
     _TOKEN_PATHS = frozenset(
         {
             # Commands: act on the house.

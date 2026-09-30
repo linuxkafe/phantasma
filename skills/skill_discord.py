@@ -39,7 +39,7 @@ PHANTASMA_API_URL = "http://127.0.0.1:5000/comando"
 
 # Command endpoints require a credential, and this is a program, not a browser:
 # it has no session and cannot log in as the owner. It therefore presents the
-# command token, exactly as the Android companion and any shell script do.
+# command token, exactly as any shell script or Home Assistant integration does.
 #
 # It used to send nothing and be accepted, because the gate returned True
 # whenever PHANTASMA_COMMAND_TOKEN was unset -- so the "protection" was only

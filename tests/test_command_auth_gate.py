@@ -5,8 +5,8 @@ cover the thing that actually breaks a home: whether the gate is on or off,
 and what happens to existing clients either way.
 
 The compatibility requirement is explicit. `/comando`, `/device_action` and
-`/api/command` are called today by the Android companion app and the vendored
-Discord skill, neither of which sends an Authorization header. If the gate
+`/api/command` are called today by the vendored Discord skill and by
+third-party scripts, none of which sends an Authorization header. If the gate
 rejected them by default, the assistant would go quiet for reasons that look
 like a broken microphone. So: with no token configured, everything must behave
 exactly as before.

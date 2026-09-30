@@ -1002,8 +1002,9 @@ def voice_endpoint():
     #   reached skill_weather, so it came back as the model asking to be
     #   told the weather again instead of the forecast.
     #
-    # The same lie is still reachable through `/api/command`, which the Android
-    # client calls. That contract is not changed here; see docs/ROADMAP.md.
+    # The same lie is still reachable through `/api/command`. Its only in-repo
+    # caller was the Android app, which has since been removed, so the reason it
+    # was left alone no longer holds. Not changed here; see docs/ROADMAP.md.
     from flask import current_app
 
     from src.api.routes import _speak_to_wav

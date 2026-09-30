@@ -65,8 +65,9 @@ def enabled() -> bool:
 
     Unset means the command endpoints keep working as they do now. That is a
     deliberate choice for a single-owner install on a LAN: turning the feature
-    on by default would break every existing client, including the Android app,
-    and shipping a default token would be worse than shipping none.
+    on by default would break every existing client, including the Discord
+    skill and any script already talking to the house, and shipping a default
+    token would be worse than shipping none.
     """
     return bool(configured_token())
 
@@ -80,7 +81,8 @@ def verify(token: str | None) -> bool:
 
     Two sources, in order: the per-user tokens in the store (a user can name
     and revoke their own), then the environment token, which stays as the
-    machine-to-machine credential for the Android app and the Discord skill.
+    machine-to-machine credential for the Discord skill and any other program
+    on the network.
     """
     expected = configured_token()
     if expected and token and hmac.compare_digest(token, expected):

@@ -66,7 +66,7 @@ icons:
 
 ## Visual Theme
 
-pHantasma uses a professional, minimal aesthetic with high contrast and purposeful design. The design system is optimized for CLI/API/voice-first interfaces with optional Android companion app.
+pHantasma uses a professional, minimal aesthetic with high contrast and purposeful design. The design system is optimized for CLI/API/voice-first interfaces. The single interface is the responsive page served at `/`, which is also the phone interface — there is no second client to keep in step.
 
 ### Dark Mode (Default)
 - Background: `#0a0a0a`
@@ -129,7 +129,7 @@ Library: Lucide (lucide.dev)
 
 ## Do's
 
-- Use semantic HTML in Android Compose / web views
+- Use semantic HTML in web views
 - Use icons from Lucide library
 - Maintain 4px spacing grid
 - Use design tokens (never hardcode colors)
@@ -142,13 +142,6 @@ Library: Lucide (lucide.dev)
 - Break 4px spacing grid
 - Override design tokens in component code
 - Use emoji as UI indicators
-
-## Android Integration
-
-The Android app (Kotlin + Jetpack Compose) consumes this design system via:
-- `android/app/src/main/java/com/phantasma/app/ui/theme/`
-- Color.kt, Typography.kt, Shapes.kt generated from this spec
-- Components in `android/app/src/main/java/com/phantasma/app/ui/components/`
 
 ## CLI / Terminal
 

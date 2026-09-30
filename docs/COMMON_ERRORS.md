@@ -58,7 +58,7 @@ Known failure patterns and their fixes. Check here when debugging issues.
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `Address already in use` | Port 5000 occupied | Kill existing process or change port in `src/api/routes.py` |
-| CORS errors from Android | Origin not allowed | API adds `Access-Control-Allow-Origin: *`; check Android network config |
+| CORS error in the browser | Origin not in `PHANTASMA_CORS_ORIGINS` | The UI is served *by* this service, so it is same-origin and needs no CORS headers at all — a CORS error means the page is being served from somewhere else. Add that exact origin to `PHANTASMA_CORS_ORIGINS`. There is deliberately no `*` wildcard. |
 | `413 Request Entity Too Large` | Audio upload >16MB | Increase `app.config["MAX_CONTENT_LENGTH"]` |
 | Base64 decode fails | Invalid audio format | Ensure client sends valid base64 WAV/MP3; check `format` field |
 
