@@ -1283,6 +1283,27 @@ def create_app(pipeline=None) -> Flask:
 
         return send_from_directory(config.public_dir, "memory_3d.html")
 
+    @app.route("/sw.js")
+    def service_worker():
+        """The service worker, from the site ROOT so its scope is `/`.
+
+        A worker served from /public/ would default to the scope /public/ and
+        could not control `/` -- so the install would succeed and the worker
+        would never see a navigation, which is the quietest possible way to ship
+        a PWA that does not work.
+
+        Scope is the whole origin, which is also why the worker itself is
+        careful: it must not cache anything that carries a reading.
+        """
+        from flask import make_response, send_from_directory
+
+        # Never cached by the browser's HTTP cache, or a fixed worker sticks
+        # around and the person never gets the fix.
+        resp = make_response(send_from_directory(config.public_dir, "sw.js"))
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Service-Worker-Allowed"] = "/"
+        return resp
+
     @app.route("/public/<path:filename>")
     def public_files(filename: str):
         """Serve the explorer's vendored libraries and ES modules.

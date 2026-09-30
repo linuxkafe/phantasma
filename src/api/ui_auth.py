@@ -77,7 +77,19 @@ ADMIN_SESSION_KEY = "admin_user"
 # encrypted, so parking a password in it for the length of the challenge would
 # put the credential in the browser in readable form.
 PENDING_KEY = "ui_pending"
-PENDING_TTL_SECONDS = 600
+# The claim must live AT LEAST as long as the code it authorises.
+#
+# It was 600s while auth_store.CODE_TTL_SECONDS is 900. So the password step
+# expired a full five minutes before the code could be used: a code that was
+# still perfectly valid could no longer be redeemed, and the user was told the
+# session had expired while looking at a countdown that had not run out. Two
+# constants describing one window, and nobody checked they agreed.
+#
+# The security of the longer window does not rest on this number: a code dies
+# after CODE_MAX_FAILURES wrong guesses, and CODE_TTL_SECONDS bounds the code
+# itself. A derived test asserts the ordering, because the next person to
+# change either number should not have to remember the other exists.
+PENDING_TTL_SECONDS = 900
 
 
 def start_pending_login(email: str, now: float | None = None) -> None:
@@ -88,6 +100,17 @@ def start_pending_login(email: str, now: float | None = None) -> None:
         "email": (email or "").strip().lower(),
         "expires": (_time.time() if now is None else now) + PENDING_TTL_SECONDS,
     }
+    # PERSISTENT, deliberately. `permanent` is only set when a login COMPLETES,
+    # so between the password and the code this was a browser-session cookie: no
+    # expiry, and gone the moment the browser reclaims the tab -- which is what
+    # happens when you authenticate, switch to the mail app to read the code, and
+    # come back. The claim then reads as expired with most of its 900 seconds
+    # unused. The cookie's own lifetime is the 30-day PERMANENT_SESSION_LIFETIME
+    # and that changes nothing about the security of the claim, because the
+    # claim carries `expires` and `take_pending` enforces it. A long-lived cookie
+    # holding a claim that is itself short-lived and single-use is a
+    # convenience; it is not a longer window.
+    session.permanent = True
 
 
 def take_pending() -> dict | None:

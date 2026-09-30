@@ -125,7 +125,17 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="pt">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- This template, not the app page, is what the installed app shows on the
+     home screen: start_url is "/", and "/" redirects here for anyone signed
+     out. Without the manifest link the launcher gets no icon and no theme
+     colour, and the standalone window has black bars over the notch. -->
+<link rel="manifest" href="/public/manifest.json">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Phantasma">
+<link rel="apple-touch-icon" href="/public/icons/icon-192.png">
 <title>pHantasma</title>
 <style>
     /* The login page shares the app's palette on purpose: a login that looks
@@ -196,6 +206,17 @@ LOGIN_PAGE = """<!DOCTYPE html>
       <a href="/recuperar" style="color:var(--muted)">Esqueci-me a password</a>
     </p>
   </form>
+<script>
+/* Registered on the login page too, so the worker is already installed by the
+   time someone signs in. Registering it afterwards would mean the first launch
+   of the installed app has no worker at all. */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .catch(function (e) { console.warn('sw: não registado', e); });
+  });
+}
+</script>
 </body>
 </html>
 """
@@ -422,9 +443,29 @@ def _auth_page(title, body_html, sub=""):
     return make_response(
         f"""<!DOCTYPE html>
 <html lang="pt"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- The installed app OPENS here: start_url is "/", and "/" redirects to
+     /login for anyone not signed in. So the page that decides what a PWA looks
+     like on the home screen is this one, and without the manifest link the
+     app launches to a bare form with no icon, no theme colour and no offline
+     shell. Same tags as the main page, kept in step deliberately. -->
+<link rel="manifest" href="/public/manifest.json">
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Phantasma">
+<link rel="apple-touch-icon" href="/public/icons/icon-192.png">
 <title>pHantasma</title><style>{_AUTH_CSS}</style></head>
-<body><div class="card"><h1>{title}</h1>{sub_html}{body_html}</div></body></html>"""
+<body><div class="card"><h1>{title}</h1>{sub_html}{body_html}</div>
+<script>
+if ('serviceWorker' in navigator) {{
+  window.addEventListener('load', function () {{
+    navigator.serviceWorker.register('/sw.js', {{ scope: '/' }})
+        .catch(function (e) {{ console.warn('sw: não registado', e); }});
+  }});
+}}
+</script>
+</body></html>"""
     )
 
 
@@ -951,7 +992,16 @@ def handle_request():
     <html lang="pt">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+        <!-- PWA. viewport-fit=cover so the standalone app can use the notch
+             area and the dock pads out to the home indicator. Without it the
+             installed app has black bars and the bottom of the chat is a guess. -->
+        <link rel="manifest" href="/public/manifest.json">
+        <meta name="theme-color" content="#0a0a0a">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Phantasma">
+        <link rel="apple-touch-icon" href="/public/icons/icon-192.png">
         <title>Phantasma UI</title>
         <style>
             __SHARED_CSS__
@@ -3390,6 +3440,19 @@ def handle_request():
             initVoice();
         </script>
         <script>__SHARED_JS__</script>
+        <script>
+            /* The service worker, registered on LOAD rather than on DOMContentLoaded
+               so the first paint is not held up by a fetch. Registered only on
+               https (or localhost): a service worker on plain http is silently
+               refused by every browser, and a registration that appears to
+               succeed is worse than none. */
+            if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function () {
+                    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                        .catch(function (e) { console.warn('sw: não registado', e); });
+                });
+            }
+        </script>
     </body>
     </html>
     """).replace("__ADMIN_LINKS__", admin_links_html) \
