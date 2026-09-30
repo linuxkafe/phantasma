@@ -112,6 +112,22 @@ def _resample_to_16khz(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
     return np.interp(indices, np.arange(len(audio_data)), audio_data).astype(np.float32)
 
 
+def _speak_to_wav(text: str) -> str | None:
+    """Text -> base64 WAV, or None if the synthesiser is unavailable.
+
+    Split out of `_execute_llm_tts` because an answer that came from a skill has
+    no LLM call attached to it and still needs to be spoken: the voice route
+    needs this half alone. Duplicating the TTS block is how the two answer paths
+    drifted apart in the first place.
+    """
+    tts_result = tts_synthesize(text)
+    if not tts_result.success:
+        logger.warning("TTS failed: %s", tts_result.error)
+        return None
+    audio_data, sample_rate = tts_result.data
+    return _audio_to_base64_wav(audio_data, sample_rate)
+
+
 def _execute_llm_tts(text: str, start_time: float) -> tuple[str, str | None, float]:
     """Execute LLM query and TTS synthesis.
 
@@ -131,11 +147,7 @@ def _execute_llm_tts(text: str, start_time: float) -> tuple[str, str | None, flo
     response_text = llm_result.data
 
     # TTS
-    tts_result = tts_synthesize(response_text)
-    audio_b64 = None
-    if tts_result.success:
-        audio_data, sample_rate = tts_result.data
-        audio_b64 = _audio_to_base64_wav(audio_data, sample_rate)
+    audio_b64 = _speak_to_wav(response_text)
 
     elapsed = (time.perf_counter() - start_time) * 1000
     return response_text, audio_b64, elapsed

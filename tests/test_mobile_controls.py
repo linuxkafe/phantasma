@@ -933,6 +933,82 @@ def test_a_spoken_command_still_opens_the_conversation(page):
     assert "liga a luz" in log, f"the transcript is not in the log: {log!r}"
 
 
+def test_the_listening_float_goes_away_when_the_answer_arrives(page):
+    """The float said "A ouvir..." and never went away.
+
+    `voiceSay(msg, ms)` armed a hide timer only `if (ms)`, and the two calls
+    that announce work in progress -- `voiceSay('A ouvir...')`, on the press and
+    again on the send -- pass no `ms`. On the success path nothing else removed
+    `.show`, so the float stayed over the page for the rest of the session,
+    announcing a state that had ended. It is checked here as a MEASUREMENT of
+    the class, before and after, because the version of this that was wrong was
+    not a syntax error and did not throw.
+    """
+    page.evaluate(
+        """() => {const prev = window.fetch;
+            window.fetch = async (u, o) => {
+                if (String(u).includes('/api/voz')) {
+                    return {status: 200, ok: true, json: async () => ({
+                        success: true, transcript: 'liga a luz', text: 'Ligado.'})};
+                }
+                return prev(u, o);
+            };}"""
+    )
+    shown = "() => {const e = document.querySelector('.voice-status');"
+    shown += " return !!e && e.classList.contains('show') && e.textContent;}"
+
+    box = _press(page, "#voice-btn", 600)
+    during = page.evaluate(shown)
+    assert during, (
+        "pressing the microphone shows no status at all: there is no feedback "
+        "that the house is listening"
+    )
+
+    _release(page, "#voice-btn", box)
+    page.wait_for_timeout(900)
+    after = page.evaluate(shown)
+    assert not after, (
+        f"the float is still up after the answer arrived, saying {after!r}. It has "
+        "no deadline, so nothing ever takes it down"
+    )
+
+
+def test_a_failed_voice_send_shows_its_error_and_then_clears_it(page):
+    """The error must survive the moment the work ends.
+
+    `voiceClearBusy` runs in the same `finally` that releases the buttons. If it
+    removed the float unconditionally it would also swallow this message, and the
+    user would be left with a button that came back and nothing to explain why.
+    So the clear is scoped to the undated busy status only.
+    """
+    page.evaluate(
+        """() => {const prev = window.fetch;
+            window.fetch = async (u, o) => {
+                if (String(u).includes('/api/voz')) {
+                    return {status: 400, json: async () => ({
+                        success: false, error: 'Não consegui ler o áudio.'})};
+                }
+                return prev(u, o);
+            };}"""
+    )
+    text = "() => {const e = document.querySelector('.voice-status');"
+    text += " return e && e.classList.contains('show') ? e.textContent : null;}"
+
+    box = _press(page, "#voice-btn", 600)
+    _release(page, "#voice-btn", box)
+    page.wait_for_timeout(800)
+    shown = page.evaluate(text)
+    assert shown and "áudio" in shown, (
+        f"the failure was not shown to the user, or was cleared before it could be "
+        f"read: {shown!r}"
+    )
+    page.wait_for_timeout(6500)
+    assert not page.evaluate(text), (
+        "an error message with a deadline stayed on screen for ever: the timer "
+        "that removes it is not firing"
+    )
+
+
 def test_the_container_is_sent_untouched(page):
     """No browser-side decodeAudioData, no hand-written resampler, no
     hand-written WAV. The three steps that failed on a real phone are gone, and

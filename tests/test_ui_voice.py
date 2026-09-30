@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import struct
 import wave
 
@@ -137,56 +138,207 @@ def test_an_oversized_upload_is_refused_before_decoding(signed_in):
     assert res.status_code == 413
 
 
+@pytest.fixture
+def house(monkeypatch):
+    """A signed-in app whose pipeline RECORDS what it was asked to answer.
+
+    `respond_to_text` is the one method the local voice loop (`_process_speech`)
+    and the typed chat (`/comando`) both call, so it is the only place the suite
+    can ask "did the spoken text actually reach the house?". The real pipeline
+    needs a sound card, a Tasmota plug and an LLM; this records and answers.
+    """
+    app, client = make_app_with_user("b@t.test", "admin", monkeypatch=monkeypatch)
+    asked = []
+
+    class FakePipeline:
+        _running = True
+
+        def respond_to_text(self, text):
+            asked.append(text)
+            return "Luz do balcão desligada."
+
+    app.pipeline = FakePipeline()
+    app.asked = asked
+    return app, client
+
+
+def _silent_tts():
+    """A synthesiser that succeeds without loading a voice model."""
+    import numpy as np
+
+    from src.pipeline.utils import Result
+
+    return lambda text: Result.ok((np.zeros(1600, dtype=np.float32), 16000))
+
+
+def _must_not_run(name):
+    def boom(*_a, **_k):
+        pytest.fail(
+            f"{name} ran: the voice route answered without the house behind it"
+        )
+
+    return boom
+
+
 # --- the round trip --------------------------------------------------------
 
 
-def test_spoken_audio_is_transcribed_and_the_command_answered(signed_in, monkeypatch):
-    """The whole loop, with the recogniser and the LLM replaced by fakes.
+def test_a_spoken_command_reaches_the_house_the_way_a_typed_one_does(house, monkeypatch):
+    """The whole loop, with the recogniser and the synthesiser replaced.
 
-    A 440 Hz tone stands in for speech: this test is about the plumbing and the
-    response shape, not about whether Whisper can hear a sine wave. That part
-    was verified against real synthesised speech separately.
+    The owner reported "desliga a luz do balcão" working by text and not by
+    voice. It was the other way round, and worse: the voice route answered
+    "Comando de dispositivo executado." -- the literal string of a stub that
+    touches no device -- so the light stayed on and the confirmation was false.
+    skill_tasmota, whose TRIGGERS contain "luz do balcão", was never consulted.
+
+    So the regression test is not "the stub still runs". It is that the stub, and
+    the bare-LLM path beside it, must now be UNREACHABLE from this route.
+    """
+    import src.api.routes as routes
+    import src.pipeline.stt as stt_mod
+
+    app, client = house
+
+    class R:
+        success = True
+        data = "desliga a luz do balcão"
+        error = None
+
+    monkeypatch.setattr(stt_mod, "transcribe", lambda audio, language=None: R())
+    monkeypatch.setattr(routes, "tts_synthesize", _silent_tts())
+    monkeypatch.setattr(
+        routes, "_handle_device_command", _must_not_run("_handle_device_command")
+    )
+    monkeypatch.setattr(
+        routes, "_handle_memory_command", _must_not_run("_handle_memory_command")
+    )
+    monkeypatch.setattr(routes, "_execute_llm_tts", _must_not_run("_execute_llm_tts"))
+
+    tone = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(np.float32) * 0.3
+    res = client.post("/api/voz", json={"audio_base64": _wav_b64(tone)})
+
+    assert res.status_code == 200, res.get_data(as_text=True)
+    body = res.get_json()
+    assert body["success"] is True
+    assert body["transcript"] == "desliga a luz do balcão", (
+        "the transcript is not echoed back, so a mishearing is invisible to the user"
+    )
+    assert body["text"] == "Luz do balcão desligada."
+    assert app.asked == ["desliga a luz do balcão"], (
+        "the spoken text did not reach the pipeline verbatim, so a device command "
+        "spoken aloud cannot be told apart from one typed"
+    )
+    assert body["audio_format"] == "wav", "the answer came back as text only"
+    assert body["processing_time_ms"] >= 0
+
+
+def test_a_weather_question_reaches_the_weather_skill(house, monkeypatch):
+    """"hoje vai chover" answered by the LLM instead of by the skill.
+
+    `skill_weather` matches on "vai chover". Skipped, the phrase reached the
+    model cold and came back as "Hoje vai chover?" -- the model asking to be
+    told the weather, which is what the owner heard on the phone and not on the
+    typed chat. A question about the weather is not a general LLM query.
+    """
+    import src.api.routes as routes
+    import src.pipeline.stt as stt_mod
+
+    app, client = house
+
+    class R:
+        success = True
+        data = "Hoje vai chover"
+        error = None
+
+    monkeypatch.setattr(stt_mod, "transcribe", lambda audio, language=None: R())
+    monkeypatch.setattr(routes, "tts_synthesize", _silent_tts())
+    monkeypatch.setattr(routes, "_execute_llm_tts", _must_not_run("_execute_llm_tts"))
+
+    tone = np.sin(2 * np.pi * 300 * np.arange(16000) / 16000).astype(np.float32) * 0.3
+    res = client.post("/api/voz", json={"audio_base64": _wav_b64(tone)})
+
+    assert res.status_code == 200, res.get_data(as_text=True)
+    assert app.asked == ["Hoje vai chover"], (
+        "the weather question bypassed the skills and went to the model, which "
+        "answers by asking for the weather"
+    )
+
+
+def test_a_dead_house_is_reported_not_answered(house, monkeypatch):
+    """`respond_to_text` returns None when the LLM failed; `/comando` answers
+    that with 502. Voice must not turn it into a silent success."""
+    import src.pipeline.stt as stt_mod
+
+    _app, client = house
+
+    class R:
+        success = True
+        data = "e aí"
+        error = None
+
+    class Dead:
+        def respond_to_text(self, text):
+            return None
+
+    client.application.pipeline = Dead()
+    monkeypatch.setattr(stt_mod, "transcribe", lambda audio, language=None: R())
+    tone = (np.random.default_rng(3).normal(0, 0.2, 16000)).astype(np.float32)
+    res = client.post("/api/voz", json={"audio_base64": _wav_b64(tone)})
+    assert res.status_code == 502
+    assert res.get_json()["success"] is False
+
+
+def test_without_a_pipeline_the_endpoint_says_so_instead_of_pretending(signed_in, monkeypatch):
+    """An app built with no pipeline is an app with no house behind it.
+
+    Answering anyway is what the stub did, and doing it here would reintroduce
+    the same false confirmation in the one configuration where nothing else would
+    notice -- every other test builds the app through `make_app_with_user`.
     """
     import src.pipeline.stt as stt_mod
 
     class R:
         success = True
-        data = "liga a luz da sala"
+        data = "desliga a luz do balcão"
         error = None
 
     monkeypatch.setattr(stt_mod, "transcribe", lambda audio, language=None: R())
-
-    # The answer path: a device command, so the device handler decides, and the
-    # assertion is that the spoken text reaches the same dispatch the typed one
-    # uses.
-    import src.api.routes as routes
-
-    seen = {}
-
-    def fake_device(text):
-        seen["text"] = text
-        from flask import jsonify
-
-        return jsonify({"response": "Luz da sala ligada.", "device_states": {"sala": True}})
-
-    monkeypatch.setattr(routes, "_is_device_command", lambda t: True)
-    monkeypatch.setattr(routes, "_handle_device_command", fake_device)
-
     tone = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(np.float32) * 0.3
     res = signed_in.post("/api/voz", json={"audio_base64": _wav_b64(tone)})
-
-    assert res.status_code == 200, res.get_data(as_text=True)
+    assert res.status_code == 503, res.get_data(as_text=True)
     body = res.get_json()
-    assert body["success"] is True
-    assert body["transcript"] == "liga a luz da sala", (
-        "the transcript is not echoed back, so a mishearing is invisible to the user"
+    assert body["success"] is False
+    assert "Comando de dispositivo executado" not in (body.get("text") or ""), (
+        "the stub's false confirmation is still reachable"
     )
-    assert body["text"] == "Luz da sala ligada."
-    assert body["device_states"] == {"sala": True}
-    assert seen["text"] == "liga a luz da sala", (
-        "the spoken text did not reach the device dispatch verbatim"
+
+
+def test_a_skill_that_raises_does_not_become_a_500(house, monkeypatch):
+    """A tap on a phone must never produce a stack trace on the screen."""
+    import src.pipeline.stt as stt_mod
+
+    _app, client = house
+
+    class R:
+        success = True
+        data = "desliga a luz"
+        error = None
+
+    class Angry:
+        def respond_to_text(self, text):
+            raise RuntimeError("the plug is on fire")
+
+    client.application.pipeline = Angry()
+    monkeypatch.setattr(stt_mod, "transcribe", lambda audio, language=None: R())
+    tone = np.sin(2 * np.pi * 440 * np.arange(16000) / 16000).astype(np.float32) * 0.3
+    res = client.post("/api/voz", json={"audio_base64": _wav_b64(tone)})
+    assert res.status_code == 502
+    body = res.get_json()
+    assert body["success"] is False
+    assert "plug is on fire" not in json.dumps(body), (
+        "an internal failure was echoed to the browser"
     )
-    assert body["processing_time_ms"] >= 0
 
 
 def test_a_failed_transcription_is_reported_as_a_failure(signed_in, monkeypatch):

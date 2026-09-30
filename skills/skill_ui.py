@@ -926,7 +926,6 @@ def voice_endpoint():
     try:
         import base64 as _b64
 
-        from src.api.routes import _execute_llm_tts
         from src.pipeline.stt import decode_bytes
         from src.pipeline.stt import transcribe as stt_transcribe
 
@@ -985,46 +984,62 @@ def voice_endpoint():
             {"success": False, "error": "Não percebi.", "reason": "empty"}
         ), 200
 
-    # Dispatch through the same helpers the JSON API uses, so a spoken "liga a
-    # luz" and a typed one take exactly the same path. Duplicating the dispatch
-    # here is how the two would drift apart and the phone would quietly stop
-    # understanding the house.
-    from src.api.routes import (
-        _handle_device_command,
-        _handle_memory_command,
-        _is_device_command,
-        _is_memory_command,
-    )
+    # One dispatch, and it is the pipeline's: `respond_to_text` runs the skills
+    # first and falls through to FlyBrain + SearXNG + the LLM. It is the same
+    # method the local voice loop calls (assistant.py `_process_speech`) and the
+    # same one `/comando` calls, which is what "the house understands the same
+    # things however you ask" actually means.
+    #
+    # This used to branch to `_is_device_command` / `_handle_device_command`, and
+    # failing that to `_execute_llm_tts`. Both halves were wrong:
+    #
+    # * `_handle_device_command` (routes.py) is a stub -- it returns the literal
+    #   "Comando de dispositivo executado." without touching a device. A spoken
+    #   "desliga a luz do balcão" was therefore answered with a confident lie,
+    #   and skill_chacon_udp, whose TRIGGERS_NICKNAMES contain "luz do balcão"
+    #   and which really does send the UDP frame, was never consulted.
+    # * `_execute_llm_tts` calls the LLM directly. "hoje vai chover" never
+    #   reached skill_weather, so it came back as the model asking to be
+    #   told the weather again instead of the forecast.
+    #
+    # The same lie is still reachable through `/api/command`, which the Android
+    # client calls. That contract is not changed here; see docs/ROADMAP.md.
+    from flask import current_app
 
-    lowered = spoken.lower()
-    if _is_memory_command(lowered):
-        response = _handle_memory_command(spoken)
-    elif _is_device_command(lowered):
-        response = _handle_device_command(spoken)
-    else:
-        text, audio_out, _elapsed = _execute_llm_tts(spoken, started)
-        return jsonify(
-            {
-                "success": True,
-                "transcript": spoken,
-                "text": text,
-                "audio_base64": audio_out,
-                "audio_format": "wav" if audio_out else None,
-                "processing_time_ms": (time.perf_counter() - started) * 1000,
-            }
+    from src.api.routes import _speak_to_wav
+
+    pipeline = getattr(current_app, "pipeline", None)
+    if pipeline is None:
+        # In every deployment where this route exists the app was built with a
+        # pipeline (routes.py only registers skill routes when it has one), so
+        # this is the test/unwired case. Answering anyway would mean answering
+        # with the stub, which is the bug being fixed.
+        logger.error("voice: no pipeline on the app, cannot answer")
+        return jsonify({"success": False, "error": "Serviço indisponível."}), 503
+
+    try:
+        answer = pipeline.respond_to_text(spoken)
+    except Exception as exc:  # noqa: BLE001 - a tap on a phone must not 500
+        logger.error("voice: dispatch failed: %s: %s", type(exc).__name__, exc)
+        return (
+            jsonify({"success": False, "error": "Falha ao executar o comando."}),
+            502,
         )
 
-    # _handle_* return a flask Response (jsonify). Unwrap it so this endpoint
-    # has one shape for the browser instead of three.
-    body = response.get_json(silent=True) or {}
+    if answer is None:
+        # The same shape `/comando` uses for a dead LLM: the command was heard
+        # and understood, and the house could not answer.
+        return jsonify({"success": False, "error": "Sem resposta."}), 502
+
+    audio_out = _speak_to_wav(answer)
+
     return jsonify(
         {
             "success": True,
             "transcript": spoken,
-            "text": body.get("text") or body.get("response") or spoken,
-            "audio_base64": body.get("audio_base64"),
-            "audio_format": body.get("audio_format"),
-            "device_states": body.get("device_states"),
+            "text": answer,
+            "audio_base64": audio_out,
+            "audio_format": "wav" if audio_out else None,
             "processing_time_ms": (time.perf_counter() - started) * 1000,
         }
     )
@@ -3816,13 +3831,30 @@ def handle_request():
             voiceStatus.setAttribute('role', 'status');
             voiceStatus.setAttribute('aria-live', 'polite');
             document.body.appendChild(voiceStatus);
-            let _voiceStatusTimer = null;
+            let _voiceStatusTimer = null, _voiceStatusSticky = false;
 
             function voiceSay(msg, ms) {
                 voiceStatus.textContent = msg;
                 voiceStatus.classList.add('show');
                 clearTimeout(_voiceStatusTimer);
+                /* A status with NO deadline is sticky: it means "the box is
+                   working", and only the code that finishes the work may take it
+                   down. It used to be dropped on the floor instead --
+                   `voiceSay('A ouvir...')` carries no `ms`, so `if (ms)` armed no
+                   timer, and on the success path nothing else removed `.show`.
+                   The float therefore stayed over the page for the rest of the
+                   session, on top of the answer it was announcing. */
+                _voiceStatusSticky = !ms;
                 if (ms) _voiceStatusTimer = setTimeout(() => voiceStatus.classList.remove('show'), ms);
+            }
+
+            function voiceClearBusy() {
+                /* The work is over. A message that brought its own deadline
+                   belongs to whoever put it there -- an error the user still
+                   has to read -- so this only takes down the sticky one. */
+                if (!_voiceStatusSticky) return;
+                _voiceStatusSticky = false;
+                voiceStatus.classList.remove('show');
             }
 
             function bytesToBase64(bytes) {
@@ -3843,8 +3875,8 @@ def handle_request():
                     const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
                     const audio = new Audio(url);
                     audio.onended = () => URL.revokeObjectURL(url);
-                    audio.play().catch(() => voiceSay('Resposta em texto acima.'));
-                } catch (e) { voiceSay('Resposta em texto acima.'); }
+                    audio.play().catch(() => voiceSay('Resposta em texto acima.', 4000));
+                } catch (e) { voiceSay('Resposta em texto acima.', 4000); }
             }
 
             /* Send what was recorded. This runs from the recorder's onstop, NOT
@@ -3929,6 +3961,10 @@ def handle_request():
                     voiceSay('Falha de rede.', 3000);
                 } finally {
                     _voiceBusy = false;
+                    /* The one place that knows the work is over. Before this,
+                       the float announced "A ouvir..." and nothing on the
+                       success path ever took it down. */
+                    voiceClearBusy();
                     allVoiceBtns.forEach(b => { b.classList.remove('busy'); b.disabled = false; });
                 }
               } catch (err) {

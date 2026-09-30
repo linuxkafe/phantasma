@@ -85,6 +85,18 @@
 - Status: backlog
 - Description: pytest suite; GitHub Actions CI; make check quality gates
 
+## [HIGH] [DISCOVERED 2026-09-30] `/api/command` responde que ejecutou e não executou
+- Impact: High
+- Effort: Medium
+- Status: backlog
+- Description: `_handle_device_command` e `_handle_memory_command` (src/api/routes.py) são stubs: devolvem `CommandResponse(success=True, text="Comando de dispositivo executado.")` sem tocar num único dispositivo. A rota de voz `/api/voz` chamava-os e por isso confirmava falsamente que a luz se apagou — corrigido em T054, que passou `/api/voz` a `pipeline.respond_to_text`. **A mentira continua viva em `/api/command`**, que é o que o cliente Android chama (`android/.../PhantasmaApiClient.kt:64`). Não foi corrigida aqui por decisão deliberada: o contrato do cliente Android não é deste ticket. Ou `/api/command` passa pelo pipeline, ou passa a dizer que não faz nada. Enquanto lá estiver, um `success=True` vindo do Android não significa nada.
+
+## [MEDIUM] [DISCOVERED 2026-09-30] `/api/voz` não abre a janela de feedback
+- Impact: Medium
+- Effort: Low
+- Status: backlog
+- Description: `_process_speech` (assistant.py) abre uma janela de feedback depois de uma resposta do LLM, para o "obrigado"/"não faz sentido" em linguagem natural (SD-DOMAIN-001). `/api/voz` responde e não abre. A caixa está lá; a rota de voz é que não a usa. Fora do âmbito de T054 por ser ortogonal ao defeito reportado.
+
 ## [MEDIUM] Migrate off webrtcvad (drop setuptools<81 pin)
 - Impact: Medium
 - Effort: Medium
