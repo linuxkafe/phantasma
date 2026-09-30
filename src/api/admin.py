@@ -722,6 +722,7 @@ LOGIN_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Admin Login | pHantasma</title>
@@ -756,6 +757,7 @@ OTP_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Código de acesso | pHantasma</title>
@@ -790,6 +792,7 @@ ADMIN_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Admin – Configuração | pHantasma</title>
@@ -824,6 +827,7 @@ EMAIL_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>{{ subject }}</title>
@@ -859,6 +863,7 @@ DASHBOARD_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Painel de Administração | pHantasma</title>
@@ -1024,6 +1029,7 @@ CONFIG_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Gestão de Configurações | pHantasma</title>
@@ -1202,6 +1208,7 @@ USERS_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Gestão de Utilizadores | pHantasma</title>
@@ -1894,6 +1901,7 @@ MEMORY_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>Memória do pHantasma | pHantasma</title>
@@ -2092,6 +2100,7 @@ FLYBRAIN_TEMPLATE = (
      ecra nao sabe as regras de pronunciacao nem o idioma da pagina. -->
 <html lang="{{ lang if lang is defined else 'pt' }}">
 <head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
 <title>FlyBrain - Aprendizagem por Reforço | pHantasma</title>

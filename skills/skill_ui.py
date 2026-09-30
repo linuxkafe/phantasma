@@ -1238,17 +1238,39 @@ def handle_request():
             #devices::-webkit-scrollbar { width:4px; }
             #devices::-webkit-scrollbar-thumb { background:#333; border-radius:2px; }
 
-            /* The device panel now collapses at EVERY width, because the
+            /* The menu collapses behind the burger at EVERY width, because the
                toggle is visible at every width -- the shared design system made
                the toggle permanent, so a panel that stayed pinned open on
                desktop would leave the button doing nothing there. Closed by
-               default; design.js() adds .open. The device strip is unchanged
-               once opened: same 4 rooms, same 14 tiles. */
-            #nav-menu:not(.nav-menu-always) {
-                flex: 1; display: none; align-items: flex-start; align-content: flex-start;
-                flex-wrap: wrap; overflow-y: auto; overflow-x: hidden;
-                height: 100%; padding: 20px 0 20px 20px;
-            }
+               default; design.js() adds .open.
+
+               WHAT THIS BLOCK USED TO SAY, and why it is gone:
+
+                   flex: 1; height: 100%; padding: 20px 0 20px 20px;
+                   align-items: flex-start; flex-wrap: wrap;
+
+               Those are DEVICE-STRIP rules, from the era when `#nav-menu` WAS
+               the strip that held the device tiles. `#devices` is its own
+               element now, and this id carries the admin menu -- so the rules
+               were not merely dead, they were actively harmful:
+
+               `height: 100%` on an absolutely positioned element resolves
+               against its containing block, which is the 45px-tall `.nav-bar`.
+               Measured at 1280x900 with the menu open: clientHeight 42px,
+               scrollHeight 188px. A 44px window onto 188px of links, and
+               `elementFromPoint` at the centre of every one of them returned
+               something else -- Cérebro, Configuração, Utilizadores, Perfil and
+               Sair were ALL unclickable. A menu you can open and not use is
+               worse than no menu, and it looked plausible because the links were
+               in the DOM and the panel had a background.
+
+               The collapsible geometry now comes solely from the design system
+               (`position:absolute; top:100%; right:0; max-height:70vh`), which
+               is the same contract the admin pages get. The one thing kept here
+               is `display:none` / `.open`, because the root page's menu is
+               collapsible rather than always-on and the design system leaves the
+               default to the page. */
+            #nav-menu:not(.nav-menu-always) { display: none; }
             #nav-menu.open { display: flex; }
             #nav-menu::-webkit-scrollbar { width: 4px; }
             #nav-menu::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
@@ -2135,11 +2157,10 @@ def handle_request():
                       <div id="brand-name">pHantasma</div>
                   </div>
               </div>
-              </div>
               <!-- Secondary nav, always visible. Shares .nav-menu styling with
                    the admin pages but has no toggle: on this screen a burger
                    would gate five links and nothing else. -->
-              
+               
                    <!-- Always available, outside the burger. -->
                    <div id="devices" aria-label="Dispositivos"></div>
                    <!-- Navigation is built by admin._build_nav_menu() and arrives
@@ -2150,10 +2171,28 @@ def handle_request():
                         the menu could not be opened on a phone at all. The burger
                         in /admin and the burger in / are now the same element,
                         built by the same function, and the page-specific controls
-                        travel inside the bar via extra_in_bar. -->
+                        travel inside the bar via extra_in_bar.
+
+                        And the `</div>` that used to sit HERE, between #brand and
+                        #devices, closed #header-strip before either of them
+                        existed. Two closing tags in a row with nothing between
+                        them, so the browser's parser repaired the document by
+                        re-parenting: #devices and the nav bar ended up as
+                        SIBLINGS of #header-strip and #main landed at depth -1.
+
+                        Nobody noticed, and that is the part worth recording. A
+                        browser does not refuse a malformed document, it invents
+                        a well-formed one, so the page rendered -- wrong. The
+                        desktop symptom was the burger's panel appearing
+                        mid-screen, because `position:absolute; top:100%` had lost
+                        the positioned ancestor it was written against. Every
+                        Playwright test still passed: they ask questions of the
+                        DOM the browser built, and the repaired DOM answers
+                        questions perfectly. Counting the tags is the only thing
+                        that could have caught it. -->
                    __ADMIN_LINKS__
-           </div>
           </div>
+
 
 
         <div id="main">
