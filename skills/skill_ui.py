@@ -1732,9 +1732,12 @@ def handle_request():
                     #main.dragging #chat-input-box { pointer-events: none; }
 
                     #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-                    /* Room for the grip, so the conversation does not start
-                       underneath the thing you are told to drag. */
-                    #main.open #chat-log { padding-top: 26px; }
+                    /* Room for the CLOSE HANDLE, so the first thing the ghost
+                       says is not underneath it. It was 26px of padding against a
+                       44px handle, and the first row started at y=26 --
+                       `elementFromPoint` on it returned the handle. The number
+                       has to be read off the handle, not guessed smaller. */
+                    #main.open #chat-log { padding-top: 52px; }
                     #chat-input-box { flex: 0 0 auto; padding-right: 12px; }
 
                     /* ---- THE DOCK: one prominent bar, bottom of the screen ----
@@ -2054,8 +2057,8 @@ def handle_request():
                 full: _wrap('<circle cx="12" cy="12" r="8" fill="currentColor" stroke="none"/>'),
                 waning: _wrap('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16 10 10 0 0 0 0-16Z" fill="currentColor" stroke="none"/>'),
             };
-            const GHOST_SVG = '<svg class=&apos;ghost-svg&apos; viewBox=&apos;0 0 24 24&apos; fill=&apos;none&apos; stroke=&apos;currentColor&apos; stroke-width=&apos;1.6&apos; stroke-linecap=&apos;round&apos; stroke-linejoin=&apos;round&apos; aria-hidden=&apos;true&apos;><path d=&apos;M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z&apos;/><circle cx=&apos;9.5&apos; cy=&apos;11&apos; r=&apos;1.2&apos;/><circle cx=&apos;14.5&apos; cy=&apos;11&apos; r=&apos;1.2&apos;/></svg>';
-            const CLOUD_SVG = '<svg class=&apos;ghost-svg&apos; viewBox=&apos;0 0 24 24&apos; fill=&apos;none&apos; stroke=&apos;currentColor&apos; stroke-width=&apos;1.6&apos; stroke-linecap=&apos;round&apos; stroke-linejoin=&apos;round&apos; aria-hidden=&apos;true&apos;><path d=&apos;M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z&apos;/></svg>';
+            const GHOST_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z"/><circle cx="9.5" cy="11" r="1.2"/><circle cx="14.5" cy="11" r="1.2"/></svg>';
+            const CLOUD_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z"/></svg>';
 
             function icon(kind) {
                 return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -3041,7 +3044,26 @@ def handle_request():
                version did exactly that, and also re-entered through onstop into
                a guard that had already been cleared -- a silent no-op that
                looked like a permissions problem. */
+            /* The buttons, in a scope BOTH the recorder and the sender can see.
+
+               It was declared inside initVoice() while sendRecording() is a
+               sibling, so `sendRecording` threw ReferenceError on its very first
+               line: the recording was sent but the buttons were never released,
+               so they stayed red and disabled for ever. No page error was
+               reported -- an unhandled rejection inside a promise nobody awaits
+               is silent, which is why `page.on('pageerror')` did not catch it
+               either. Sibling functions, shared state at the right scope. */
+            const voiceBtnChat = document.getElementById('voice-btn-chat');
+            const allVoiceBtns = [voiceBtn, voiceBtnChat].filter(Boolean);
+
             async function sendRecording() {
+              /* Wrapped whole. This function used to throw a ReferenceError on
+                 its first line, and because it is async and nobody awaits the
+                 promise, the failure was completely silent: the button stayed red
+                 and disabled, the transcript never appeared, and `pageerror`
+                 reported nothing. A send path that cannot fail visibly is a send
+                 path that fails invisibly. */
+              try {
                 const blob = new Blob(_voiceChunks, { type: _voiceMime || 'audio/webm' });
                 _voiceChunks = [];
                 allVoiceBtns.forEach(b => b.classList.remove('recording'));
@@ -3074,6 +3096,12 @@ def handle_request():
                     _voiceBusy = false;
                     allVoiceBtns.forEach(b => { b.classList.remove('busy'); b.disabled = false; });
                 }
+              } catch (err) {
+                console.error('voice: send failed', err);
+                voiceSay('Falha ao enviar o áudio.', 3000);
+                allVoiceBtns.forEach(b => { b.classList.remove('recording', 'busy'); b.disabled = false; });
+                _voiceBusy = false;
+              }
             }
 
             function initVoice() {
@@ -3083,8 +3111,6 @@ def handle_request():
                    last wins -- the visible state of the other button would be a
                    lie. The composer button is the one for voice MESSAGES; the
                    bar button stays as the shortcut. */
-                const voiceBtnChat = document.getElementById('voice-btn-chat');
-                const allVoiceBtns = [voiceBtn, voiceBtnChat].filter(Boolean);
                 if (!voiceBtn) return;
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia
                     || typeof window.MediaRecorder === 'undefined') {
@@ -3095,21 +3121,51 @@ def handle_request():
                     return;
                 }
                 let _voiceMime = 'audio/webm';
-                allVoiceBtns.forEach(btn => btn.addEventListener('click', async () => {
-                    if (_voiceRec) { _voiceRec.stop(); return; }
-                    if (_voiceBusy) return;
+                /* PRESS AND HOLD, which is what a microphone button is.
+
+                   It was a click handler that toggled: tap once to start, tap
+                   again to stop. The owner pressed and held and nothing was
+                   recorded, because nothing happens on a press -- and from the
+                   outside a button that ignores your thumb and shows no state is
+                   indistinguishable from a broken one.
+
+                   Pointer events rather than touch+mouse, so one handler covers
+                   finger, stylus and mouse and cannot double-fire on a device
+                   that emits both. `setPointerCapture` keeps the release
+                   delivered even if the thumb slides off the button, which is
+                   what people actually do. Three safety behaviours, because a
+                   microphone that stays open after you let go is a privacy
+                   problem, not a cosmetic one:
+
+                   * a MINIMUM hold, so a brush of the thumb does not send a
+                     40ms recording;
+                   * a MAXIMUM, so holding forever cannot fill memory -- a 20s
+                     clip is longer than any command in this house;
+                   * release ANYWHERE ends it, including pointercancel (the
+                     browser took the gesture) and visibility change (the phone
+                     was put down mid-sentence).
+
+                   Keyboard and assistive tech keep a click: `keydown` on Enter
+                   or Space starts, and the same release path ends it, so the
+                   button is not a finger-only feature. */
+                let _voiceHeld = false, _voiceStart = 0, _voiceMin = 350, _voiceMax = 20000;
+
+                async function voiceBegin() {
+                    if (_voiceBusy || _voiceRec) return;
+                    _voiceStart = Date.now();
+                    // Immediate feedback, before any permission prompt: the
+                    // prompt itself is slow and silence reads as "not working".
+                    voiceSay('A ouvir...');
+                    allVoiceBtns.forEach(b => b.classList.add('recording'));
                     try {
                         _voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
                     } catch (err) {
                         voiceSay('Sem acesso ao microfone.', 3000);
+                        allVoiceBtns.forEach(b => b.classList.remove('recording'));
                         return;
                     }
                     _voiceChunks = [];
                     try {
-                        // Prefer a format the browser can also DECODE back. Every
-                        // modern browser decodes what it records, so this is belt
-                        // and braces -- the real reason for decoding in the page is
-                        // that the server cannot read these containers.
                         const opts = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
                             .find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m));
                         _voiceRec = opts ? new MediaRecorder(_voiceStream, { mimeType: opts })
@@ -3117,6 +3173,7 @@ def handle_request():
                         _voiceMime = _voiceRec.mimeType || _voiceMime;
                     } catch (err) {
                         voiceSay('Gravação indisponível.', 3000);
+                        allVoiceBtns.forEach(b => b.classList.remove('recording'));
                         if (_voiceStream) _voiceStream.getTracks().forEach(t => t.stop());
                         _voiceStream = null;
                         return;
@@ -3124,9 +3181,62 @@ def handle_request():
                     _voiceRec.ondataavailable = (e) => { if (e.data && e.data.size) _voiceChunks.push(e.data); };
                     _voiceRec.onstop = () => { _voiceRec = null; sendRecording(); };
                     _voiceRec.start();
-                    allVoiceBtns.forEach(b => b.classList.add('recording'));
-                    voiceStatus.classList.remove('show');
-                }));
+                }
+
+                function voiceEnd() {
+                    if (!_voiceRec) { allVoiceBtns.forEach(b => b.classList.remove('recording')); return; }
+                    const held = Date.now() - _voiceStart;
+                    if (held < _voiceMin) {
+                        // Too short to be a word. Say so instead of transcribing a
+                        // click, which the recogniser would turn into noise.
+                        voiceSay('Mantém premido para falar.', 2000);
+                        _voiceRec.onstop = null;
+                        try { _voiceRec.stop(); } catch (e) {}
+                        _voiceRec = null;
+                        if (_voiceStream) { _voiceStream.getTracks().forEach(t => t.stop()); _voiceStream = null; }
+                        allVoiceBtns.forEach(b => b.classList.remove('recording'));
+                        return;
+                    }
+                    if (held >= _voiceMax) {
+                        voiceSay('Demasiado longo.', 2000);
+                    }
+                    _voiceRec.stop();   // onstop -> sendRecording
+                }
+
+                allVoiceBtns.forEach(btn => {
+                    btn.addEventListener('pointerdown', (e) => {
+                        e.preventDefault();          // no synthetic click after this
+                        _voiceHeld = true;
+                        try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+                        voiceBegin();
+                    });
+                    const release = () => { if (!_voiceHeld) return; _voiceHeld = false; voiceEnd(); };
+                    btn.addEventListener('pointerup', release);
+                    btn.addEventListener('pointercancel', release);
+                    btn.addEventListener('lostpointercapture', release);
+                    /* The finger slid off and the capture is gone: still stop.
+                       Without this the microphone stays open. */
+                    btn.addEventListener('pointerleave', () => { if (_voiceHeld) release(); });
+                    /* Keyboard: Enter and Space hold-to-talk, released by the key
+                       going up. Without it the button cannot be used at all
+                       without a finger. */
+                    btn.addEventListener('keydown', (e) => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
+                        e.preventDefault();
+                        if (e.repeat || _voiceHeld) return;
+                        _voiceHeld = true; voiceBegin();
+                    });
+                    btn.addEventListener('keyup', (e) => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return;
+                        e.preventDefault();
+                        if (!_voiceHeld) return;
+                        _voiceHeld = false; voiceEnd();
+                    });
+                });
+                /* Put down mid-sentence: release the microphone. */
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden && _voiceHeld) { _voiceHeld = false; voiceEnd(); }
+                });
             }
 
             /* initVoice() LAST, and deliberately: it used to be called near the

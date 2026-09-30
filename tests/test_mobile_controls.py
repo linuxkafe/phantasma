@@ -100,15 +100,52 @@ def page(doc):
         pg = browser.new_page(
             viewport=PHONE, is_mobile=True, has_touch=True, device_scale_factor=3,
         )
-        # getUserMedia is counted, not performed: a headless browser has no
-        # microphone, and a fake one is enough to prove the button is wired.
+        # A FAKE microphone, not the real one counted. Headless Chromium has no
+        # audio input, so the real getUserMedia REJECTS: the code took the
+        # "Sem acesso ao microfone" path, never built a MediaRecorder, and every
+        # assertion about recording failed for a reason that had nothing to do
+        # with the recording. A headless browser is not a machine without a
+        # microphone, it is a machine whose microphone nobody plugged in.
         pg.add_init_script(
-            "window.__gum = 0;"
-            "const o = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);"
-            "navigator.mediaDevices.getUserMedia = (c) => { window.__gum++; return o(c); };"
+            """
+            window.__gum = 0;
+            window.__rec = [];
+            const track = { stop() {} };
+            const fakeStream = { getTracks: () => [track] };
+            navigator.mediaDevices.getUserMedia = async () => {
+                window.__gum++;
+                return fakeStream;
+            };
+            const Real = window.MediaRecorder;
+            window.MediaRecorder = function () {
+                const self = this;
+                window.__rec.push('new');
+                this.mimeType = 'audio/webm';
+                this.ondataavailable = null;
+                this.onstop = null;
+                this.start = () => window.__rec.push('start');
+                this.stop = () => {
+                    window.__rec.push('stop');
+                    if (self.onstop) self.onstop();
+                };
+            };
+            if (Real && Real.isTypeSupported) {
+                window.MediaRecorder.isTypeSupported = Real.isTypeSupported.bind(Real);
+            } else {
+                window.MediaRecorder.isTypeSupported = () => true;
+            }
+            """
         )
         errors = []
         pg.on("pageerror", lambda e: errors.append(str(e)))
+        # Unhandled REJECTIONS too. An async function that throws and is not
+        # awaited raises nothing on `pageerror`, which is how a ReferenceError
+        # that broke the voice send path reported "no errors" for a whole run.
+        pg.add_init_script(
+            "window.__rejections = [];"
+            "window.addEventListener('unhandledrejection', e =>"
+            " window.__rejections.push(String(e.reason && (e.reason.stack || e.reason))));"
+        )
         pg.set_default_timeout(8000)
         pg.goto(doc, wait_until="domcontentloaded")
         pg.wait_for_timeout(1500)
@@ -127,8 +164,14 @@ def test_the_page_raises_no_javascript_error(page):
     elements exist, the CSS applies, the screenshot looks right, and every
     listener after the throw is missing. This is how two microphones rendered
     and did nothing for a whole release.
+
+    Unhandled rejections are included because `pageerror` alone is not enough:
+    an async function that throws and is not awaited is silent, which is exactly
+    how the voice send path failed while the page reported no errors at all.
     """
     assert not page.errors, f"the page threw: {page.errors}"
+    rejections = page.evaluate("() => window.__rejections || []")
+    assert not rejections, f"unhandled promise rejection(s): {rejections}"
 
 
 def test_the_voice_status_element_exists(page):
@@ -179,14 +222,17 @@ def test_nothing_is_painted_over_the_microphone(page):
     )
 
 
-def test_tapping_the_microphone_asks_for_the_microphone(page):
+def test_pressing_the_microphone_asks_for_the_microphone(page):
     """Wiring, not styling. A button that renders, is not disabled, and does
     nothing is exactly what shipped before."""
-    page.evaluate("() => document.getElementById('voice-btn').click()")
-    page.wait_for_timeout(700)
+    _hold(page, "#voice-btn", 500)
     assert page.evaluate("() => window.__gum") >= 1, (
-        "tapping the microphone never reached getUserMedia: the button has no "
+        "pressing the microphone never reached getUserMedia: the button has no "
         "listener, which is what a temporal-dead-zone error in initVoice does"
+    )
+    started = page.evaluate("() => window.__rec")
+    assert "new" in started and "start" in started, (
+        f"the recorder was never started: {started}"
     )
 
 
@@ -548,3 +594,179 @@ def test_the_robot_vacuum_does_not_look_like_the_sun(page):
         "the robot vacuum is still the circle-with-rays drawing, which reads as "
         "a sun or a brightness control"
     )
+
+
+# --- the first thing the ghost says must be readable ----------------------
+
+
+def test_the_first_message_is_not_underneath_the_close_handle(page):
+    """It was 26px of padding against a 44px handle, and the first row started
+    at y=26 -- `elementFromPoint` on it returned the handle. The number has to be
+    read off the handle, not guessed smaller."""
+    page.evaluate("() => openChat()")
+    page.wait_for_timeout(500)
+    result = page.evaluate(
+        """() => {
+            const g = document.getElementById('chat-grip').getBoundingClientRect();
+            const log = document.getElementById('chat-log');
+            const first = log.children[0];
+            if (!first) return null;
+            const r = first.getBoundingClientRect();
+            const e = document.elementFromPoint(r.x + 20, r.y + 8);
+            return {top: Math.round(r.y), handleBottom: Math.round(g.bottom),
+                    coveredBy: e ? (e.id || e.className || e.tagName) : 'nada'};
+        }"""
+    )
+    assert result is not None, "the chat is empty, so there is nothing to cover"
+    assert result["top"] >= result["handleBottom"], (
+        f"the first message starts at y={result['top']} and the handle ends at "
+        f"{result['handleBottom']}: the ghost's first words are underneath it"
+    )
+    assert "chat-grip" not in str(result["coveredBy"]), (
+        f"the first message is covered by {result['coveredBy']!r}"
+    )
+
+
+# --- the ghost is actually drawn --------------------------------------------
+
+
+def test_the_chat_avatar_is_not_an_invisible_stroke(page):
+    """It measured 26x26, visible, with a real ghost in it -- and stroke: none.
+
+    The SVG was built as a JavaScript string with `&apos;` for its quotes. That
+    is an HTML entity, and inside a JS string it is literal text, so the
+    attribute became `stroke="&apos;currentColor&apos;"`, which is not a colour.
+    The element was present, sized, and drew nothing at all: an invisible ghost
+    is worse than no ghost, because the space is still reserved.
+    """
+    page.wait_for_timeout(400)
+    info = page.evaluate(
+        """() => {
+            const a = document.querySelector('.ia-avatar');
+            if (!a) return null;
+            const svg = a.querySelector('svg');
+            if (!svg) return {svg: false};
+            const cs = getComputedStyle(svg);
+            return {svg: true, stroke: cs.stroke,
+                    w: Math.round(svg.getBoundingClientRect().width)};
+        }"""
+    )
+    assert info and info["svg"], "the avatar has no SVG in it"
+    assert info["stroke"] not in ("none", "", "rgba(0, 0, 0, 0)"), (
+        f"the ghost's stroke is {info['stroke']!r}: the avatar occupies space "
+        f"and draws nothing, which reads as a missing image"
+    )
+    assert info["w"] > 4, f"the ghost is {info['w']}px wide"
+
+
+# --- press and hold, not tap to toggle ------------------------------------
+
+
+def _centre(pg, selector):
+    return pg.evaluate(
+        """(s) => {const r=document.querySelector(s).getBoundingClientRect();
+            return {x: r.x + r.width/2, y: r.y + r.height/2};}""",
+        selector,
+    )
+
+
+def _pointer(pg, selector, kind, box):
+    pg.evaluate(
+        """([s, t, x, y]) => {const b=document.querySelector(s);
+            b.dispatchEvent(new PointerEvent(t,
+              {bubbles:true, cancelable:true, pointerId:1, pointerType:'touch',
+               clientX:x, clientY:y, isPrimary:true}));}""",
+        [selector, kind, box["x"], box["y"]],
+    )
+
+
+def _press(pg, selector, hold_ms=450):
+    """pointerdown, then wait `hold_ms`. Returns the box, for the release.
+
+    Split from the release so a test can look at the state WHILE the button is
+    held, which is the only moment that proves hold-to-talk works. The wait is a
+    parameter for a concrete reason: a helper that always waits 450ms cannot test
+    a 200ms press, and a 450ms "short press" is not a short press -- the first
+    version of this test asserted a 200ms brush and was really asserting 450ms,
+    which is above the 350ms minimum, so it took the send path and failed for
+    the wrong reason.
+    """
+    box = _centre(pg, selector)
+    _pointer(pg, selector, "pointerdown", box)
+    pg.wait_for_timeout(hold_ms)
+    return box
+
+
+def _release(pg, selector, box=None):
+    _pointer(pg, selector, "pointerup", box or _centre(pg, selector))
+    pg.wait_for_timeout(450)
+
+
+def _hold(pg, selector, hold_ms):
+    """A whole press-and-hold of exactly `hold_ms`, for tests that only care
+    about the end state."""
+    box = _press(pg, selector, hold_ms)
+    _release(pg, selector, box)
+
+
+def test_holding_the_microphone_records_and_releasing_stops(page):
+    """It was a click handler that toggled. You pressed, held, and nothing
+    happened, because nothing happens on a press.
+
+    Observed WHILE held, which is why pressing and releasing are separate
+    helpers here.
+    """
+    box = _press(page, "#voice-btn", 700)
+    mid = page.evaluate(
+        "() => document.getElementById('voice-btn').classList.contains('recording')"
+    )
+    assert mid, "holding the microphone did not put it into the recording state"
+    _release(page, "#voice-btn", box)
+
+
+def test_releasing_the_microphone_releases_the_button(page):
+    """The send path threw a ReferenceError on its first line, so the button
+    stayed red and disabled for ever -- and because it was an unhandled
+    rejection, the page reported no error at all."""
+    _hold(page, "#voice-btn", 700)
+    assert not page.evaluate(
+        "() => document.getElementById('voice-btn').classList.contains('recording')"
+    ), "the button is still in the recording state after release"
+    assert not page.evaluate("() => document.getElementById('voice-btn').disabled"), (
+        "the button is still disabled after release: it can never be used again"
+    )
+
+
+def test_a_brush_of_the_thumb_does_not_send_a_command(page):
+    """A 200ms press is a tap, not a word. It must be refused, with a reason."""
+    _hold(page, "#voice-btn", 200)
+    msg = page.evaluate(
+        "() => {const e=document.querySelector('.voice-status');"
+        " return e ? e.textContent : null;}"
+    )
+    assert msg, "a 200ms press gave the user no feedback at all"
+    assert "premid" in msg.lower() or "curto" in msg.lower(), (
+        f"a 200ms press produced {msg!r}, which does not say the press was too short"
+    )
+
+
+def test_the_microphone_works_from_the_keyboard(page):
+    """Hold-to-talk that needs a finger is not an accessible control."""
+    page.evaluate(
+        """() => {const b=document.getElementById('voice-btn');
+            b.dispatchEvent(new KeyboardEvent('keydown',
+              {key:' ', bubbles:true, cancelable:true}));}"""
+    )
+    page.wait_for_timeout(500)
+    assert page.evaluate(
+        "() => document.getElementById('voice-btn').classList.contains('recording')"
+    ), "Enter/Space did not start recording: the button is finger-only"
+    page.evaluate(
+        """() => {const b=document.getElementById('voice-btn');
+            b.dispatchEvent(new KeyboardEvent('keyup',
+              {key:' ', bubbles:true, cancelable:true}));}"""
+    )
+    page.wait_for_timeout(400)
+    assert not page.evaluate(
+        "() => document.getElementById('voice-btn').classList.contains('recording')"
+    ), "releasing the key did not stop recording"
