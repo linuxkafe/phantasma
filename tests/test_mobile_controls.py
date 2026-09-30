@@ -414,17 +414,137 @@ def test_opening_is_a_blind_not_a_slide(page):
     )
 
 
-def test_the_dock_stays_above_the_open_panel(page):
-    """The panel covers the screen when it opens; the dock has to stay on top of
-    it or there is no way back that is not a gesture."""
+def test_the_close_control_is_the_grip_and_not_the_dock(page):
+    """Supersedes an earlier test that asserted the dock stayed above the open
+    panel. The dock does not survive opening any more -- it is the thing that was
+    covering the composer -- so the guarantee is now different and stronger:
+    the panel is closed by a control that is part of the panel, at the top, not
+    by a bar that has to dodge the keyboard.
+    """
     page.evaluate("() => openChat()")
     page.wait_for_timeout(400)
-    z = page.evaluate(
-        """() => {const d=document.getElementById('chat-dock');
-            const hit=document.elementFromPoint(20, d.getBoundingClientRect().top + 10);
-            return hit ? (d.contains(hit) ? 'doca' : (hit.id || hit.className)) : 'nada';}"""
+    assert page.evaluate(
+        "() => getComputedStyle(document.getElementById('chat-dock')).display"
+    ) == "none", "the dock is still present over the open panel"
+    grip = page.evaluate(
+        """() => {const r=document.getElementById('chat-grip').getBoundingClientRect();
+            return {y:Math.round(r.y), h:Math.round(r.height), w:Math.round(r.width)};}"""
     )
-    assert z == "doca", (
-        f"at the dock's own position the topmost element is {z!r}: the panel is "
-        f"over the dock and the dock cannot be tapped to close"
+    assert grip["y"] < 80, f"the close handle is at y={grip['y']}, not at the top"
+    assert grip["h"] >= 44 and grip["w"] >= 44, f"the handle is {grip['w']}x{grip['h']}"
+
+
+
+# --- the close control must not sit on the composer -----------------------
+
+
+def test_nothing_covers_the_input_when_the_chat_is_open(page):
+    """Reported: the close button was on top of the field you type into.
+
+    Measured: the tab was [0,607,315,60] over an input box of [0,574,375,93].
+    The `top:10px` that was supposed to lift the close button did nothing,
+    because the tab had become a static flex child of the dock, so `top` and
+    `right` had no positioned element to apply to. Asserted on the element that
+    is actually on top at the centre of the field, which is the only question
+    that matters to somebody about to type.
+    """
+    page.evaluate("() => openChat()")
+    page.wait_for_timeout(500)
+    top = page.evaluate(
+        """() => {const r=document.getElementById('chat-input').getBoundingClientRect();
+            const e=document.elementFromPoint(r.x+r.width/2, r.y+r.height/2);
+            return e ? (e.id || String(e.className)) : 'nada';}"""
+    )
+    assert top == "chat-input", (
+        f"the element on top of the input field is {top!r}: you cannot type "
+        f"through it"
+    )
+
+
+def test_the_dock_gets_out_of_the_way_when_the_chat_is_open(page):
+    page.evaluate("() => openChat()")
+    page.wait_for_timeout(400)
+    assert page.evaluate(
+        "() => getComputedStyle(document.getElementById('chat-dock')).display"
+    ) == "none", (
+        "the dock is still on screen over the composer; the composer has its "
+        "own microphone, so the dock only gets in the way"
+    )
+
+
+def test_there_is_a_visible_way_to_close(page):
+    page.evaluate("() => openChat()")
+    page.wait_for_timeout(400)
+    box = page.evaluate(
+        """() => {const r=document.getElementById('chat-grip').getBoundingClientRect();
+            return {w:Math.round(r.width), h:Math.round(r.height)};}"""
+    )
+    assert box["h"] >= 44, f"the close handle is {box['h']}px tall: under 44 is not a target"
+    page.evaluate("() => document.getElementById('chat-grip').click()")
+    page.wait_for_timeout(400)
+    assert not page.evaluate("() => document.getElementById('main').classList.contains('open')"), (
+        "tapping the handle did not close the chat"
+    )
+
+
+# --- the chat avatar -------------------------------------------------------
+
+
+def test_the_chat_avatar_is_a_ghost_and_is_sized(page):
+    """It was 183x150: 62% of a box with no size, in a flex row that grew to
+    fit the ghost instead of the other way round."""
+    page.evaluate("() => addToChatLog('olá', 'ia')")
+    page.wait_for_timeout(200)
+    box = page.evaluate(
+        """() => {const a=document.querySelector('.ia-avatar'); if(!a) return null;
+            const s=a.querySelector('svg');
+            const r=a.getBoundingClientRect();
+            return {w:Math.round(r.width), h:Math.round(r.height), svg:!!s};}"""
+    )
+    assert box is not None, "the chat has no avatar at all"
+    assert box["svg"], "the avatar is not a ghost"
+    assert box["w"] <= 40 and box["h"] <= 40, (
+        f"the avatar is {box['w']}x{box['h']}: it is negotiating with the "
+        f"container instead of being sized by it"
+    )
+
+
+# --- rooms are iconified ---------------------------------------------------
+
+
+def test_every_room_header_has_an_icon(page):
+    page.wait_for_timeout(400)
+    rooms = page.evaluate(
+        """() => [...document.querySelectorAll('.room-header')].map(h => ({
+            name: h.textContent.trim(), svg: !!h.querySelector('svg'),
+            h: Math.round(h.getBoundingClientRect().height) }))"""
+    )
+    assert rooms, "no room headers rendered"
+    for r in rooms:
+        assert r["svg"], f"the room {r['name']!r} has no icon"
+        assert r["h"] >= 14, f"the room {r['name']!r} header is {r['h']}px: unreadable"
+
+
+def test_the_robot_vacuum_does_not_look_like_the_sun(page):
+    """It was a circle with four radial lines, which is the universal
+    brightness glyph -- so the one device that is genuinely round was drawn as
+    the one thing it is not. Asserted as 'not the same drawing as the sun'
+    rather than as a path count, because that is the actual defect."""
+    page.wait_for_timeout(400)
+    result = page.evaluate(
+        """() => {
+            const t = [...document.querySelectorAll('.device-toggle')]
+                .find(e => /aspir/i.test(e.title || ''));
+            if (!t) return {found: false};
+            const vac = t.querySelector('.device-icon svg');
+            return {found: true, html: vac ? vac.innerHTML : ''};
+        }"""
+    )
+    if not result["found"]:
+        pytest.skip("this stub has no robot vacuum in it")
+    # The sun is a small disc plus radial rays; the vacuum must not be that.
+    rays_only = result["html"]
+    assert rays_only.count("<circle") >= 2 or "bezier" in rays_only or "M18.6" in rays_only, (
+        "the robot vacuum is still the circle-with-rays drawing, which reads as "
+        "a sun or a brightness control"
     )

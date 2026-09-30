@@ -1164,6 +1164,28 @@ def handle_request():
                    44x44 is the touch-target floor, matched to the nav burger
                    beside it: a control you have to aim at is not a control you
                    use with a phone in one hand. */
+                /* ---- Ambient layer ----
+                   `pointer-events: none` so it can never eat a tap, and z-index
+                   below the chrome: the weather is the room the devices are in,
+                   not an overlay on top of the controls. Rain sits UNDER the
+                   page content; the tint sits under that. */
+                #ambient, #ambient-tint {
+                    position: fixed; inset: 0; pointer-events: none;
+                }
+                #ambient { z-index: 1; }
+                #ambient-tint {
+                    z-index: 0; opacity: 0; transition: opacity 1.2s ease;
+                    background: radial-gradient(circle at 50% 0%, rgba(255,214,140,0.16), transparent 62%);
+                }
+                /* Night, and bad air: a cold wash from the top. Two layers so
+                   each can come and go on its own strength. */
+                #ambient-tint.night {
+                    background: linear-gradient(180deg, rgba(20,30,64,0.42), transparent 55%);
+                }
+                #ambient-tint.hazy {
+                    background: linear-gradient(180deg, rgba(150,140,120,0.20), transparent 60%);
+                }
+                #ambient.hidden, #ambient-tint.hidden { display: none; }
                 .nav-voice {
                     background: transparent; border: 1px solid #333; color: #ccc;
                     border-radius: 8px; width: 44px; height: 44px; cursor: pointer;
@@ -1220,7 +1242,16 @@ def handle_request():
                    icon at all -- the owner asked for an icon and a glyph. */
                 .mic-svg { width: 22px; height: 22px; display: block; }
                 #voice-btn-chat .mic-svg { width: 19px; height: 19px; }
-                .ia-avatar svg { width: 62%; height: 62%; display: block; }
+                /* The chat avatar gets its OWN size. 62% of a box with no size
+                   is 0x0 -- and worse, in a flex row the box grew to fit the
+                   ghost instead: measured 183x150 for a 150px tall glyph beside
+                   a 12px line of text. Sized here, once, so it cannot be
+                   negotiated with its container. */
+                .ia-avatar {
+                    width: 26px; height: 26px; flex: 0 0 auto; align-self: flex-start;
+                    display: flex; align-items: center; justify-content: center;
+                }
+                .ia-avatar svg { width: 22px; height: 22px; display: block; }
                 /* Explicit, not a percentage. `#brand-logo` is sized by its
                    font-size and has no width of its own, so 62% of nothing is
                    0x0 -- measured: the brand rendered at 0x0, which looks exactly
@@ -1658,7 +1689,12 @@ def handle_request():
                     .room-content {
                         display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start;
                     }
-                    .room-header { display: block; margin: 10px 0 6px; }
+                        .room-header {
+                        display: flex; align-items: center; gap: 6px;
+                        margin: 12px 0 6px; color: #9a9a9a; font-size: 0.68rem;
+                        letter-spacing: 0.06em; text-transform: uppercase;
+                    }
+                    .room-header svg { width: 15px; height: 15px; flex: 0 0 auto; opacity: 0.85; }
 
                     /* THE PRIORITY: the tiles get the screen. min-height:0 and
                        flex:1 1 auto so the strip takes what is left and scrolls
@@ -1737,11 +1773,25 @@ def handle_request():
                         margin: 0; border: 0; border-left: 1px solid #2e2e2e;
                         border-radius: 0; background: #1c1c1c; color: #eee;
                     }
-                    #chat-dock                    #chat-dock                    /* Open: the dock is the way back, and it moves out of the
-                       way of the composer rather than hiding under it. */
-                    body.chat-open #chat-dock { z-index: 70; }
-                    body.chat-open #chat-tab { color: #fff; }
-                    body.chat-open #dock-grip { background: #9a9a9a; }
+                    /* OPEN: the dock leaves, because a full-width bar pinned to
+                       the bottom is exactly where the composer is. It was
+                       measured covering it -- tab [0,607,315,60] over input box
+                       [0,574,375,93] -- and the `top:10px` meant to lift the close
+                       button did nothing at all, because the tab became a static
+                       flex child of the dock when the dock was introduced, so
+                       `top`/`right` had no positioned element to apply to.
+
+                       The composer has its own microphone, so nothing is lost by
+                       the dock going. The way back is the handle at the top of
+                       the panel and the drag.
+
+                       This line was, for a while, `#chat-dock #chat-dock` followed
+                       by this comment: a selector with no brace. A malformed
+                       selector swallows the rule that follows it, which is why
+                       `display: none` appeared to be ignored while being present
+                       and correct in the file. */
+                    body.chat-open #chat-dock { display: none; }
+                    body.chat-open #chat-grip { background: #9a9a9a; }
                     /* Room for the dock while it is on screen. */
                     body:not(.chat-open) #chat-log { padding-bottom: 0; }
 
@@ -1772,10 +1822,17 @@ def handle_request():
                     /* The drag handle. A sheet you can pull down, which is the
                        gesture the owner asked for and the one a phone user
                        already expects from a full-screen sheet. */
+                    /* The handle IS the close control. A 44px row rather than a
+                       26px strip, because a close target you have to hit is not
+                       a close target -- and it is the only one on the panel, so
+                       it has to carry it alone. */
                     #chat-grip {
                         position: fixed; top: 0; left: 0; right: 0; z-index: 55;
                         display: none; align-items: center; justify-content: center;
-                        height: 26px; touch-action: none; cursor: grab;
+                        min-height: 44px; touch-action: none; cursor: grab;
+                        background: none; border: 0; color: #8a8a8a;
+                        font-size: 0.72rem; letter-spacing: 0.06em;
+                        gap: 10px; padding: 0;
                     }
                     body.chat-open #chat-grip { display: flex; }
                     #chat-grip span {
@@ -1870,6 +1927,14 @@ def handle_request():
                 <button id="chat-send">Enviar</button>
             </div>
         </div>
+        <!-- THE AMBIENT LAYER. Rain over the whole screen when it rains, drifting
+             gusts when it is windy, a warm wash when it is sunny, and a tint for
+             the air and the hour. Decoration, and decoration that can be
+             turned off -- see ambientLayer, which respects prefers-reduced-motion
+             and pauses when the tab is hidden rather than burning a phone
+             battery on drops nobody is looking at. -->
+        <canvas id="ambient" aria-hidden="true"></canvas>
+        <div id="ambient-tint" aria-hidden="true"></div>
         <!-- THE DOCK. One prominent bar at the bottom of a phone: pull it up (or
              tap it) and the conversation unrolls over the screen; push it down
              and the tiles come back. It replaces the small pill that used to sit
@@ -1937,7 +2002,12 @@ def handle_request():
                the grayscale filter applies to it like to the tile. */
             const SVG = {
                 luz: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.3 1 2.1h5c0-.8.4-1.6 1-2.1A6 6 0 0 0 12 3Z"/>',
-                aspirador: '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
+                /* A robot vacuum, not a sun. The first version was a circle with
+                   four radial lines, which is the universal sun/brightness
+                   glyph -- so the one device that is genuinely round was drawn
+                   as the one thing it is not. This is a disc seen from above:
+                   body, a bumper line, a sensor turret and a side brush. */
+                aspirador: '<circle cx="12" cy="12" r="8.2"/><path d="M3.8 12a8.2 8.2 0 0 0 16.4 0"/><circle cx="12" cy="10.5" r="2.2"/><path d="M12 15.5v2"/><path d="M18.6 17.8l1.6 1.6M5.4 17.8l-1.6 1.6"/>',
                 exaustor: '<circle cx="12" cy="12" r="2.5"/><path d="M12 9.5c0-4 1-6 4-6-1 3-1 6-4 6ZM14.5 12c4 0 6 1 6 4-3-1-6-1-6-4ZM12 14.5c0 4-1 6-4 6 1-3 1-6 4-6ZM9.5 12c-4 0-6-1-6-4 3 1 6 1 6 4Z"/>',
                 desumidificador: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11Z"/>',
                 gas: '<path d="M12 2c2 4-1 5 1 8 1.5 2.5 4 3 4 6a5 5 0 0 1-10 0c0-2 1-3 1-5 1 1.5 2 1.5 2 0 .5-3-1-5 2-9Z"/>',
@@ -1947,7 +2017,22 @@ def handle_request():
                 sensor: '<path d="M12 3v3M5.6 5.6l2.1 2.1M18.4 5.6l-2.1 2.1"/><circle cx="12" cy="12" r="2.5"/><path d="M3.5 12a8.5 8.5 0 0 1 17 0M6.5 15.5a5.5 5.5 0 0 1 11 0"/>',
                 /* The honest answer for anything unrecognised. */
                 dispositivo: '<rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M9 7h6M10 17h4"/>',
+                /* Rooms, so a group of tiles is a place and not just a word.
+                   A word alone in a 14px header is not something a thumb reads
+                   while hunting for the light. */
+                _sala: '<path d="M4 20V9l8-6 8 6v11"/><path d="M9 20v-7h6v7"/>',
+                _wc: '<path d="M5 12a7 7 0 0 1 14 0v3a3 3 0 0 1-3 3h-1l-1 3h-4l-1-3H8a3 3 0 0 1-3-3v-3Z"/><path d="M8 6.5h.01M16 6.5h.01"/>',
+                _quarto: '<path d="M3 18v-8h18v8"/><path d="M3 14h18"/><path d="M6 10V7h5v3"/><path d="M3 18v2M21 18v2"/>',
+                _entrada: '<path d="M4 21V5a1 1 0 0 1 1-1h6v17"/><path d="M14 21V6h5a1 1 0 0 1 1 1v14"/><path d="M11 12h.01"/>',
             };
+            function roomIcon(room) {
+                const map = {Geral: '_sala', Sala: '_sala', Quarto: '_quarto',
+                             WC: '_wc', Entrada: '_entrada'};
+                const kind = map[room] || '_sala';
+                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                     + 'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" '
+                     + 'aria-hidden="true" focusable="false">' + SVG[kind] + '</svg>';
+            }
             /* Weather and moon, as SVG. Same reasons as the device icons: they
                rendered differently per platform, and `innerText` on an emoji is
                the only reason the moon ever appeared at all. */
@@ -2008,7 +2093,12 @@ def handle_request():
                 let roomContainer = document.getElementById(`room-content-${room}`);
                 if (roomContainer) return roomContainer;
                 const roomWrapper = document.createElement('div'); roomWrapper.className = 'device-room';
-                const header = document.createElement('div'); header.className = 'room-header'; header.innerText = room;
+                /* The header carries an icon, so a group of tiles reads as a
+                   place. innerHTML because it is markup, and the name goes in a
+                   sibling so it is still selectable text and still announced. */
+                const header = document.createElement('div'); header.className = 'room-header';
+                header.innerHTML = roomIcon(room) + '<span>' + room + '</span>';
+                header.title = room;
                 roomContainer = document.createElement('div'); roomContainer.className = 'room-content'; roomContainer.id = `room-content-${room}`; 
                 roomWrapper.append(header, roomContainer); devicesEl.appendChild(roomWrapper);
                 return roomContainer;
@@ -2403,6 +2493,184 @@ def handle_request():
                 } catch(e) {}
             }
 
+            /* ================= AMBIENT LAYER =================
+               Rain across the whole screen when it rains, drifting gusts when it
+               is windy, a warm wash when it is sunny, plus a tint for the hour
+               and for the air. Owner request, 2026-09-29.
+
+               Four decisions that are not obvious, and each of them is a
+               correction of something that is easy to get wrong:
+
+               * A CANVAS, not a hundred absolutely-positioned divs. A rain
+                 effect made of DOM nodes is 150 elements and a layout per drop
+                 per frame, on a phone that is also running the audio pipeline.
+               * DRAWS, DOES NOT DOMINATE. pointer-events:none, z-index below
+                 the page content, and the intensity comes from real numbers --
+                 `precipitaProb` for the rain, `classWindSpeed` for the gusts.
+                 An effect that ignores the forecast is wallpaper.
+               * PAUSES. Stops when the document is hidden, which is what a phone
+                 in a pocket is, and never starts under
+                 `prefers-reduced-motion`. An animation nobody asked for that
+                 keeps burning battery is a defect, not a feature.
+               * DRAWS NOTHING when there is nothing to report, and the canvas is
+                 cleared. An idle layer must not keep a loop alive. */
+            const ambient = (function () {
+                const canvas = document.getElementById('ambient');
+                const tint = document.getElementById('ambient-tint');
+                if (!canvas || !canvas.getContext) return { set() {}, setTint() {}, stop() {}, resize() {}, mode: 'none' };
+                const ctx = canvas.getContext('2d');
+                const reduce = !!(window.matchMedia
+                    && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+                let drops = [], gusts = [], raf = null, kind = 'none', level = 0;
+                let w = 0, h = 0, dpr = 1;
+
+                function size() {
+                    dpr = Math.min(window.devicePixelRatio || 1, 2);
+                    w = canvas.clientWidth || window.innerWidth;
+                    h = canvas.clientHeight || window.innerHeight;
+                    canvas.width = Math.max(1, Math.round(w * dpr));
+                    canvas.height = Math.max(1, Math.round(h * dpr));
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                }
+                size();
+
+                /* Capped. Past this the picture stops improving and the frames
+                   start costing more than the effect is worth. */
+                function budget() { return Math.min(150, Math.round(w * h / 2800)); }
+
+                function seedRain(n) {
+                    drops = [];
+                    for (let i = 0; i < n; i++) drops.push({
+                        x: Math.random() * w, y: Math.random() * h,
+                        len: 9 + Math.random() * 16, v: 6 + Math.random() * 9,
+                        a: 0.10 + Math.random() * 0.20,
+                    });
+                }
+                function seedWind(n) {
+                    gusts = [];
+                    for (let i = 0; i < n; i++) gusts.push({
+                        x: Math.random() * w, y: Math.random() * h,
+                        len: 30 + Math.random() * 90, v: 0.7 + Math.random() * 1.6,
+                        a: 0.05 + Math.random() * 0.10, wob: Math.random() * 6.28,
+                    });
+                }
+
+                function draw() {
+                    ctx.clearRect(0, 0, w, h);
+                    if (kind === 'rain') {
+                        ctx.strokeStyle = 'rgb(205,228,255)';
+                        ctx.lineWidth = 1;
+                        for (const d of drops) {
+                            ctx.globalAlpha = d.a * level;
+                            ctx.beginPath();
+                            ctx.moveTo(d.x, d.y);
+                            ctx.lineTo(d.x - d.len * 0.2, d.y + d.len);
+                            ctx.stroke();
+                            d.y += d.v * (0.6 + level);
+                            d.x -= d.v * 0.16 * (0.6 + level);
+                            if (d.y > h) { d.y = -d.len; d.x = Math.random() * w; }
+                            if (d.x < 0) d.x = w;
+                        }
+                    } else if (kind === 'wind') {
+                        ctx.strokeStyle = 'rgb(222,232,242)';
+                        ctx.lineWidth = 1.2;
+                        for (const g of gusts) {
+                            ctx.globalAlpha = g.a * level;
+                            g.wob += 0.02;
+                            ctx.beginPath();
+                            ctx.moveTo(g.x, g.y);
+                            ctx.bezierCurveTo(
+                                g.x + g.len * 0.3, g.y + Math.sin(g.wob) * 14,
+                                g.x + g.len * 0.7, g.y - Math.sin(g.wob) * 12,
+                                g.x + g.len, g.y);
+                            ctx.stroke();
+                            g.x += g.v * (0.5 + level * 1.6);
+                            if (g.x > w) { g.x = -g.len; g.y = Math.random() * h; }
+                        }
+                    }
+                    ctx.globalAlpha = 1;
+                }
+                function loop() { draw(); raf = requestAnimationFrame(loop); }
+                function start() { if (reduce || raf) return; raf = requestAnimationFrame(loop); }
+                function halt() {
+                    if (raf) cancelAnimationFrame(raf);
+                    raf = null;
+                    ctx.clearRect(0, 0, w, h);
+                }
+
+                return {
+                    set(k, l) {
+                        level = Math.max(0, Math.min(1, l || 0));
+                        if (k === 'rain' && level > 0.04) {
+                            kind = 'rain';
+                            const n = Math.round(budget() * level);
+                            if (drops.length !== n) seedRain(n);
+                            canvas.classList.remove('hidden');
+                            start();
+                        } else if (k === 'wind' && level > 0.04) {
+                            kind = 'wind';
+                            const n = Math.round(budget() * 0.5 * level);
+                            if (gusts.length !== n) seedWind(n);
+                            canvas.classList.remove('hidden');
+                            start();
+                        } else {
+                            kind = 'none';
+                            canvas.classList.add('hidden');
+                            halt();
+                        }
+                    },
+                    setTint(night, hazy) {
+                        if (!tint) return;
+                        tint.classList.toggle('night', !!night);
+                        tint.classList.toggle('hazy', !night && !!hazy);
+                        tint.style.opacity = night ? 0.85 : (hazy ? 0.5 : 0);
+                    },
+                    resize() { size(); if (kind !== 'none') draw(); },
+                    stop() { halt(); },
+                    get mode() { return kind; },
+                    get level() { return level; },
+                };
+            })();
+            window.addEventListener('resize', () => ambient.resize());
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) ambient.stop();
+                else if (ambient.mode !== 'none') ambient.set(ambient.mode, ambient.level);
+            });
+
+            /* The real forecast, mapped onto the layer. IPMA weatherType: 1
+               clear, 2-5 partly, 6-15 rain, 16+ fog. `precipitaProb` and
+               `classWindSpeed` are what decide how hard it comes down. */
+            function ambientFromForecast(today, aqi, moon) {
+                const type = Number(today.idWeatherType) || 0;
+                const prob = Number(today.precipitaProb);
+                const windClass = parseInt(String(today.classWindSpeed || '0'), 10) || 0;
+                /* IPMA wind classes 0 calm .. 5 extreme, mapped to 0..1. */
+                const wind = [0, 0.18, 0.42, 0.68, 0.88, 1][Math.max(0, Math.min(5, windClass))];
+                const rain = type >= 6 && type <= 15;
+                const sunny = type === 1;
+                const foggy = type >= 16;
+
+                if (rain) {
+                    const p = isNaN(prob) ? 0.6 : prob / 100;
+                    ambient.set('rain', Math.max(0.12, p));
+                } else if (wind >= 0.42) {
+                    ambient.set('wind', wind);
+                } else {
+                    ambient.set('none', 0);
+                }
+
+                const a = Number(aqi);
+                const bad = !isNaN(a) && a > 100;
+                const moderate = !isNaN(a) && a > 50 && a <= 100;
+                /* A full moon and a clear sky are light; a waning or absent
+                   moon is not. Fog reads as its own kind of grey. */
+                const m = String(moon || '');
+                const lit = m.includes('Cheia') || m.includes('Crescente') || sunny;
+                const dark = !lit;
+                ambient.setTint(dark, bad || moderate);
+            }
+
             async function updateWeather() {
                 try {
                     const res = await fetch('/api/weather'); const data = await res.json();
@@ -2449,6 +2717,8 @@ def handle_request():
                         else if (aqi <= 100) { aqiEl.innerHTML = AQI.moderate; aqiEl.title = `AQI ${aqi} (Moderado)`; }
                         else { aqiEl.innerHTML = AQI.bad; aqiEl.title = `AQI ${aqi} (Mau)`; }
                     } else { aqiEl.innerText = ''; }
+                    /* Feed the ambient layer with what was just fetched. */
+                    try { ambientFromForecast(today, data.aqi, moon); } catch (e) {}
                 } catch(e) {}
             }
 
@@ -2610,6 +2880,10 @@ def handle_request():
                 }
 
                 if (grip) {
+                    /* Tapping the handle closes. It is a <div>, so this is both
+                       the pointer path and the touch path -- and it means the
+                       panel always has a visible way out that is not a drag. */
+                    grip.addEventListener('click', () => closeChat());
                     grip.addEventListener('touchstart', dragStart, {passive: true});
                     grip.addEventListener('touchmove', dragMove, {passive: false});
                     grip.addEventListener('touchend', dragEnd);
