@@ -2404,6 +2404,213 @@ def handle_request():
         </div>
         <!-- The grab handle moved INSIDE #main (see the comment there). -->
 
+        <!-- ==========================================================
+             THE GHOST AVATAR
+             One ghost, ten expressions, geometry frozen.
+
+             The design is borrowed from a system built elsewhere for a
+             different character; the artwork is pHantasma's own. What was
+             taken is the contract, and the contract is the point:
+
+               * the silhouette is byte-identical in all ten expressions --
+                 the body path below is the same `d` the brand ghost has
+                 always used, so the character in the chat is provably the
+                 same ghost as the one on the bar;
+               * only the face varies. Body, halo and glint sit OUTSIDE the
+                 face groups and are never switched;
+               * an unknown, empty or missing expression renders `normal`.
+                 That is CSS, not JavaScript: the ten rules below only ever
+                 HIDE normal, so a name none of them matches leaves the
+                 default in place. A malformed attribute cannot blank the
+                 avatar, and it cannot show two faces, because exactly one
+                 rule pair can ever apply;
+               * no animation, no blinking, no idle motion. The only motion
+                 in the chat avatar is the float on the .ia-avatar wrapper
+                 that predates this component;
+               * nine `--avatar-*` variables and no hardcoded colours, so
+                 the ghost can be re-coloured without touching the markup;
+               * legible at 22px (the size the chat uses). No visible text
+                 inside the SVG -- the accessible name is an aria-label.
+
+             One definition, many instances: every <ghost-avatar> clones this
+             template into its own shadow root, so the markup exists once in
+             the document instead of being inlined per message. Shadow DOM
+             also means the page's CSS cannot reach the face, which is what
+             keeps `.ia-avatar svg { ... }` from quietly re-sizing it.
+             ========================================================== -->
+        <template id="ghost-avatar-tpl">
+        <style>
+        :host {
+            /* The nine theming variables. Defaults are pHantasma's dark
+               theme, which is the only theme there is today; they exist so
+               a future light theme does not have to touch the geometry.
+               Contrast: --avatar-face and --avatar-body must keep a 3:1
+               ratio against --avatar-background, and the face against the
+               body fill. At 22px a 1.6 stroke is ~1.5 device px. */
+            --avatar-size: 22px;
+            --avatar-body: #d6d6d6;
+            --avatar-fill: transparent;
+            --avatar-face: #d6d6d6;
+            --avatar-highlight: #4db6ac;
+            --avatar-background: transparent;
+            --avatar-shadow: transparent;
+            --avatar-opacity: 1;
+            --avatar-stroke-width: 1.6;
+            display: inline-flex;
+            width: var(--avatar-size);
+            height: var(--avatar-size);
+            flex: 0 0 auto;
+            opacity: var(--avatar-opacity);
+        }
+        :host([hidden]) { display: none; }
+        svg { width: 100%; height: 100%; display: block; }
+        .ghost-halo { fill: var(--avatar-background); }
+        .ghost-body {
+            fill: var(--avatar-fill);
+            stroke: var(--avatar-body);
+            stroke-width: var(--avatar-stroke-width);
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .ghost-glint {
+            fill: none; stroke: var(--avatar-highlight); opacity: .7;
+            stroke-width: calc(var(--avatar-stroke-width) * .7);
+            stroke-linecap: round;
+        }
+        .face {
+            display: none; fill: none; stroke: var(--avatar-face);
+            stroke-width: var(--avatar-stroke-width);
+            stroke-linecap: round; stroke-linejoin: round;
+        }
+        /* normal is the default and is only ever hidden by a rule that
+           RECOGNISES the name. Anything else leaves it standing. */
+        .face[data-f="normal"] { display: block; }
+        :host([data-expression="wink"])      .face[data-f="normal"],
+        :host([data-expression="happy"])     .face[data-f="normal"],
+        :host([data-expression="thinking"])  .face[data-f="normal"],
+        :host([data-expression="surprised"]) .face[data-f="normal"],
+        :host([data-expression="confused"])  .face[data-f="normal"],
+        :host([data-expression="sleepy"])    .face[data-f="normal"],
+        :host([data-expression="excited"])   .face[data-f="normal"],
+        :host([data-expression="error"])     .face[data-f="normal"],
+        :host([data-expression="loading"])   .face[data-f="normal"] { display: none; }
+        :host([data-expression="wink"])      .face[data-f="wink"],
+        :host([data-expression="happy"])     .face[data-f="happy"],
+        :host([data-expression="thinking"])  .face[data-f="thinking"],
+        :host([data-expression="surprised"]) .face[data-f="surprised"],
+        :host([data-expression="confused"])  .face[data-f="confused"],
+        :host([data-expression="sleepy"])    .face[data-f="sleepy"],
+        :host([data-expression="excited"])   .face[data-f="excited"],
+        :host([data-expression="error"])     .face[data-f="error"],
+        :host([data-expression="loading"])   .face[data-f="loading"] { display: block; }
+        </style>
+        <svg viewBox="0 0 24 24" focusable="false">
+            <circle class="ghost-halo" cx="12" cy="12" r="11.6"/>
+            <!-- FROZEN. This `d` is the brand ghost's, unchanged. -->
+            <path class="ghost-body" d="M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z"/>
+            <path class="ghost-glint" d="M7.7 8.1a5.4 5.4 0 0 1 2.9-1.9"/>
+            <g class="face" data-f="normal">
+                <circle cx="9.6" cy="11.2" r="1.2"/><circle cx="14.4" cy="11.2" r="1.2"/>
+                <path d="M10.9 14.4q1.1 1 2.2 0"/>
+            </g>
+            <g class="face" data-f="wink">
+                <circle cx="9.6" cy="11.2" r="1.2"/>
+                <path d="M13.2 11.4q1.2 -1.1 2.4 0"/>
+                <path d="M10.9 14.4q1.1 1 2.2 0"/>
+            </g>
+            <g class="face" data-f="happy">
+                <path d="M8.4 11.4q1.2 -1.2 2.4 0"/>
+                <path d="M13.2 11.4q1.2 -1.2 2.4 0"/>
+                <path d="M9.9 14.2q2.1 1.6 4.2 0"/>
+            </g>
+            <g class="face" data-f="thinking">
+                <circle cx="9.2" cy="10.5" r="1.05"/><circle cx="14.3" cy="10.9" r="1.05"/>
+                <path d="M8 8.5q1.5 -0.8 3 0.1"/>
+                <path d="M11 15.1h2.1"/>
+            </g>
+            <g class="face" data-f="surprised">
+                <circle cx="9.5" cy="10.9" r="1.45"/><circle cx="14.5" cy="10.9" r="1.45"/>
+                <ellipse cx="12" cy="15" rx="1" ry="1.25"/>
+            </g>
+            <g class="face" data-f="confused">
+                <circle cx="9.5" cy="11.2" r="1.2"/><circle cx="14.7" cy="11.9" r=".95"/>
+                <path d="M7.9 8.9l2.7 -1"/>
+                <path d="M10.2 14.8q.9 -.9 1.8 0t1.8 0"/>
+            </g>
+            <g class="face" data-f="sleepy">
+                <path d="M8.4 10.6q1.2 1.2 2.4 0"/>
+                <path d="M13.2 10.6q1.2 1.2 2.4 0"/>
+                <path d="M11.2 15h1.7"/>
+            </g>
+            <g class="face" data-f="excited">
+                <circle cx="9.5" cy="10.8" r="1.35"/><circle cx="14.5" cy="10.8" r="1.35"/>
+                <path d="M9.2 13.9q2.8 2.4 5.6 0"/>
+            </g>
+            <g class="face" data-f="error">
+                <path d="M8.5 10.1l2 2m0 -2l-2 2"/>
+                <path d="M13.5 10.1l2 2m0 -2l-2 2"/>
+                <path d="M9.8 15q1.1 -1.1 2.2 0t2.2 0"/>
+            </g>
+            <g class="face" data-f="loading">
+                <path d="M8.5 10.6h2.2"/><path d="M13.3 10.6h2.2"/>
+                <path d="M11 15h2"/>
+            </g>
+        </svg>
+        </template>
+        <script>
+        /* Defined before the chat script below so an element created in the
+           first millisecond still upgrades: `customElements.define` upgrades
+           existing markup synchronously, and anything created after that
+           upgrades on insertion. There is no "waiting for DOMContentLoaded"
+           window where the ghost would be blank. */
+        (function () {
+            const EXPRESSIONS = ['normal','wink','happy','thinking','surprised',
+                                 'confused','sleepy','excited','error','loading'];
+            class GhostAvatar extends HTMLElement {
+                static get observedAttributes() { return ['expression', 'label', 'decorative']; }
+                connectedCallback() { this._build(); this._reflect(); }
+                attributeChangedCallback() { if (this._built) this._reflect(); }
+                _build() {
+                    if (this._built) return;
+                    const tpl = document.getElementById('ghost-avatar-tpl');
+                    if (!tpl) return;   /* no template: renders nothing, does not throw */
+                    this.attachShadow({ mode: 'open' });
+                    this.shadowRoot.appendChild(tpl.content.cloneNode(true));
+                    this._built = true;
+                }
+                _reflect() {
+                    /* The attribute is passed through unvalidated on purpose.
+                       Validating here would mean the ALLOWED list lives in two
+                       places -- this array and the CSS -- and they would drift.
+                       CSS is the single authority for what a name means, and an
+                       unrecognised one falls through to normal for free. */
+                    const expr = (this.getAttribute('expression') || '').trim();
+                    if (expr) this.setAttribute('data-expression', expr);
+                    else this.removeAttribute('data-expression');
+                    if (this.hasAttribute('decorative')) {
+                        this.setAttribute('aria-hidden', 'true');
+                        this.removeAttribute('role');
+                        this.removeAttribute('aria-label');
+                    } else {
+                        this.setAttribute('role', 'img');
+                        this.setAttribute('aria-label', this.getAttribute('label') || 'pHantasma');
+                    }
+                }
+            }
+            customElements.define('ghost-avatar', GhostAvatar);
+            /* Exposed for the tests, which assert the list against the CSS
+               rather than against a comment. */
+            window.__GHOST_EXPRESSIONS__ = EXPRESSIONS;
+            window.ghostAvatar = function (expression, label) {
+                const el = document.createElement('ghost-avatar');
+                el.setAttribute('expression', expression || 'normal');
+                if (label) el.setAttribute('label', label);
+                else el.setAttribute('decorative', '');
+                return el;
+            };
+        })();
+        </script>
+
         <script>
             const chatLog = document.getElementById('chat-log');
             const chatInput = document.getElementById('chat-input');
@@ -2598,7 +2805,11 @@ def handle_request():
             function showTypingIndicator() {
                 if (document.getElementById('typing-indicator-row')) return;
                 const row = document.createElement('div'); row.id = 'typing-indicator-row'; row.className = 'msg-row ia'; 
-                const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerHTML = GHOST_SVG;
+                /* thinking, and labelled: in this row the ghost is the only
+                   thing saying "I am working", so it needs a name. The dots
+                   stay -- removing them is a design call, not this ticket. */
+                const avatar = document.createElement('div'); avatar.className = 'ia-avatar';
+                avatar.appendChild(ghostAvatar('thinking', 'pHantasma está a pensar'));
                 const bubble = document.createElement('div'); bubble.className = 'typing-indicator'; 
                 bubble.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
                 row.append(avatar, bubble); chatLog.appendChild(row); chatLog.scrollTop = chatLog.scrollHeight;
@@ -2829,10 +3040,14 @@ def handle_request():
             }
 
 
-            function addToChatLog(text, sender = 'ia') {
+            function addToChatLog(text, sender = 'ia', expression = 'normal') {
                 removeTypingIndicator(); 
                 const row = document.createElement('div'); row.className = `msg-row ${sender}`;
-                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.innerHTML = GHOST_SVG; row.appendChild(avatar); }
+                /* The expression is a parameter, not a lookup: a caller that
+                   knows the house failed passes 'error', and everyone else gets
+                   normal. The ghost reports the state the row is about, which
+                   is the only reason it varies at all. */
+                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.appendChild(ghostAvatar(expression)); row.appendChild(avatar); }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 // Stable per-message id. Without it `message_id` was always the
                 // empty string, so the endpoint's 30s rate limit keyed on
@@ -2867,7 +3082,7 @@ def handle_request():
                     const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
                     const data = await res.json(); 
                     if (data.response) addToChatLog(data.response, 'ia'); else removeTypingIndicator();
-                } catch (e) { removeTypingIndicator(); addToChatLog('Erro rede.', 'ia'); }
+                } catch (e) { removeTypingIndicator(); addToChatLog('Erro rede.', 'ia', 'error'); }
             }
 
             async function handleDeviceAction(device, action, tile) {
@@ -2912,13 +3127,13 @@ def handle_request():
                            absent was treated as "nothing to say" and the
                            backend's own explanation was thrown away. */
                         const why = data.message || data.status || `HTTP ${res.status}`;
-                        addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia');
+                        addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia', 'error');
                         markTileResult(tile, false, why);
                     }
                 } catch (e) {
                     removeTypingIndicator();
                     const why = (e && e.message) ? e.message : 'erro de rede';
-                    addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia');
+                    addToChatLog(`Não foi possível ${action} ${device}: ${why}`, 'ia', 'error');
                     markTileResult(tile, false, why);
                 }
             }

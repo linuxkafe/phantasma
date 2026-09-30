@@ -45,6 +45,32 @@ pytestmark = pytest.mark.skipif(
     reason="no headless browser: these are the only tests that can see whether the controls work",
 )
 
+# The chat ghost is a custom element, so the drawing lives in its shadow root and
+# `avatar.querySelector('svg')` -- a light-DOM query -- no longer finds it. Two
+# consequences for the tests below, both of which had to be looked at rather than
+# worked around:
+#
+#   * the SVG has to be reached through the shadow root;
+#   * the stroke is no longer on the <svg> but on the shape inside it that
+#     actually draws the silhouette. Checking the <svg> would report `none` for
+#     a ghost that is drawn perfectly well, so these assertions follow the ink
+#     rather than the wrapper.
+_GHOST_SHAPE_JS = """
+() => {
+    const avatar = document.querySelector('.ia-avatar');
+    if (!avatar) return null;
+    const host = avatar.querySelector('ghost-avatar');
+    const root = host && host.shadowRoot;
+    const svg = (root && root.querySelector('svg')) || avatar.querySelector('svg');
+    if (!svg) return {svg: false};
+    const body = (root && root.querySelector('.ghost-body')) || svg;
+    const cs = getComputedStyle(body);
+    const r = body.getBoundingClientRect();
+    return {svg: true, stroke: cs.stroke, strokeWidth: cs.strokeWidth,
+            w: Math.round(r.width), h: Math.round(r.height)};
+}
+"""
+
 
 @pytest.fixture(scope="module")
 def doc(tmp_path_factory):
@@ -574,9 +600,10 @@ def test_the_chat_avatar_is_a_ghost_and_is_sized(page):
     page.wait_for_timeout(200)
     box = page.evaluate(
         """() => {const a=document.querySelector('.ia-avatar'); if(!a) return null;
-            const s=a.querySelector('svg');
             const r=a.getBoundingClientRect();
-            return {w:Math.round(r.width), h:Math.round(r.height), svg:!!s};}"""
+            const shape=(%s)();
+            return {w:Math.round(r.width), h:Math.round(r.height),
+                    svg: !!(shape && shape.svg)};}""" % _GHOST_SHAPE_JS
     )
     assert box is not None, "the chat has no avatar at all"
     assert box["svg"], "the avatar is not a ghost"
@@ -671,23 +698,19 @@ def test_the_chat_avatar_is_not_an_invisible_stroke(page):
     is worse than no ghost, because the space is still reserved.
     """
     page.wait_for_timeout(400)
-    info = page.evaluate(
-        """() => {
-            const a = document.querySelector('.ia-avatar');
-            if (!a) return null;
-            const svg = a.querySelector('svg');
-            if (!svg) return {svg: false};
-            const cs = getComputedStyle(svg);
-            return {svg: true, stroke: cs.stroke,
-                    w: Math.round(svg.getBoundingClientRect().width)};
-        }"""
-    )
+    info = page.evaluate(_GHOST_SHAPE_JS)
     assert info and info["svg"], "the avatar has no SVG in it"
     assert info["stroke"] not in ("none", "", "rgba(0, 0, 0, 0)"), (
         f"the ghost's stroke is {info['stroke']!r}: the avatar occupies space "
         f"and draws nothing, which reads as a missing image"
     )
+    assert info["strokeWidth"] not in ("0px", "0", "none", ""), (
+        f"the ghost's stroke-width is {info['strokeWidth']!r}: nothing is inked"
+    )
     assert info["w"] > 4, f"the ghost is {info['w']}px wide"
+    assert info["h"] > 4, (
+        f"the ghost is {info['h']}px tall: it is a silhouette, not a line"
+    )
 
 
 # --- press and hold, not tap to toggle ------------------------------------

@@ -127,6 +127,48 @@ Library: Lucide (lucide.dev)
 - Use Lucide icons, Heroicons, inline SVG, or text labels
 - Emojis allowed only in comments, markdown docs, README
 
+## The Ghost Avatar
+
+The chat ghost is a `<ghost-avatar>` custom element with a shadow root, defined
+once in `skills/skill_ui.py`. One `<template>` holds the whole drawing; every
+instance clones it, so the markup exists once in the document rather than being
+inlined per message, and page CSS cannot reach the face.
+
+**Ten expressions**, switched by the `data-expression` attribute:
+`normal`, `wink`, `happy`, `thinking`, `surprised`, `confused`, `sleepy`,
+`excited`, `error`, `loading`.
+
+The rules the component holds to:
+
+- **The silhouette is frozen.** The body path is the brand ghost's own `d`,
+  identical in all ten expressions. Only the face varies. A test compares the
+  component's path against `GHOST_SVG` so "the ghost in the chat" cannot quietly
+  become a lookalike.
+- **The fallback is CSS, not JavaScript.** The ten rules only ever *hide*
+  `normal`, so an unknown, empty or missing expression leaves the default
+  standing. A malformed attribute can never blank the avatar, and it can never
+  show two faces, because exactly one rule pair can ever apply.
+- **No animation.** No blinking, no idle motion. The only motion on the chat
+  avatar is the pre-existing float on the `.ia-avatar` wrapper.
+- **Nine `--avatar-*` variables** — `--avatar-size`, `--avatar-body`,
+  `--avatar-fill`, `--avatar-face`, `--avatar-highlight`,
+  `--avatar-background`, `--avatar-shadow`, `--avatar-opacity`,
+  `--avatar-stroke-width` — so a future light theme does not touch the geometry.
+  `--avatar-face` and `--avatar-body` need 3:1 against `--avatar-background`,
+  and the face against the body fill.
+- **No visible text in the SVG.** A per-message ghost is `aria-hidden`; the
+  typing ghost is labelled, because in that row it is the only thing saying
+  "I am working".
+
+`addToChatLog(text, sender, expression)` takes the expression rather than
+looking it up: normal answers pass `normal`, the typing row passes `thinking`,
+and a failed command or a network error passes `error`. The eight remaining
+faces are built and tested but not yet reachable from a real state.
+
+Rendering tests live in `tests/test_ghost_avatar_browser.py`. They assert painted
+geometry, not string presence, because the failure mode is silent: an expression
+matching no rule leaves every face hidden and the chat shows a blank space.
+
 ## Do's
 
 - Use semantic HTML in web views
