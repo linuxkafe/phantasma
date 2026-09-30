@@ -206,6 +206,27 @@ def create_app(pipeline=None) -> Flask:
         Configured Flask application.
     """
     app = Flask(__name__)
+    # The auth schema is brought up to date HERE, at startup, not lazily on the
+    # first request that happens to need it.
+    #
+    # A lazy migration means the column a feature needs appears the first time
+    # somebody opens that feature's page -- so a deploy can look healthy, the
+    # health check can pass, and the schema change can still be sitting undone
+    # in production. That is exactly what happened with `users.discord_id`: the
+    # deploy was green and the column was not there. It is cheap and idempotent
+    # (a PRAGMA and, at most, one ALTER), and a failure is reported rather than
+    # swallowed -- but it must not stop the service from starting, so it is
+    # caught and logged.
+    try:
+        from src.api import auth_store as _auth_store
+
+        _auth_store.ensure_schema(None)
+    except Exception as exc:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "auth: schema nao aplicado ao arrancar: %s", exc
+        )
     # (actor, emoji, message_id) -> monotonic timestamps, for replay
     # suppression on the reaction endpoint.
     _REACTION_SEEN: dict = {}

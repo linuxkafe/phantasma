@@ -489,7 +489,8 @@ def _build_nav_menu(
             continue
         active = " active" if endpoint == current_endpoint else ""
         parts.append(
-            f'    <a href="{url}" class="nav-link{active}">{t(key, lang, _fallback=fallback)}</a>'
+              f'    <a href="{url}" class="nav-link{active}">{t(key, lang, default=fallback)}</a>'
+
         )
     parts.append("  </div>")
     parts.append('  <div class="nav-spacer"></div>')

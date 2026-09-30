@@ -551,7 +551,7 @@ def render_verify_page(error=None, email="", restart=False):
 
 
 def profile_page():
-    """The user's own page: tokens and trusted devices.
+    """The user's own page: tokens, trusted devices, and Discord identity.
 
     A token is shown exactly once, at creation, and cannot be recovered
     afterwards -- a list that re-displays secrets is a password list with a
@@ -567,6 +567,8 @@ def profile_page():
     auth_store, conn = _auth_store()
 
     minted = None
+    discord_note = None
+    discord_note_ok = False
     if request.method == "POST":
         op = request.form.get("op")
         if op == "create_token":
@@ -577,7 +579,19 @@ def profile_page():
             auth_store.revoke_token(conn, email, int(request.form.get("id") or 0))
         elif op == "revoke_device":
             auth_store.revoke_devices(conn, email)
+        elif op in ("set_discord_id", "clear_discord_id"):
+            # An authorisation change, so the outcome is always said out loud.
+            # A form that saves silently is a form whose failure the user only
+            # discovers from Discord saying "Acesso negado." an hour later.
+            raw = "" if op == "clear_discord_id" else request.form.get("discord_id")
+            ok, problem = auth_store.set_discord_id(email, raw, conn)
+            discord_note = problem or (
+                "ID do Discord removido." if op == "clear_discord_id"
+                else "ID do Discord guardado."
+            )
+            discord_note_ok = ok
 
+    discord_id = auth_store.get_discord_id(email, conn) or ""
     tokens = auth_store.list_tokens(conn, email)
     devices = auth_store.list_devices(conn, email)
 
@@ -635,6 +649,21 @@ não voltarás a vê-lo.</strong><br><span class="mono">{secret}</span></p>
   <pre class="mono" style="margin:0;white-space:pre-wrap">{example}</pre>
 </div>"""
 
+    discord_note_block = ""
+    if discord_note:
+        # Said either way, success or refusal. `role=status` so a screen reader
+        # announces it: the note appears after a POST, with no navigation and no
+        # focus move, which is exactly the case assistive tech is worst at.
+        colour = "#4ade80" if discord_note_ok else "#f87171"
+        discord_note_block = (
+            f"<p role='status' style='color:{colour};margin:.5rem 0 0'>{discord_note}</p>"
+        )
+    discord_clear_block = (
+        "<form method=\"post\" style=\"margin-top:.5rem\">"
+        "<input type=\"hidden\" name=\"op\" value=\"clear_discord_id\">"
+        "<button class=\"secondary\" type=\"submit\">Desligar o Discord</button>"
+        "</form>" if discord_id else ""
+    )
     return _auth_page(
         "O meu perfil",
         f"""{minted_block}
@@ -649,6 +678,22 @@ Não dá acesso a esta página, a memórias nem à administração.</p>
   <input id="name" name="name" placeholder="ex.: Home Assistant">
   <button type="submit">Criar token</button>
 </form>
+<h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Discord</h2>
+<p class="muted">Escreve aqui o teu ID numérico de Discord (o do perfil, em
+Definições de utilizador &rarr; Copiar ID, com o Discord Developer Mode ligado)
+para poderes mandar comandos pelo bot. O que este ID autoriza é o teu papel
+aqui: administrador dá acesso total, utilizador dá o acesso normal com a
+mesma quota de sempre. Um ID só pode estar associado a uma conta.</p>
+{discord_note_block}
+<form method="post">
+  <input type="hidden" name="op" value="set_discord_id">
+  <label for="discord_id">ID do Discord</label>
+  <input id="discord_id" name="discord_id" inputmode="numeric" pattern="[0-9]*"
+         autocomplete="off" spellcheck="false" placeholder="ex.: 123456789012345678"
+         value="{discord_id}">
+  <button type="submit">Guardar</button>
+</form>
+{discord_clear_block}
 <h2 style="font-size:1rem;margin:1.5rem 0 .5rem">Dispositivos</h2>
 <ul class="plain">{device_rows}</ul>
 <form method="post">

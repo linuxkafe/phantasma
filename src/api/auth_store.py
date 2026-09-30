@@ -140,13 +140,60 @@ def _connect(conn_or_path) -> sqlite3.Connection:
     return admin_mod.get_db_connection()
 
 
+def _ensure_column(conn, table: str, column: str, decl: str) -> bool:
+    """Add a column if the table has it and the column is missing.
+
+    ``CREATE TABLE IF NOT EXISTS`` cannot add a column to a table that already
+    exists, so a schema change to somebody else's table needs this instead. The
+    ``PRAGMA`` check is what makes it idempotent: safe to call on every request,
+    which is what ``ensure_schema`` already promises.
+
+    Silently does nothing when the table is absent. On a fresh install ``users``
+    is created by the bootstrap that owns it, not here, and a column migration
+    that raised on a missing table would take the whole auth path down on a
+    database that is merely not initialised yet.
+    """
+    try:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return False
+    if not existing or column in existing:
+        return False
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return True
+    except sqlite3.Error:
+        return False
+
+
 def ensure_schema(conn_or_path) -> None:
     """Create the tables if absent. Safe to call on every request.
 
     Takes an OPEN connection where one is available, so a code is consumed in
     the same transaction as whatever it authorised.
     """
-    _connect(conn_or_path).executescript(SCHEMA)
+    conn = _connect(conn_or_path)
+    conn.executescript(SCHEMA)
+    # `users` is not ours to create, but the Discord identity is an auth
+    # concern, so the column is added here rather than in a migration nobody
+    # remembers to run. Additive and guarded, so an existing install gains it on
+    # the next request and a fresh one gets it on its first.
+    _ensure_column(conn, "users", "discord_id", "TEXT")
+    try:
+        # One Discord account, one phantasma user. Enforced here and not only in
+        # the form: without it, two accounts could each claim the same ID and
+        # the second one to save would silently win, which is an authorisation
+        # decision made by whichever request arrived last.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_id"
+            " ON users (discord_id) WHERE discord_id IS NOT NULL"
+            " AND discord_id != ''"
+        )
+    except sqlite3.Error:
+        # Pre-existing duplicates must not stop the service from starting. The
+        # lookup below resolves them by refusing the ambiguous ID, which is the
+        # safe direction: no access rather than the wrong access.
+        pass
 
 
 def _pepper() -> bytes:
@@ -527,3 +574,129 @@ def set_password(conn_or_path, email: str, password: str) -> bool:
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+# --------------------------------------------------------------- Discord ----
+#
+# The Discord bot authorises by Discord's own numeric user id, from
+# DISCORD_ADMIN_USERS / DISCORD_STANDARD_USERS in the environment. That is fine
+# for an install with one operator and terrible for a household: the list lives
+# in a file only the owner can edit, so a second person cannot join, and nobody
+# can discover their own id without asking.
+#
+# So a signed-in user may claim an id from their own profile, and the web role
+# decides what that id may do. The environment lists keep working and keep their
+# precedence: they are the owner's deliberate, out-of-band decision, and a
+# profile field must not be able to take a capability away from them.
+#
+# The security property that matters: this is an AUTHORISATION change, so the
+# dangerous move is one user claiming another user's id. Hence the unique index,
+# the refusal to overwrite an id that is already claimed, and -- for ids that
+# somehow exist twice -- a refusal rather than a guess. In every ambiguous case
+# the answer is "no access", never "possibly the wrong access".
+
+DISCORD_ID_MAX = 20  # Discord snowflakes are 17-20 digits and fit in an int64
+
+
+def normalise_discord_id(raw: str | None) -> tuple[str | None, str | None]:
+    """Validate a claimed Discord id.
+
+    Returns ``(id, None)`` or ``(None, reason)``. Digits only: a Discord user id
+    is a snowflake, and accepting anything else would put a string into a
+    column that the bot compares against integers.
+    """
+    text = (raw or "").strip().replace(" ", "")
+    if not text:
+        return None, None  # empty means "clear it", not an error
+    # `[0-9]` and not `str.isdigit()`. `isdigit()` is True for every Unicode
+    # decimal digit, so "٣٤٥" (Arabic-Indic) validated as a numeric id: it looks
+    # like a number, it goes into a column the bot compares against an int, and
+    # it can therefore never match. A field that accepts a value guaranteed to
+    # fail later is worse than one that refuses it here, where the user is
+    # looking.
+    if not re.fullmatch(r"[0-9]+", text):
+        return None, "O ID do Discord são só algarismos."
+    if len(text) > DISCORD_ID_MAX:
+        return None, "Esse ID do Discord é demasiado longo."
+    return text, None
+
+
+def get_discord_id(email: str, conn_or_path=None) -> str | None:
+    """The Discord id claimed by ``email``."""
+    row = _connect(conn_or_path).execute(
+        "SELECT discord_id FROM users WHERE email = ?",
+        ((email or "").strip().lower(),),
+    ).fetchone()
+    if row is None:
+        return None
+    value = row["discord_id"] if not isinstance(row, tuple) else row[0]
+    return (value or "").strip() or None
+
+
+def set_discord_id(email: str, raw: str | None, conn_or_path=None) -> tuple[bool, str | None]:
+    """Claim (or clear) a Discord id for ``email``.
+
+    ``(True, None)`` on success, ``(False, reason)`` otherwise -- the reason is
+    shown to the user, so it says what to do rather than "error".
+    """
+    discord_id, problem = normalise_discord_id(raw)
+    if problem:
+        return False, problem
+    conn = _connect(conn_or_path)
+    who = (email or "").strip().lower()
+    try:
+        ensure_schema(conn)
+        if discord_id is None:
+            conn.execute("UPDATE users SET discord_id = NULL WHERE email = ?", (who,))
+            conn.commit()
+            return True, None
+        taken = conn.execute(
+            "SELECT email FROM users WHERE discord_id = ? AND email != ?",
+            (discord_id, who),
+        ).fetchone()
+        if taken is not None:
+            # Not "already yours, fine": the owner may have re-typed it, and the
+            # honest answer is that the id is in use, not that it worked.
+            return False, "Esse ID do Discord já está associado a outra conta."
+        conn.execute(
+            "UPDATE users SET discord_id = ? WHERE email = ?", (discord_id, who)
+        )
+        conn.commit()
+        return True, None
+    except sqlite3.IntegrityError:
+        # The unique index fired, which is the database disagreeing with a
+        # check-then-write. Two requests, same id, same instant.
+        return False, "Esse ID do Discord já está associado a outra conta."
+    except sqlite3.Error as exc:
+        logger.error(f"auth: discord id refused: {exc}")
+        return False, "Não foi possível guardar o ID do Discord."
+
+
+def discord_role_for(discord_id, conn_or_path=None) -> str | None:
+    """The web role of the account that claims this Discord id.
+
+    ``"admin"``, ``"user"``, or ``None`` when the id is not claimed, is claimed
+    ambiguously, or belongs to a deactivated account. A deactivated account
+    keeps its id and loses its access, which is the point of the check.
+    """
+    if discord_id in (None, ""):
+        return None
+    try:
+        conn = _connect(conn_or_path)
+        ensure_schema(conn)
+        rows = conn.execute(
+            "SELECT role, is_active FROM users WHERE discord_id = ?", (str(discord_id),)
+        ).fetchall()
+    except sqlite3.Error as exc:
+        logger.error(f"auth: discord role lookup failed: {exc}")
+        return None
+    if len(rows) != 1:
+        # Zero: not claimed. More than one: a duplicate that predates the unique
+        # index. Either way there is no single account to speak for this id.
+        return None
+    row = rows[0]
+    role = row["role"] if not isinstance(row, tuple) else row[0]
+    active = row["is_active"] if not isinstance(row, tuple) else row[1]
+    if not active:
+        return None
+    return (role or "user").strip().lower() or "user"

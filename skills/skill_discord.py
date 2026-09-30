@@ -18,32 +18,8 @@ from src.brain.persistence import FlyBrainStore
 TRIGGER_TYPE = "contains"
 TRIGGERS = []
 
-# --- Definições de Permissões ---
-# Palavras-chave para identificar skills permitidas (Meteorologia e Calculadora)
-# Duplicamos aqui os triggers principais para evitar importar outros módulos e causar ciclos.
-ALLOWED_SKILL_KEYWORDS = [
-    # Meteorologia
-    "tempo",
-    "clima",
-    "meteorologia",
-    "previsão",
-    "vai chover",
-    "qualidade do ar",
-    # Calculadora
-    "quanto é",
-    "calcula",
-    "a dividir",
-    "vezes",
-    "somado",
-    "subtraído",
-    "+",
-    "-",
-    "*",
-    "/",
-]
 
-# Cache de Quotas: { user_id: { "date": "YYYY-MM-DD", "count": 0 } }
-_USER_QUOTAS = {}
+
 
 # FlyBrain instance for reaction feedback
 _fly_brain = None
@@ -84,51 +60,34 @@ _COMMAND_HEADERS = (
 def _check_access(user_id, prompt_lower):
     """
     Retorna (AcessoPermitido: bool, MensagemErro: str)
+
+    A regra vive em src/api/discord_access.py. Ficava aqui e nao havia testes
+    possiveis: este modulo importa o discord.py e constroi um Client vivo no
+    import, portanto testar a regra exigia instalar um SDK de 15 MB no venv de
+    desenvolvimento (so existe no de producao) ou construir um falso que
+    ganhava um atributo novo por cada linha do skill importada -- Intents, um
+    Client que aceita keywords, Client().event. Um falso que cresce e um sitio
+    onde o teste deixa de testar a coisa real.
+
+    A precedencia, que e o que interessa:
+
+    1. As listas do ambiente (DISCORD_ADMIN_USERS / DISCORD_STANDARD_USERS) sao
+       a escolha deliberada do dono, feita fora da aplicacao, e nenhum campo de
+       perfil lhes pode tirar o que tem.
+    2. O perfil. Qualquer conta com sessao pode reclamar o seu id de Discord em
+       /perfil, e o PAPEL WEB dessa conta decide: admin passa a acesso total,
+       user passa ao acesso normal com a mesma quota. E assim que a segunda
+       pessoa da casa entra, sem editar um ficheiro que so o dono abre.
+    3. Negado.
+
+    E uma mudanca de AUTORIZACAO, e o movimento perigoso e um-utilizador
+    reclamar o id de outro. Daí o indice unico, a recusa de sobrescrever, e --
+    para ids que existam duas vezes -- a recusa em vez da palpite. Em qualquer
+    caso ambiguo a resposta e "sem acesso", nunca "provavelmente o acesso errado".
     """
-    # 1. Verificar se é Admin
-    if hasattr(config, "DISCORD_ADMIN_USERS") and user_id in config.DISCORD_ADMIN_USERS:
-        return True, ""
+    from src.api import discord_access
 
-    # 2. Verificar se é Standard
-    if (
-        hasattr(config, "DISCORD_STANDARD_USERS")
-        and user_id in config.DISCORD_STANDARD_USERS
-    ):
-        return _process_standard_quota(user_id, prompt_lower)
-
-    # 3. Não autorizado
-    return False, "Acesso negado."
-
-
-def _process_standard_quota(user_id, prompt_lower):
-    """
-    Gere a lógica de limites para utilizadores standard.
-    """
-    # A. Verifica se é uma Skill Permitida (Weather/Calc) -> Uso Gratuito/Ilimitado
-    is_allowed_skill = any(
-        keyword in prompt_lower for keyword in ALLOWED_SKILL_KEYWORDS
-    )
-    if is_allowed_skill:
-        return True, ""
-
-    # B. Se for LLM (Pergunta geral), verificar quota diária
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    # Inicializa ou Reinicia quota se mudou o dia
-    if user_id not in _USER_QUOTAS or _USER_QUOTAS[user_id]["date"] != today_str:
-        _USER_QUOTAS[user_id] = {"date": today_str, "count": 0}
-
-    current_count = _USER_QUOTAS[user_id]["count"]
-    limit = getattr(config, "DISCORD_DAILY_LLM_LIMIT", 3)
-
-    if current_count < limit:
-        _USER_QUOTAS[user_id]["count"] += 1
-        return True, ""
-    else:
-        return (
-            False,
-            f"Atingiste o teu limite diário de {limit} perguntas ao cérebro do Phantasma (as ferramentas de tempo e cálculo continuam disponíveis).",
-        )
+    return discord_access.check(user_id, prompt_lower)
 
 
 async def _send_to_phantasma(prompt):

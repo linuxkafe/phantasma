@@ -33,6 +33,14 @@ STRINGS: dict[str, dict[str, str]] = {
     "nav.env": {"pt": ".env", "en": ".env"},
     "nav.logout": {"pt": "Sair", "en": "Sign out"},
     "nav.language": {"pt": "Idioma", "en": "Language"},
+    # Was MISSING, and the nav renders `t(key)`, so the hamburger showed the
+    # literal string "nav.profile" to the owner instead of "Perfil". Seven other
+    # nav keys were here and this one was not, and nothing noticed: the test
+    # this module's docstring credits with catching exactly that
+    # (tests/test_i18n.py) did not exist. It does now, and it checks the KEYS
+    # USED against this catalogue rather than only the shape of what is here --
+    # a catalogue can be perfectly well-formed and still not cover its callers.
+    "nav.profile": {"pt": "Perfil", "en": "Profile"},
     # --- brain section ------------------------------------------------------
     "brain.hub": {"pt": "Tudo", "en": "All"},
     "brain.memory": {"pt": "Memória", "en": "Memory"},
@@ -161,12 +169,26 @@ def parse_accept_language(header: str | None) -> str | None:
     return ranked[0][2]
 
 
-def t(key: str, lang: str | None = None, **kwargs: Any) -> str:
-    """Translate ``key``. Returns the key itself when unknown (never blank)."""
+def t(key: str, lang: str | None = None, default: str | None = None,
+      **kwargs: Any) -> str:
+    """Translate ``key``.
+
+    Returns the key itself when unknown (never blank), unless the caller passed
+    a ``default`` -- which is a real parameter and not a format placeholder.
+
+    The distinction matters and cost a release. The nav table has always carried
+    a human label next to each key ("Perfil"), and the call site passed it as
+    ``_fallback=fallback``. But ``**kwargs`` here feeds ``str.format``, and the
+    unknown-key branch returns on the line ABOVE, so the fallback never reached
+    anything: every missing key rendered as the raw key, in the owner's face, in
+    the hamburger. The third column of that table was decorative. A fallback
+    that is silently ignored is worse than no fallback, because the next person
+    to add a key trusts it.
+    """
     language = normalize_language(lang) if lang else DEFAULT_LANGUAGE
     entry = STRINGS.get(key)
     if entry is None:
-        return key
+        return default if default else key
     text = entry.get(language) or entry.get(DEFAULT_LANGUAGE) or key
     if kwargs:
         try:
