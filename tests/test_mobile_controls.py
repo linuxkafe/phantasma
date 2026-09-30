@@ -454,8 +454,27 @@ def test_pulling_the_dock_up_opens_the_chat(page):
     assert page.evaluate("() => document.getElementById('main').classList.contains('open')"), (
         "pulling the dock upwards did not open the conversation"
     )
-    height = page.evaluate("() => document.getElementById('main').offsetHeight")
-    assert height >= PHONE["height"] - 1, f"the panel is {height}px once open"
+    # Fills everything BELOW the top bar, which is what a sheet pulled up from
+    # the dock is. This used to be `height >= 667`, i.e. the whole screen, and
+    # that was the owner's complaint: the top bar has to stay visible.
+    geom = page.evaluate(
+        """() => {const m = document.getElementById('main').getBoundingClientRect();
+                   const b = document.getElementById('brand').getBoundingClientRect();
+                   return {h: m.height, y: m.y, bottom: m.bottom,
+                           barBottom: b.bottom, vh: window.innerHeight};}"""
+    )
+    # `--brand-h` is set from a ROUNDED measurement (an integer px, so the sheet
+    # does not jitter sub-pixel on scroll), while getBoundingClientRect reports
+    # 63.984375 for the same bar. One pixel of tolerance is the disagreement
+    # between those two, not a gap under the bar.
+    assert abs(geom["y"] - geom["barBottom"]) <= 1, (
+        f"the panel starts at y={geom['y']} under a top bar ending at "
+        f"y={geom['barBottom']}"
+    )
+    assert geom["bottom"] >= geom["vh"] - 1, (
+        f"the panel ends at y={geom['bottom']}, not at the bottom of the "
+        f"{geom['vh']}px screen"
+    )
 
 
 def test_opening_is_a_blind_not_a_slide(page):

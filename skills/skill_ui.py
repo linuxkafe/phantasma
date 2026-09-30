@@ -1221,7 +1221,26 @@ def handle_request():
                   padding-right: 0; border-right: none;
                   vertical-align: top;
               }
-            .room-header { font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 8px; text-transform: uppercase; }
+            /* The room header, and the readings that now live in it.
+               A ROW, because the whole point of moving the sensors here is that
+               "SALA 21.4° · 48%" reads as one fact: the numbers belong to the
+               name beside them. It was a block, so the readings dropped to their
+               own line and the header grew by a row -- the same space the tiles
+               used to take, just relocated. The readings are NOT uppercase and
+               not bold: the name is the label, the numbers are data, and styling
+               them identically is how a reading gets read as part of a name. */
+            .room-header {
+                font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 8px;
+                text-transform: uppercase;
+                display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+            }
+            .room-name { flex: 0 0 auto; }
+            .room-readings {
+                font-weight: normal; text-transform: none; letter-spacing: 0;
+                font-size: 0.7rem; color: #4db6ac; font-variant-numeric: tabular-nums;
+            }
+            /* A header with no reading yet must not reserve a gap for one. */
+            .room-readings[data-empty] { display: none; }
             .room-content { display: flex; gap: 8px; flex-wrap: wrap; }
 
             /* WIDGETS */
@@ -1231,7 +1250,7 @@ def handle_request():
                    pinned to height:44px, which squeezed the label into a 2-line
                    clamp at 0.6rem and made the centring invisible. 44px is kept
                    as a MINIMUM (the touch-target floor), never as a cap. */
-                .device-toggle, .device-sensor {
+                .device-toggle {
                     flex: 0 0 auto; display: flex; flex-direction: column;
                     align-items: center; justify-content: center; text-align: center;
                     background: #222; opacity: 0.5; transition: all 0.3s;
@@ -1245,14 +1264,13 @@ def handle_request():
                    its 8px margin + a 3-line label + 16px padding -- the badge
                    measured 40x30 because flex-shrink ate the difference. The
                    tile now grows to its content, with 88px as the floor. */
-                .device-toggle, .device-sensor {
+                .device-toggle {
                     min-width: 60px;
                     min-height: 88px;
                     height: auto;
                     flex-grow: 0;
                 }
             }
-              .device-sensor { background: #252525; border: 1px solid #333; }
                 .device-toggle.loaded { opacity: 1; border: 1px solid #333; }
                 .device-toggle.active .device-icon { filter: grayscale(0%); }
 
@@ -1369,25 +1387,43 @@ def handle_request():
                     margin-bottom: 0.5rem;
                 }
                 .device-toggle:hover .device-icon { transform: scale(1.05); }
-                .device-label {
-                    font-size: 0.65rem; color: #aaa; width: 100%; text-align: center;
-                    line-height: 1.15; white-space: normal; overflow: hidden;
-                    /* Clamp at 3, not 2: the tile is taller now, so a 2-line
-                       clamp was cutting real device names in half. */
-                    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-                }
+                  .device-label {
+                      font-size: 0.65rem; color: #aaa; width: 100%; text-align: center;
+                      line-height: 1.15; white-space: normal; overflow: hidden;
+                      /* Clamp at 3, not 2: the tile is taller now, so a 2-line
+                         clamp was cutting real device names in half. Three is
+                         also what the longest real name needs -- "Desumidificador
+                         do Armário" is three lines at this width, and a 2-line
+                         clamp would have turned the fix for the naming into a
+                         different truncation. */
+                      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                      /* Hyphenation, so a long name breaks between words instead
+                         of overflowing the tile. A device name is a name, not a
+                         URL: breaking "Desumidifi-cador" is more readable than
+                         "Desumidificad…". */
+                      overflow-wrap: break-word; hyphens: auto;
+                  }
 
-            .switch { position: relative; display: inline-block; width: 28px; height: 14px; margin-bottom: 2px; }
+
+                              /* The watts, on their own line under the name. Amber because
+                     that is the colour the label used to take, so "this thing is
+                     drawing power" is still a glance rather than a reading of
+                     small text. */
+                  .device-power {
+                      font-size: 0.6rem; color: #ffb74d; width: 100%;
+                      text-align: center; line-height: 1.1;
+                      font-variant-numeric: tabular-nums;
+                  }
+                  /* No reading yet means no reserved row, or a wall of tiles
+                     with a blank line under each one. */
+                  .device-power[data-empty] { display: none; }
+                  .switch { position: relative; display: inline-block; width: 28px; height: 14px; margin-bottom
+: 2px; }
             .switch input { opacity: 0; width: 0; height: 0; }
             .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #444; transition: .4s; border-radius: 34px; }
             .slider:before { position: absolute; content: ""; height: 10px; width: 10px; left: 3px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
             input:checked + .slider { background-color: var(--ia-msg); }
             input:checked + .slider:before { transform: translateX(12px); }
-
-            .sensor-data { font-size: 0.7rem; color: #4db6ac; font-weight: bold; 
-                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
-            }
-            .sensor-label { font-size: 0.6rem; color: #888; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
             /* CHAT */
             #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
@@ -1525,7 +1561,7 @@ def handle_request():
                    screens compact the tile so the devices are actually
                    reachable rather than merely scrollable. */
                 @media (max-height: 700px) {
-                    .device-toggle, .device-sensor { min-height: 64px; padding: 6px 8px; }
+                    .device-toggle { min-height: 64px; padding: 6px 8px; }
                     .device-icon { width: 32px; height: 32px; font-size: 1rem; margin-bottom: 4px; }
                     .device-label { font-size: 0.7rem; }
                 }
@@ -1583,9 +1619,9 @@ def handle_request():
                     max-height: 46vh;
                 }
                 .device-room { margin-right: 10px; margin-bottom: 0; padding-right: 10px; flex-shrink: 0; }
-                .device-toggle, .device-sensor { min-width: 60px; min-height: 84px; height: auto; }
+                .device-toggle { min-width: 60px; min-height: 84px; height: auto; }
                 .device-icon { font-size: 1.2rem; }
-                .sensor-data, .device-label, .sensor-label, .room-header { font-size: 0.75rem; line-height: 1.15; }
+                .device-label, .room-header { font-size: 0.75rem; line-height: 1.15; }
                 #admin-links {
                     /* Column, like every other nav: measured, 6 links collapsed
                        into 1 row here while /admin stacked 7 into 7. The root
@@ -1729,8 +1765,7 @@ def handle_request():
             .react-count { font-size:.75rem; color:var(--muted); align-self:center; }
 
             /* Accessibility: visible focus outline */
-            .device-toggle:focus-visible,
-            .device-sensor:focus-visible {
+            .device-toggle:focus-visible {
                 outline: 2px solid var(--accent);
                 outline-offset: 2px;
             }
@@ -1824,9 +1859,21 @@ def handle_request():
                        `absolute`: #main's ancestors are not positioned, and
                        `absolute` against the initial containing block behaved
                        differently depending on whether an ancestor had a
-                       transform. */
+                       transform.
+
+                       NOT `inset: 0`. The owner asked for the top bar to stay
+                       visible with the chat open, and at 375x667 `inset: 0`
+                       covered it completely -- not because the bar was short,
+                       but because below 768px `#header-strip` is
+                       `display: contents`, so #brand and #devices are plain
+                       static flex children of the body with no z-index, and a
+                       fixed panel at z-index 40 paints straight over them.
+                       `top: var(--brand-h)` is measured from the live #brand
+                       box (see syncBrandHeight) because the strip has no box of
+                       its own to copy a height from. */
                     #main {
-                        position: fixed; inset: 0; z-index: 40;
+                        position: fixed; left: 0; right: 0; bottom: 0;
+                        top: var(--brand-h, 0px); z-index: 40;
                         display: flex; flex-direction: column; background: #0a0a0a;
                         transform: translateY(100%);
                         transition: transform 0.2s ease-out, visibility 0.2s;
@@ -1843,11 +1890,13 @@ def handle_request():
                     #main.dragging #chat-input-box { pointer-events: none; }
 
                     #chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-                    /* Room for the CLOSE HANDLE, so the first thing the ghost
-                       says is not underneath it. It was 26px of padding against a
-                       44px handle, and the first row started at y=26 --
-                       `elementFromPoint` on it returned the handle. The number
-                       has to be read off the handle, not guessed smaller. */
+                    /* Room for the HANDLE, so the first thing the ghost says is
+                       not underneath it. 26px of padding against a 44px handle
+                       put the first row at y=26, and `elementFromPoint` on it
+                       returned the handle. The number has to be read off the
+                       handle, not guessed smaller. The handle is now a
+                       transparent row inside the panel, so the padding is what
+                       keeps the first message clear of it. */
                     #main.open #chat-log { padding-top: 52px; }
                     #chat-input-box { flex: 0 0 auto; padding-right: 12px; }
 
@@ -1905,7 +1954,11 @@ def handle_request():
                        `display: none` appeared to be ignored while being present
                        and correct in the file. */
                     body.chat-open #chat-dock { display: none; }
-                    body.chat-open #chat-grip { background: #9a9a9a; }
+                    /* The `background: #9a9a9a` that used to be here is gone, and
+                       that one line was the whole complaint. It painted the
+                       grip's full 375px width, so opening the chat put a grey
+                       slab across the top of the screen. The affordance is the
+                       pill and the chevron now; the row stays transparent. */
                     /* Room for the dock while it is on screen. */
                     body:not(.chat-open) #chat-log { padding-bottom: 0; }
 
@@ -1933,26 +1986,41 @@ def handle_request():
                     }
                     #main.closing { animation: persiana-fechar 0.2s ease-in both; }
 
-                    /* The drag handle. A sheet you can pull down, which is the
-                       gesture the owner asked for and the one a phone user
-                       already expects from a full-screen sheet. */
-                    /* The handle IS the close control. A 44px row rather than a
-                       26px strip, because a close target you have to hit is not
-                       a close target -- and it is the only one on the panel, so
-                       it has to carry it alone. */
+                     /* The drag handle. A sheet you can pull down, which is the
+                        gesture the owner asked for and the one a phone user
+                        already expects from a full-screen sheet.
+
+                        The handle IS the close control, so the whole 44px row is
+                        the target -- a close target you have to hit is not a
+                        close target, and it is the only one on the panel. What
+                        it must NOT be is a full-width coloured band: that is
+                        what the owner was seeing and calling "a barra
+                        cinzenta", a 375px slab of #9a9a9a across the top of the
+                        screen. So the row is transparent and only the pill and
+                        the chevron are drawn, centred, on the panel's own top
+                        edge. Width comes from `inset`, not from a background. */
                     #chat-grip {
-                        position: fixed; top: 0; left: 0; right: 0; z-index: 55;
-                        display: none; align-items: center; justify-content: center;
+                        position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+                        display: none; flex-direction: column;
+                        align-items: center; justify-content: center;
                         min-height: 44px; touch-action: none; cursor: grab;
                         background: none; border: 0; color: #8a8a8a;
                         font-size: 0.72rem; letter-spacing: 0.06em;
-                        gap: 10px; padding: 0;
+                        gap: 3px; padding: 0; -webkit-tap-highlight-color: transparent;
                     }
                     body.chat-open #chat-grip { display: flex; }
-                    #chat-grip span {
+                    /* The pill, and only the pill, is ink. A faint scrim behind
+                       it keeps the handle legible over a bright chat bubble
+                       without being a bar. */
+                    #chat-grip .grip-pill {
                         display: block; width: 44px; height: 4px;
-                        border-radius: 2px; background: #555;
+                        border-radius: 2px; background: #6b6b6b;
                     }
+                    #chat-grip .grip-chevron { width: 18px; height: 18px; opacity: .75; }
+                    #chat-grip:active .grip-pill,
+                    #chat-grip:active .grip-chevron { color: #d4d4d4; }
+                    #chat-grip .grip-pill { background: #8a8a8a; }
+
 
                     /* The microphone in the composer, beside the send button it
                        matches, so sending a voice message needs no detour to the
@@ -2032,17 +2100,28 @@ def handle_request():
 
 
         <div id="main">
+            <!-- The drag handle lives INSIDE the panel now, as its first child.
+                 It used to be a sibling pinned to the top of the viewport, and
+                 that is precisely what put a full-width grey band across the top
+                 of the screen on top of the brand row -- the owner reported it
+                 as "a barra cinzenta". As an absolute child of the panel it
+                 travels with the sheet, so it sits on the panel's own top edge
+                 and can never reach the top bar. The tab that opens the chat
+                 stays OUTSIDE this element: the panel is `visibility: hidden`
+                 when closed, visibility is inherited, and a control inside the
+                 thing it controls is invisible with it (measured at 375x667: the
+                 tab sat at y=1076 in a 667px viewport). -->
+            <button id="chat-grip" type="button" aria-label="Fechar a conversa, ou arrastar para baixo">
+                <span class="grip-pill" aria-hidden="true"></span>
+                <!-- The chevron is the instruction, not decoration: a bare pill
+                     asks to be guessed at, a down arrow says "this goes down". -->
+                <svg class="grip-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
             <!-- The chat is a PANEL, not a column, on a phone. The owner asked
                  for the device tiles to own the screen and for the
-                 conversation to appear over them only when it is asked for.
-
-                 The tab that opens it is deliberately NOT inside this element.
-                 It was, and that made the chat impossible to open on a phone:
-                 the panel is `visibility: hidden` when closed, visibility is
-                 inherited, and the one control that could have opened it was
-                 invisible with it. Measured at 375x667: the tab sat at
-                 y=1076 in a 667px viewport. A control that lives inside the
-                 thing it controls cannot survive that thing being hidden. -->
+                 conversation to appear over them only when it is asked for. -->
             <div id="chat-log"></div>
             <div id="help-toggle" onclick="toggleHelp()">Ver Comandos</div>
             <div id="cli-help"><pre id="help-content" style="color:#888; font-size:0.8em; margin:0;">...</pre></div>
@@ -2091,10 +2170,7 @@ def handle_request():
                 <svg class='mic-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><rect x='9' y='2.5' width='6' height='11' rx='3'/><path d='M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7'/></svg>
             </button>
         </div>
-        <!-- The grab handle, only while the panel is open. Dragging it down
-             dismisses the panel, which is the gesture the owner asked for and
-             the one a phone user already expects from a full-screen sheet. -->
-        <div id="chat-grip" aria-hidden="true"><span></span></div>
+        <!-- The grab handle moved INSIDE #main (see the comment there). -->
 
         <script>
             const chatLog = document.getElementById('chat-log');
@@ -2261,13 +2337,30 @@ def handle_request():
                 const roomWrapper = document.createElement('div'); roomWrapper.className = 'device-room';
                 /* The header carries an icon, so a group of tiles reads as a
                    place. innerHTML because it is markup, and the name goes in a
-                   sibling so it is still selectable text and still announced. */
+                   sibling so it is still selectable text and still announced.
+                   The readings span is the slot the sensors write into -- see
+                   createSensor -- so the numbers sit beside the name that gives
+                   them meaning instead of in a tile of their own. */
                 const header = document.createElement('div'); header.className = 'room-header';
-                header.innerHTML = roomIcon(room) + '<span>' + room + '</span>';
+                header.innerHTML = roomIcon(room) + '<span class="room-name">' + room + '</span>'
+                                 + '<span class="room-readings" data-empty="1"></span>';
                 header.title = room;
-                roomContainer = document.createElement('div'); roomContainer.className = 'room-content'; roomContainer.id = `room-content-${room}`; 
+                roomContainer = document.createElement('div'); roomContainer.className = 'room-content'; roomContainer.id = `room-content-${room}`;
                 roomWrapper.append(header, roomContainer); devicesEl.appendChild(roomWrapper);
                 return roomContainer;
+            }
+            /* The slot a room's readings are written into. Found through the
+               container rather than kept in a side table, because a room
+               container can be created by a switch first and claimed by a
+               sensor afterwards -- a second `getElementById` on the header is
+               cheap, and a stale reference in a Map is not something a test
+               would catch. Returns null rather than creating one, so a missing
+               header is a visible no-op instead of a second readings element
+               somewhere else. */
+            function getRoomReadings(container) {
+                if (!container) return null;
+                const header = container.parentElement && container.parentElement.querySelector('.room-readings');
+                return header || null;
             }
 
             function showTypingIndicator() {
@@ -2554,7 +2647,94 @@ def handle_request():
                 } catch (e) { removeTypingIndicator(); }
             }
 
-            function createToggle(device) {
+            /* What a tile actually says.
+               It used to be `device.split(' ').pop().substring(0,12)`, which
+               threw away everything but the LAST word. Measured at 375x667 with
+               the real device list, that made six of eight tiles unreadable:
+
+                   Luz da Sala            -> "Sala"        Exaustor da Sala -> "Sala"
+                   Luz do Quarto          -> "Quarto"      Candeeiro do Quarto -> "Quarto"
+                   Desumidificador do Quarto -> "Quarto"    Exaustor do WC   -> "WC"
+                   Desumidificador do Armário -> "Armário"   Aspirador       -> "Aspirador"
+
+               Two devices both called "Sala" and three all called "Quarto". The
+               full name survived only in the `title`, which a phone cannot show
+               on demand, so on the device the owner actually uses these tiles
+               did not say what they controlled. The room word is the part that
+               was being thrown away and it is the part the group header ALREADY
+               says, so the fix is not "show everything" -- it is "show the part
+               that distinguishes, and only that".
+
+               Shortening is conditional on uniqueness within the room, computed
+               from the whole list rather than per tile. "Luz do Balcão" and
+               "Luz da Sala" both land in the Sala group (getRoomName maps
+               balcao to Sala), so shortening both to "Luz" would have invented
+               exactly the ambiguity this is fixing. A short form is used only
+               when it is the only one of its kind in that room. */
+            /* The room a name actually names, or null when it names none.
+
+               getRoomName answers "Geral" for anything it does not recognise, and
+               comparing that against the room we happen to be in made the test
+               vacuously true in the Geral group: "Desumidificador do Armário"
+               was shortened to "Desumidificador" because getRoomName("Armário")
+               returned "Geral" and the room WAS "Geral". The tail of the name --
+               the only thing saying where the device lives -- was thrown away,
+               in the one group where there is no header to put it back. */
+            function explicitRoom(name) {
+                const n = (name || '').toLowerCase();
+                if (n.includes("wc") || n.includes("banho")) return "WC";
+                if (n.includes("balcao") || n.includes("balcão")) return "Sala";
+                if (n.includes("sala")) return "Sala";
+                if (n.includes("quarto")) return "Quarto";
+                if (n.includes("entrada") || n.includes("corredor")) return "Entrada";
+                return null;
+            }
+            function shortDeviceName(name, room) {
+                if (explicitRoom(name) !== room) return name;
+                for (const joiner of [' da ', ' do ', ' das ', ' dos ']) {
+                    const at = name.toLowerCase().lastIndexOf(joiner);
+                    if (at <= 0) continue;
+                    const tail = name.slice(at + joiner.length).trim();
+                    /* Only drop a tail that NAMES this room. "do Armário" names
+                       no room, so it stays: in the Geral group it is the only
+                       thing saying where the desumidifier is. */
+                    if (explicitRoom(tail) !== room) continue;
+                    return name.slice(0, at).trim();
+                }
+                return name;
+            }
+            /* One decision, made once, from the full list. Returns a Map of
+               device name -> label, and the caller never recomputes it: the
+               refresh path used to recompute the label on every poll, from a
+               different expression, so a device that dropped below the power
+               threshold silently reverted from its full name back to its last
+               word. Two expressions for one label is how that happens. */
+            /* The one place a device's visible name is decided. Filled once per
+               load by computeDeviceLabels and read by both the builder and the
+               poller, so the two cannot express the same label two ways -- which
+               is exactly how a tile ended up named "Luz da Sala" when it was off
+               and "Sala" when it was drawing power. */
+            let DEVICE_LABELS = new Map();
+            function deviceLabelFor(name) { return DEVICE_LABELS.get(name) || name; }
+            function computeDeviceLabels(grouped) {
+                const labels = new Map();
+                ROOMS_ORDER.forEach(room => {
+                    const devs = (grouped[room] || []).filter(d => d.type !== 'sensor');
+                    const short = devs.map(d => ({ d, s: shortDeviceName(d.name, room) }));
+                    const counts = {};
+                    short.forEach(x => { counts[x.s] = (counts[x.s] || 0) + 1; });
+                    short.forEach(x => {
+                        /* Unique in the room: the short form is enough. Not
+                           unique: the full name, because two tiles with the same
+                           word are worse than two long ones. */
+                        labels.set(x.d.name, counts[x.s] === 1 ? x.s : x.d.name);
+                    });
+                });
+                DEVICE_LABELS = labels;
+                return labels;
+            }
+
+            function createToggle(device, labelText) {
                 const container = getOrCreateRoomContainer(getRoomName(device));
                 const div = document.createElement('div'); div.className = 'device-toggle'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'toggle';
@@ -2572,26 +2752,45 @@ def handle_request():
                     if(input.checked) div.classList.add('active'); else div.classList.remove('active');
                 };
                 const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
-                const label = document.createElement('span'); label.className = 'device-label'; 
-                label.innerText = device.split(' ').pop().substring(0,12);
-                div.append(icon, switchLabel, label); container.appendChild(div);
-                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label });
+                const label = document.createElement('span'); label.className = 'device-label';
+                label.innerText = labelText || device;
+                /* Watts get their own line instead of overwriting the name. The
+                   label used to become "210 W" whenever the device drew power,
+                   which meant the desumidifier -- the single most expensive thing
+                   in the house -- was the one tile that never said what it was.
+                   A reading is not a name, and a name that changes with the
+                   load cannot be scanned. */
+                const power = document.createElement('span'); power.className = 'device-power';
+                power.setAttribute('data-empty', '1');
+                div.append(icon, switchLabel, label, power); container.appendChild(div);
+                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, power: power, labelText: label.innerText });
             }
             
+            /* Temperature and humidity have no tile of their own any more.
+
+               They were three of the fourteen devices, and each one was a whole
+               tile whose entire content was a number -- "21.4° · 48%" -- next to
+               the room it was standing in. The room header already says which
+               room that is. So the tile spent a tile's worth of screen to repeat
+               the location and show two numbers, and the owner was right that
+               the space was wasted.
+
+               The readings move into the room header, beside the name, which is
+               where they answer the question the header is already asking. The
+               device keeps its own status entry, so the polling, the staleness
+               and the per-device request are unchanged -- only the rendering
+               moved. A room with a sensor and no switch now still gets its
+               header, which is the point: "WC 18.1° · 62%" instead of a tile. */
             function createSensor(device) {
                 if(device.toLowerCase().includes('casa') || device.toLowerCase() === 'geral') return;
-                const container = getOrCreateRoomContainer(getRoomName(device));
-                const div = document.createElement('div'); div.className = 'device-sensor'; div.title = device;
-                div.dataset.state = 'unreachable'; div.dataset.type = 'sensor';
-                const dataSpan = document.createElement('span'); dataSpan.className = 'sensor-data'; dataSpan.innerText = '...';
-                const label = document.createElement('span'); label.className = 'sensor-label'; 
-                label.innerText = device.replace(/sensor|alarme/gi, '').trim().substring(0,12);
-                div.append(dataSpan, label); container.appendChild(div);
-                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', element: div, dataSpan: dataSpan, label: label });
+                const room = getRoomName(device);
+                const container = getOrCreateRoomContainer(room);
+                const readings = getRoomReadings(container);
+                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'sensor', room: room, readings: readings, dataSpan: readings });
             }
 
             async function fetchDeviceStatus(item) {
-                const { name, element, input, label } = item;
+                const { name, element, input, label, power } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
@@ -2603,27 +2802,77 @@ def handle_request():
                     }
                     element.style.opacity = data.state === 'unreachable' ? 0.3 : 1;
                     input.disabled = false; element.classList.add('loaded');
-                    if (data.power_w > 0.5) {
-                         label.innerText = `${Math.round(data.power_w)} W`; label.style.color = "#ffb74d";
-                    } else {
-                         label.innerText = name.split(' ').pop().substring(0,12); label.style.color = "#aaa";
+                    /* The name is written on every poll, from the one source, and
+                       never depends on the reading. It used to be written only in
+                       the `else` branch and recomputed there from a second
+                       expression, so a light that stopped drawing power lost
+                       "Luz da Sala" and went back to reading "Sala": the tile's
+                       name changed depending on whether it happened to be on.
+                       Anything conditional about a label is a label that lies. */
+                    label.innerText = item.labelText || deviceLabelFor(name);
+                    label.style.color = "#aaa";
+                    /* Watts on their own line. Overwriting the name with the
+                       wattage meant the desumidifier -- the biggest load in the
+                       house, the one you most want to identify at a glance --
+                       was the one tile that never said what it was. */
+                    if (data.power_w > 0.5 && power) {
+                        power.innerText = `${Math.round(data.power_w)} W`;
+                        power.removeAttribute('data-empty');
+                    } else if (power) {
+                        power.innerText = '';
+                        power.setAttribute('data-empty', '1');
                     }
                 } catch (e) {}
             }
             
+            /* Render every sensor of a room into the one readings slot, rather
+               than each sensor into a tile. A room can have more than one
+               sensor, so each device writes its own record and the header is
+               re-rendered from all of them: a room with two sensors must show
+               both, and two writers cannot share one text node without the
+               second overwriting the first. The slot is one place on screen and
+               the request per device is unchanged.
+
+               Two maps, keyed by room and by sensor name, rather than one map
+               with keys glued together as "Sala:parts:Sensor da Sala". Room
+               names come from device names, so a device called anything with a
+               colon in it would collide with another device's slot, and the
+               symptom would be one room's temperature showing another room's. */
+            const ROOM_SLOTS = new Map();     /* room -> the span */
+            const ROOM_PARTS = new Map();     /* room -> Map(sensor -> text) */
+
+            function renderRoomReadings(room) {
+                const el = ROOM_SLOTS.get(room);
+                if (!el) return;
+                const parts = ROOM_PARTS.get(room);
+                const txt = parts ? [...parts.values()].filter(Boolean).join(' · ') : '';
+                el.innerText = txt;
+                /* The attribute, not an empty string: a header that has never
+                   had a reading must not reserve the space for one, and this is
+                   what the CSS keys off. */
+                if (txt) { el.removeAttribute('data-empty'); }
+                else { el.setAttribute('data-empty', '1'); }
+            }
+            function putRoomReading(room, el, sensor, text) {
+                ROOM_SLOTS.set(room, el);
+                if (!ROOM_PARTS.has(room)) ROOM_PARTS.set(room, new Map());
+                ROOM_PARTS.get(room).set(sensor, text);
+                renderRoomReadings(room);
+            }
+
             async function fetchSensorStatus(item) {
-                const { name, element, dataSpan } = item;
+                const { name, room, readings } = item;
+                if (!readings) return;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
                     if (data.state === 'unreachable') {
-                        element.style.opacity = 0.35;
-                        dataSpan.innerText = 'indisponível';
-                        dataSpan.style.color = '#737373';
-                        element.title = name + ' — indisponível';
+                        putRoomReading(room, readings, name, 'indisponível');
+                        readings.style.color = '#737373';
+                        readings.style.opacity = .6;
+                        readings.title = name + ' — indisponível';
                         return;
                     }
-                    element.style.opacity = data.stale ? 0.45 : 1;
                     let measurements = [];
                     let color = '#4db6ac';
                     if (data.power_w !== undefined) {
@@ -2643,10 +2892,19 @@ def handle_request():
                     }
                     const base = measurements.length ? measurements.join(' · ') : 'sem leitura';
                     const text = agePart ? base + ' · ' + agePart : base;
-                    dataSpan.innerText = text;
-                    dataSpan.style.color = parts.length ? color : '#737373';
+                    putRoomReading(room, readings, name, text);
+                    /* This line used to read `parts.length`, a name that does not
+                       exist in this function -- the array is `measurements`. It
+                       threw a ReferenceError, and because the body sits in a
+                       bare `catch (e) {}` the throw was invisible: the colour
+                       was never applied and the title below it, the only place
+                       the reading's age is available, was never written. A stale
+                       reading looked live because the thing that said it was old
+                       had silently stopped being set. */
+                    readings.style.color = measurements.length ? color : '#737373';
+                    readings.style.opacity = data.stale ? 0.55 : 1;
                     const ageDesc = data.age_s !== undefined ? Math.round(data.age_s / 60) + ' min' : '?';
-                    element.title = `${name} — última leitura há ${ageDesc}${data.stale ? ' (desatualizado)' : ''}`;
+                    readings.title = `${name} — última leitura há ${ageDesc}${data.stale ? ' (desatualizado)' : ''}`;
                 } catch (e) {}
             }async function updateHomePower() {
                 try {
@@ -2957,9 +3215,15 @@ def handle_request():
                     const grouped = {};
                     ROOMS_ORDER.forEach(r => grouped[r] = []);
                     allDevices.forEach(d => grouped[getRoomName(d.name)].push(d));
+                    /* Names are decided here, with the whole list in hand, not
+                       inside the tile builder where a device can only see itself. */
+                    const labels = computeDeviceLabels(grouped);
                     for (const room of ROOMS_ORDER) {
                         const devs = grouped[room];
-                        if (devs && devs.length > 0) devs.forEach(d => { if (d.type === 'sensor') createSensor(d.name); else createToggle(d.name); });
+                        if (devs && devs.length > 0) devs.forEach(d => {
+                            if (d.type === 'sensor') createSensor(d.name);
+                            else createToggle(d.name, labels.get(d.name));
+                        });
                     }
                     updateHomePower(); updateWeather();
                     /* Prime the states before the first paint settles, so the
@@ -3013,9 +3277,11 @@ def handle_request():
                     chatTab.textContent = 'Chat';
                 }
             }
-            if (chatTab && chatPanel) {
-                chatTab.onclick = () => chatPanel.classList.contains('open')
-                    ? closeChat() : openChat();
+            if (chatPanel) {
+                if (chatTab) {
+                    chatTab.onclick = () => chatPanel.classList.contains('open')
+                        ? closeChat() : openChat();
+                }
                 /* Drag the panel down to dismiss, from the grip or from the top
                    of the log. A full-screen sheet that can only be closed by a
                    small target is a sheet people cannot close; the drag is the
@@ -3028,19 +3294,44 @@ def handle_request():
                    downwards (a flick upwards is not "dismiss"), and releasing
                    below a third of the height snaps it shut while a shorter
                    drag springs back, so a small slip does not close the
-                   conversation the owner is reading. */
+                   conversation the owner is reading.
+
+                   Wired on `chatPanel` and NOT inside the old
+                   `if (chatTab && chatPanel)`. The only close control on a phone
+                   is the grip, and tying the grip's wiring to the existence of
+                   the tab meant that deleting the tab -- which is display:none on
+                   a phone anyway, and exists there only for the desktop toggle --
+                   would silently take the sole way out of the conversation with
+                   it. The condition was the same class of bug as the one the
+                   comment above it describes. */
                 const grip = document.getElementById('chat-grip');
-                let dragY = null, dragMoved = 0;
+                let dragY = null, dragMoved = 0, dragSeen = false;
                 const dragStart = (e) => {
                     if (!chatPanel.classList.contains('open')) return;
                     dragY = (e.touches ? e.touches[0].clientY : e.clientY);
                     dragMoved = 0;
+                    /* "The finger moved at all", which is NOT the same as
+                       dragMoved. An upward drag leaves dragMoved at 0 by design
+                       -- upwards is not a dismissal -- and tap-to-close keyed on
+                       dragMoved therefore fired on it and closed the sheet. The
+                       existing test `test_dragging_up_does_nothing` caught that,
+                       which is the whole reason it is in the suite. */
+                    dragSeen = false;
                     chatPanel.classList.add('dragging');
                 };
                 const dragMove = (e) => {
                     if (dragY === null) return;
                     const y = (e.touches ? e.touches[0].clientY : e.clientY);
                     const dy = y - dragY;
+                    /* Recorded BEFORE the upward early-return, and it is what the
+                       click handler below consults: a browser still fires `click`
+                       after `touchend`, so a drag that springs back (below the
+                       threshold, so it did NOT close) would otherwise be closed a
+                       moment later by the click it emits. */
+                    if (dy !== 0) {
+                        dragSeen = true;
+                        if (grip) grip.dataset.dragged = '1';
+                    }
                     if (dy < 0) return;  /* upwards is not a dismissal */
                     dragMoved = dy;
                     chatPanel.style.transform = 'translateY(' + dy + 'px)';
@@ -3053,6 +3344,42 @@ def handle_request():
                     chatPanel.style.transform = '';
                     if (dragMoved > innerHeight / 3) closeChat();
                 };
+                /* A tap is no movement AT ALL. Not "no downward movement": an
+                   upward drag is a gesture that goes nowhere, and treating it as a
+                   tap closed a conversation the owner was reading. */
+                const tapped = () => dragMoved === 0 && !dragSeen;
+                /* TAP the grip and it closes, with no drag at all. The comment
+                   in the stylesheet claims the handle IS the close control, and
+                   for a long time it was not: a tap did nothing and only a
+                   third-of-the-screen drag worked. On a phone that is the
+                   difference between a control and a decoration. A tap is
+                   `dragMoved === 0`, so it is distinguished from the drag by the
+                   same variable rather than by a second listener racing the
+                   first. */
+                if (grip) {
+                    grip.addEventListener('touchstart', dragStart, { passive: true });
+                    grip.addEventListener('touchmove', dragMove, { passive: false });
+                    grip.addEventListener('touchend', () => {
+                        const wasTap = tapped();
+                        dragEnd();
+                        if (wasTap) closeChat();
+                    });
+                    grip.addEventListener('touchcancel', dragEnd);
+                    grip.addEventListener('mousedown', dragStart);
+                    grip.addEventListener('mousemove', dragMove);
+                    grip.addEventListener('mouseup', () => {
+                        const wasTap = tapped();
+                        dragEnd();
+                        if (wasTap) closeChat();
+                    });
+                    /* And the click a browser sends after all of that. One way
+                       out, the way a keyboard uses it, guarded by the same record
+                       of whether the finger moved. */
+                    grip.addEventListener('click', () => {
+                        if (grip.dataset.dragged === '1') { delete grip.dataset.dragged; return; }
+                        closeChat();
+                    });
+                }
                 /* PULL UP TO OPEN. The dock is the bar, so the bar is the
                    handle: dragging it upwards opens the conversation and the
                    panel follows the finger, the same direct manipulation as
@@ -3086,22 +3413,6 @@ def handle_request():
                     dock.addEventListener('touchend', upEnd);
                 }
 
-                if (grip) {
-                    /* Tapping the handle closes. It is a <div>, so this is both
-                       the pointer path and the touch path -- and it means the
-                       panel always has a visible way out that is not a drag. */
-                    grip.addEventListener('click', () => closeChat());
-                    grip.addEventListener('touchstart', dragStart, {passive: true});
-                    grip.addEventListener('touchmove', dragMove, {passive: false});
-                    grip.addEventListener('touchend', dragEnd);
-                    grip.addEventListener('mousedown', (e) => {
-                        dragStart(e);
-                        const move = (ev) => dragMove(ev);
-                        const up = () => { dragEnd(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
-                        document.addEventListener('mousemove', move);
-                        document.addEventListener('mouseup', up);
-                    });
-                }
                 /* Tapping a device answers with text in the log, so the panel
                    opens by itself there too -- otherwise a reply would be
                    produced into a panel that is closed and never read. */
@@ -3128,6 +3439,43 @@ def handle_request():
                 const ro = new ResizeObserver(updateDeviceScrollHint);
                 ro.observe(document.body);
             }
+
+            /* How tall the top bar is, in a custom property, so the chat panel
+               can start underneath it instead of on top of it.
+
+               There is no header BOX to copy a height from below 768px:
+               `#header-strip` is `display: contents` there, so it generates no
+               box at all (getBoundingClientRect returns 0x0) and #brand and
+               #devices are static flex children of the body. `#brand` is a real
+               box, so it is the one measured.
+
+               Measured from a LIVE box rather than a constant because the bar
+               is not a fixed height: it carries the brand row, the weather
+               indicators and the burger, and the burger moves between the top
+               and the nav bar with the same breakpoint that turns the strip
+               into `contents`. A hardcoded number here is a number that is right
+               on exactly one screen. */
+            function syncBrandHeight() {
+                const brand = document.getElementById('brand');
+                if (!brand) return;
+                const h = Math.round(brand.getBoundingClientRect().height);
+                if (!h) return;
+                document.documentElement.style.setProperty('--brand-h', h + 'px');
+            }
+            window.addEventListener('resize', syncBrandHeight);
+            window.addEventListener('orientationchange', syncBrandHeight);
+            if (window.ResizeObserver) {
+                const brandRO = new ResizeObserver(syncBrandHeight);
+                const brandEl = document.getElementById('brand');
+                if (brandEl) brandRO.observe(brandEl);
+            }
+            syncBrandHeight();
+            /* The weather/moon/UV/AQI indicators fill asynchronously, and the
+               first paint measures #brand before they have their text. Without
+               this the panel would be positioned against a bar that was then
+               20px taller, and the burger would sit under the sheet. */
+            window.addEventListener('load', syncBrandHeight);
+            setTimeout(syncBrandHeight, 400);
             chatSend.onclick = sendChatCommand; 
             chatInput.onkeydown = (e) => { 
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatCommand(); }

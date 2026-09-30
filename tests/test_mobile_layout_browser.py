@@ -228,13 +228,29 @@ def test_the_chat_tab_is_inside_the_viewport(phone):
 
 
 def test_opening_the_chat_covers_the_screen(phone):
+    """Covers the screen BELOW the top bar, and no further.
+
+    This used to assert `panel["y"] == 0` and a full 667px height, which was
+    true and was the complaint: the owner asked for the top bar to stay visible.
+    The assertion now names the real contract instead of the old geometry -- the
+    panel starts exactly where the top bar ends, and it reaches the bottom of the
+    screen. Asserting a bare y=0 again would be asserting the bug back in.
+    """
     phone.evaluate("() => openChat()")
     phone.wait_for_timeout(400)
     panel = _box(phone, "#main")
-    assert panel["y"] == 0, f"the panel starts at y={panel['y']}, not at the top"
-    assert panel["h"] >= PHONE["height"] - 1, (
-        f"the panel is {panel['h']}px of {PHONE['height']}px: it is a panel, not "
-        f"a full-screen sheet"
+    bar = _box(phone, "#brand")
+    # One pixel of tolerance: `--brand-h` comes from a rounded measurement while
+    # getBoundingClientRect reports the fractional height (63.984375). That is
+    # the disagreement between an integer px and a sub-pixel one, not a gap.
+    assert abs(panel["y"] - (bar["y"] + bar["h"])) <= 1, (
+        f"the panel starts at y={panel['y']} and the top bar ends at "
+        f"y={bar['y'] + bar['h']}: the panel is either covering the bar or "
+        f"leaving a gap under it"
+    )
+    assert panel["y"] + panel["h"] >= PHONE["height"] - 1, (
+        f"the panel ends at y={panel['y'] + panel['h']}, not at the bottom of a "
+        f"{PHONE['height']}px screen"
     )
     assert panel["vis"] == "visible"
 
