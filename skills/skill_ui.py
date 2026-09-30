@@ -1180,7 +1180,19 @@ def handle_request():
                 }
                 #uv-indicator, #aqi-indicator { display: flex; align-items: center; }
             #brand {
-                display: flex; flex-direction: column; align-items: center; justify-content: center;
+                /* A ROW on a desktop, a column on a phone. It was
+                   `flex-direction: column` at every width, so the ghost and the
+                   sky were stacked, and `justify-content: center` then centred
+                   the pair INSIDE a 454px-tall header: measured, the brand and
+                   the weather sat at centre-y=227 of an 880px screen while the
+                   burger sat at centre-y=22. That is the owner's "o tempo
+                   devia estar na mesma barra no topo mas esta ao lado" -- not
+                   beside, but 200px lower, in a column where they wanted a
+                   bar. The row and the top alignment go here, in the shared
+                   rule, and the phone keeps its column below 768px where the
+                   indicators genuinely have no room. */
+                display: flex; flex-direction: row; align-items: center;
+                justify-content: flex-start;
                 /* The brand is the identity block and nothing else. It was
                    width:210px with a right border, which on a wide desktop
                    spent fixed space on a logo while the device strip -- the
@@ -1188,10 +1200,17 @@ def handle_request():
                    scrolled. Below 900px it is still width:100% and still
                    carries the border, because there the rule is what separates
                    the header from the list. */
-                width: 210px; height: 100%;
+                width: auto; min-width: 0; height: 100%;
                 border-right: 1px solid #333; background: #151515;
                 cursor: pointer; user-select: none; z-index: 10;
                 padding: 10px; box-sizing: border-box;
+                /* Top-aligned, so the ghost, the weather and the burger share
+                   one line. `align-items: center` centred the whole block at
+                   y=69 in a 186px header while the burger sat at y=0, which is
+                   the owner's "o tempo devia estar na barra no topo mas esta ao
+                   lado": not beside it, just lower. The row is now the bar, and
+                   its contents sit on the first line of it. */
+                align-items: flex-start; padding-top: 12px;
                 position: relative; overflow: hidden;
                 flex: 0 0 auto;
             }
@@ -1208,8 +1227,15 @@ def handle_request():
                 gap: 10px; margin-bottom: 0; width: auto;
             }
             .sky-element {
-                display: flex; flex-direction: column; align-items: center;
-                position: relative;
+                /* A ROW. It is a column, so the icon and the temperature went
+                   one under the other: measured, #main-weather-icon (29px) and
+                   #main-weather-temp (29px) were stacked inside a 39px-wide
+                   stage, and with #brand overflow:hidden the temperature's
+                   bottom was cut off -- the owner saw "21" with a clipped
+                   degree. The icon and the number belong side by side in a
+                   horizontal bar. */
+                display: flex; flex-direction: row; align-items: center;
+                gap: 4px; position: relative;
             }
             #main-weather-icon, #main-moon-icon {
                 font-size: 1.8rem; 
@@ -1318,7 +1344,15 @@ def handle_request():
             #nav-menu::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 
               .device-room {
-                  display: inline-flex; flex-direction: column;
+                  /* A BLOCK, not `inline-flex`. The rooms were inline-level and
+                     wrapped, which is fine until one room's content is tall:
+                     the wrap is computed against the INLINE box, and a room that
+                     ran past the strip's height pushed the next one to a line of
+                     its own, below the header it is supposed to live in. Measured
+                     at 1920x880: the strip is 454px tall and the GERAL group was
+                     at y=655, on screen but outside the header. A block-level
+                     room with an internal flex column cannot do that. */
+                  display: flex; flex-direction: column;
                   margin-right: 15px; margin-bottom: 15px;
                   /* No divider between rooms. The rooms are already separated
                      by their own headers and by 15px of space; the rule made a
@@ -1341,7 +1375,19 @@ def handle_request():
             .room-header {
                 font-size: 0.75rem; font-weight: bold; color: #666; margin-bottom: 8px;
                 text-transform: uppercase;
-                display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+                display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            }
+            /* The room icon, SIZED, at every width. `width: 15px` existed only
+               inside the max-width:768px block, so on a desktop the SVG had no
+               size of its own and took whatever the flex row gave it:
+               measured 247x247px at 1920 wide -- a house drawing the height of
+               three device tiles, and the reason a phone-sized fix looked fine
+               and a desktop looked broken. An inline SVG with no intrinsic
+               size in a flex row stretches to the row, and `align-items:
+               baseline` (which this rule used to carry) does not constrain the
+               cross axis, only the baseline. Both are fixed here. */
+            .room-header svg {
+                width: 16px; height: 16px; flex: 0 0 auto; opacity: .85;
             }
             .room-name { flex: 0 0 auto; }
             .room-readings {
@@ -1440,13 +1486,24 @@ def handle_request():
                 .nav-voice.recording { border-color: #ef4444; color: #ef4444; }
                 .nav-voice.busy { border-color: var(--accent, #22c55e); color: var(--accent, #22c55e); }
 
-                /* The chat tab and the drag grip are PHONE affordances.
-                   Hidden by default and switched on inside the max-width:768px
-                   block: on desktop the conversation is already a column in the
-                   flow, so a "Chat" button to open it is a control that opens
-                   something already open. The browser test caught this
-                   because it resized the page and asked. */
-                #chat-tab, #chat-grip { display: none; }
+                /* The chat tab, the dock and the drag grip are PHONE
+                   affordances. Hidden by default and switched on inside the
+                   max-width:768px block: on desktop the conversation is already
+                   a column in the flow, so a "Chat" bar to open it is a control
+                   that opens something already open.
+
+                   `#chat-dock` was MISSING from this list, and it is the outer
+                   element of the pair: its only styling is inside the phone
+                   block, so on a desktop it fell back to the browser default
+                   (`display: block`, 1920px wide) and sat under the composer as
+                   a 44px band with a microphone stranded in the corner. That
+                   is the "a barra de chat nem aparece" of the owner's report --
+                   it was not absent, it was present and meaningless, and the
+                   thing it was supposed to contain (`#chat-tab`) was 0x0 inside
+                   it. Hiding the container hides the microphone with it, which
+                   is correct: the composer has its own, and the voice one in
+                   the nav bar is the desktop shortcut. */
+                #chat-tab, #chat-grip, #chat-dock { display: none; }
                 .voice-status {
                     position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%);
                     background: #1e1e1e; border: 1px solid #333; color: #eee;
@@ -1566,7 +1623,18 @@ def handle_request():
             @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
 
             #chat-input-box { padding: 10px; background: #181818; border-top: 1px solid #333; display: flex; gap: 10px; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); align-items: flex-end; }
-            #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; resize: none; height: 24px; max-height: 100px; font-family: inherit; overflow-y: hidden; }
+            /* `height: 24px` with `padding: 12px` and `box-sizing: border-box`
+               leaves ZERO content box, so the placeholder was drawn through the
+               middle of the field and clipped: the composer read as "Mensagem"
+               cut in half. It was a copy of a phone rule -- the mobile block
+               overrode it with `min-height: 44px; height: auto` and nobody
+               looked at the desktop, where the field sits in a 69px row and has
+               room for a line. `min-height` is what both widths want: one line
+               to start, growing to `max-height` as the owner types.
+
+               The JS autosize in `sendChatCommand`/the keydown handler sets an
+               explicit inline height, so this is the resting size only. */
+            #chat-input { flex: 1; background: #2a2a2a; color: #fff; border: none; padding: 12px; border-radius: 20px; font-size: 16px; outline: none; resize: none; min-height: 44px; max-height: 100px; font-family: inherit; overflow-y: hidden; }
             #chat-send { 
     background: var(--ia-msg); color: white; border: none; padding: 0 12px; border-radius: 25px; 
     font-weight: bold; cursor: pointer; 
@@ -1795,7 +1863,17 @@ def handle_request():
                layout must win. Measured: without it the burger sat at x=210 on a
                1280px viewport (left of centre) and its panel opened at x=54, to
                the LEFT of the button that opens it. */
-            .nav-bar { margin-left:auto !important; }
+            .nav-bar {
+                margin-left:auto !important;
+                /*  and nothing else. An earlier version
+                   added  to line the burger up with the
+                   weather, and that pushed it off y=0 -- which the desktop
+                   layout test had been asserting since it was written. The
+                   burger is at the top of the bar and the brand carries its own
+                   ; nudging the burger instead of aligning the two
+                   moves the one element that was already right. */
+                align-self: flex-start;
+            }
 
             /* Admin panel: collapses behind the burger, same contract as the
                admin pages and the same design.js() that drives it. */
@@ -2762,7 +2840,12 @@ def handle_request():
 
             async function sendChatCommand() {
                 const prompt = chatInput.value.trim(); if (!prompt) return;
-                addToChatLog(prompt, 'user'); chatInput.value = ''; chatInput.style.height = '24px'; 
+                addToChatLog(prompt, 'user'); chatInput.value = '';
+                /* Back to the resting height, which is the CSS min-height.
+                   It was pinned to '24px' here as well, so after the first
+                   message the field shrank to the clipped size and stayed
+                   there for the rest of the session. */
+                chatInput.style.height = ''; 
                 showTypingIndicator(); 
                 try {
                     const res = await fetch('/comando', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt}) });
