@@ -132,7 +132,15 @@ for d in "${SYNC_DIRS[@]}"; do
   DIFF_EXC=(--exclude=__pycache__ --exclude='*.pyc')
   if [ "$d" = "public" ]; then
     for s in "${PUBLIC_REVIEW[@]}"; do
-      RSYNC_EXC+=(--exclude="$s"); DIFF_EXC+=(--exclude="$s")
+      RSYNC_EXC+=(--exclude="$s")
+      # rsync matches --exclude against the path relative to the transfer
+      # root, so "static/mermaid_graph.mjs" is right there. GNU diff matches
+      # --exclude against the BASENAME only, so the same pattern silently
+      # matches nothing and the dry-run kept reporting protected prod-only
+      # assets as differences -- a false "sync public" that sends whoever is
+      # deploying to investigate a problem the exclusion had already solved.
+      # The basename form is what makes the report tell the truth.
+      DIFF_EXC+=(--exclude="$(basename "$s")" --exclude="$s")
       [ -e "$PROD/public/$s" ] && \
         echo "  keep  public/$s  (prod-only asset, protected from --delete)"
     done
@@ -154,8 +162,24 @@ for d in "${SYNC_DIRS[@]}"; do
   echo "  sync  $d"
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    diff -rq "${DIFF_EXC[@]}" "$DEV/$d" "$PROD/$d" 2>&1 \
-      | sed 's/^/          /' | head -40
+    # `diff -rq` exits 1 when the trees DIFFER, which is the normal case here
+    # and not an error. Under `set -euo pipefail` that non-zero status aborted
+    # the whole script on the first out-of-sync directory: --dry-run died on
+    # `src`, never reached tests/skills/prompts/public, never ran the gates,
+    # and exited 1 as though the tree were fine. It reported failure while
+    # having looked at almost nothing, which is how the prod-only files that
+    # `--delete` would have removed stayed invisible.
+    #
+    # The count is printed as well as the list because `head -40` truncated
+    # silently, so a directory with 60 differences reported the first 40 and
+    # said nothing about the rest.
+    _diffs=$(diff -rq "${DIFF_EXC[@]}" "$DEV/$d" "$PROD/$d" 2>&1 || true)
+    _n=$(printf '%s\n' "$_diffs" | grep -c . || true)
+    if [ "$_n" -gt 0 ]; then
+      printf '%s\n' "$_diffs" | sed 's/^/          /' | head -40
+      [ "$_n" -gt 40 ] && echo "          ... and $((_n - 40)) more"
+    fi
+    unset _diffs _n
   else
     # -rlt, NOT -a. -a implies -o -g, and this script may run as a user that
     # cannot chgrp (sudo is not granted for chown here): rsync aborted with
