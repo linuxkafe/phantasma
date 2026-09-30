@@ -123,10 +123,22 @@ def page(doc):
                 this.mimeType = 'audio/webm';
                 this.ondataavailable = null;
                 this.onstop = null;
-                this.start = () => window.__rec.push('start');
+                /* It has to EMIT DATA, or the page correctly refuses an empty
+                   recording and nothing is ever sent -- which is what happened
+                   with the first version of this fixture: every assertion about
+                   the send path passed by never reaching it. */
+                const chunk = (n) => new Blob([new Uint8Array(n).fill(9)],
+                                              {type: 'audio/webm'});
+                this.start = () => {
+                    window.__rec.push('start');
+                    setTimeout(() => {
+                        if (self.ondataavailable) self.ondataavailable({data: chunk(4000)});
+                    }, 40);
+                };
                 this.stop = () => {
                     window.__rec.push('stop');
-                    if (self.onstop) self.onstop();
+                    if (self.ondataavailable) self.ondataavailable({data: chunk(2000)});
+                    setTimeout(() => { if (self.onstop) self.onstop(); }, 20);
                 };
             };
             if (Real && Real.isTypeSupported) {
@@ -770,3 +782,125 @@ def test_the_microphone_works_from_the_keyboard(page):
     assert not page.evaluate(
         "() => document.getElementById('voice-btn').classList.contains('recording')"
     ), "releasing the key did not stop recording"
+
+
+# --- the top bar ------------------------------------------------------------
+
+
+def _bar(pg):
+    return pg.evaluate(
+        """() => {
+            const box = (s) => {const e = document.querySelector(s);
+                if (!e) return null;
+                const r = e.getBoundingClientRect();
+                return {x: Math.round(r.x), w: Math.round(r.width),
+                        vis: getComputedStyle(e).display !== 'none'};};
+            return {logo: box('#brand-logo'), weather: box('#main-weather-icon'),
+                    moon: box('#moon-slot'), uv: box('#uv-slot'), aqi: box('#aqi-indicator'),
+                    burger: box('.nav-toggle'),
+                    name: getComputedStyle(document.getElementById('brand-name')).display};
+        }"""
+    )
+
+
+def test_the_ghost_is_flush_left_and_the_burger_flush_right(page):
+    page.wait_for_timeout(500)
+    b = _bar(page)
+    assert b["logo"]["x"] <= 16, f"the ghost starts at x={b['logo']['x']}"
+    assert b["burger"]["x"] + b["burger"]["w"] >= PHONE["width"] - 16, (
+        f"the burger ends at {b['burger']['x'] + b['burger']['w']} of "
+        f"{PHONE['width']}: it is not at the right edge"
+    )
+
+
+def test_the_indicators_follow_the_ghost_in_reading_order(page):
+    page.wait_for_timeout(500)
+    b = _bar(page)
+    logo_end = b["logo"]["x"] + b["logo"]["w"]
+    assert b["weather"]["x"] >= logo_end, (
+        "the weather is not next to the ghost"
+    )
+    shown = [(k, v) for k, v in (("moon", b["moon"]), ("uv", b["uv"]),
+                                 ("aqi", b["aqi"])) if v["vis"]]
+    xs = [v["x"] for _k, v in shown]
+    assert xs == sorted(xs), f"the indicators are out of order: {shown}"
+    # And they are a group, not a banner across the screen.
+    assert b["weather"]["x"] < PHONE["width"] * 0.6, (
+        f"the sky starts at x={b['weather']['x']}: it is centred, not following "
+        f"the ghost"
+    )
+
+
+def test_the_word_mark_is_dropped_on_a_phone(page):
+    """At 375px there is room for the ghost, four indicators and the burger, or
+    for those and the name. The ghost is already the name."""
+    page.wait_for_timeout(400)
+    assert _bar(page)["name"] == "none", (
+        "the word mark is still on the phone and competes with the indicators"
+    )
+
+
+# --- the voice send, end to end --------------------------------------------
+
+
+def test_a_recording_actually_reaches_the_server(page):
+    """This never worked, and every test above it passed.
+
+    `sendRecording` read `_voiceMime`, which was declared inside `initVoice()`
+    while sendRecording is a sibling: a ReferenceError on its very first line,
+    before the network. The user saw "falha ao enviar o áudio" with the
+    recording working. The send was never asserted by any test, so the whole
+    feature could be broken from end to end and the suite stayed green.
+    """
+    page.evaluate(
+        """() => {window.__sent = null;
+            const prev = window.fetch;
+            window.fetch = async (u, o) => {
+                if (String(u).includes('/api/voz')) {
+                    const b = JSON.parse(o.body);
+                    window.__sent = {chars: b.audio_base64.length, ct: b.content_type};
+                    return {status: 200, json: async () => ({
+                        success: true, transcript: 'liga a luz', text: 'Ligado.'})};
+                }
+                return prev(u, o);
+            };}"""
+    )
+    box = _press(page, "#voice-btn", 600)
+    _release(page, "#voice-btn", box)
+    page.wait_for_timeout(600)
+    sent = page.evaluate("() => window.__sent")
+    assert sent, "nothing was ever sent to /api/voz: the send path is dead"
+    assert sent["chars"] > 100, f"only {sent['chars']} chars were sent"
+    assert "webm" in sent["ct"] or "mp4" in sent["ct"] or "wav" in sent["ct"], (
+        f"the recording's own container was not declared: {sent['ct']!r}. The page "
+        f"used to rebuild a WAV in the browser; it now sends bytes and the server "
+        f"decodes them with PyAV."
+    )
+
+
+def test_the_container_is_sent_untouched(page):
+    """No browser-side decodeAudioData, no hand-written resampler, no
+    hand-written WAV. The three steps that failed on a real phone are gone, and
+    the payload is the recording as produced."""
+    # Call sites, not prose. All three names survive in the COMMENTS that explain
+    # why they are gone -- which is the point of those comments -- so asserting
+    # on the raw text of the script fails on documentation and teaches everyone
+    # to delete the explanation.
+    called = page.evaluate(
+        """() => {
+            const src = Array.from(document.scripts).map(s => s.textContent).join('');
+            // Strip block and line comments, then look for a CALL.
+            const code = src.replace(/\\/\\*[\\s\\S]*?\\*\\//g, '').replace(/^\\s*\\/\\/.*$/gm, '');
+            return {resample: /\btoMono16k\\s*\\(/.test(code),
+                    wav: /\bpcmToWav\\s*\\(/.test(code),
+                    decode: /\bdecodeAudioData\\s*\\(/.test(code)};
+        }"""
+    )
+    assert not called["resample"], "the browser-side resampler is still called"
+    assert not called["wav"], "the hand-written WAV encoder is still called"
+    assert not called["decode"], (
+        "the page still decodes its own recording. That is the step that failed "
+        "on a real phone, and it has no reason to exist: the server carries PyAV "
+        "and opens webm, opus, ogg, mp4 and wav alike"
+    )
+

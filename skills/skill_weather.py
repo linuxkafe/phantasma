@@ -175,13 +175,19 @@ def _refresh_weather_cache() -> bool:
             today = days[0]
             lat, lon = today.get('latitude'), today.get('longitude')
             aqi = None
+            uv = None
             try:
                 om = client.get(
                     "https://air-quality-api.open-meteo.com/v1/air-quality",
                     params={"latitude": lat, "longitude": lon, "current": "uv_index,us_aqi"},
                     timeout=10.0
                 ).json()
-                aqi = om.get('current', {}).get('us_aqi')
+                current = om.get('current', {})
+                # One request for both. The URL already asked for uv_index and
+                # the value was thrown away: the UV was only ever in the spoken
+                # answer, never on the screen.
+                aqi = current.get('us_aqi')
+                uv = current.get('uv_index')
             except Exception:
                 # AQI is optional; forecast is the hard requirement
                 pass
@@ -189,7 +195,8 @@ def _refresh_weather_cache() -> bool:
                 "city": DEFAULT_CITY_NAME,
                 "forecast": days,
                 "moon_phase": _get_moon_phase(),
-                "aqi": aqi,
+                  "aqi": aqi,
+                  "uv_index": uv,
                 "fetched_at": datetime.now().isoformat(),
                 "stale": False,
             }

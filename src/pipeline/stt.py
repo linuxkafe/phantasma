@@ -174,6 +174,50 @@ class WhisperSTT:
             return Result.fail(str(e), duration_ms=duration_ms)
 
 
+def decode_bytes(data: bytes) -> np.ndarray:
+    """Decode ANY recorded audio into 16 kHz mono float32.
+
+    Added 2026-09-29 because the browser could not be made to do it reliably.
+
+    The page used to decode its own MediaRecorder output with
+    `AudioContext.decodeAudioData`, resample to 16 kHz by hand and write a WAV
+    container. On a real Android phone that path failed and the user got "falha
+    ao enviar o áudio" -- after the recording, the transcription and everything
+    else had already worked. Three moving parts in the browser to replace one
+    line here.
+
+    `faster_whisper.audio.decode_audio` is PyAV, and PyAV is already an indirect
+    dependency of faster-whisper itself, so this is free: it opens the container
+    (webm, opus, ogg, mp4/aac, wav), resamples to 16 kHz and downmixes to mono,
+    exactly as the recogniser wants. The hand-rolled resampler and the
+    hand-written WAV header were recreating what this returns.
+
+    Measured on this box (PyAV 18.1.0, faster-whisper 1.2.1) against synthetic
+    live-streamed WebM of the shape MediaRecorder actually produces: it decodes
+    down to 20ms clips.
+
+    Two things it does NOT forgive, and both are cheap to catch here: a
+    header-only container (a recording that never received data) and a lost
+    first chunk. Both raise, and raising with a clear message beats a client
+    that silently sends noise.
+
+    Args:
+        data: The raw bytes of a recorded clip, any format PyAV can open.
+
+    Returns:
+        float32 numpy array at 16 kHz, mono.
+
+    Raises:
+        Exception: whatever PyAV raises for a container it cannot read. The
+            caller is expected to turn that into a message the user can act on.
+    """
+    import io
+
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(io.BytesIO(data), sampling_rate=16000)
+
+
 def transcribe(audio: np.ndarray, language: Optional[str] = None) -> Result:
     """Convenience function for direct transcription.
 

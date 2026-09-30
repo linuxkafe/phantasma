@@ -796,14 +796,36 @@ def voice_endpoint():
         ), 413
 
     try:
-        from src.api.routes import _decode_base64_audio, _execute_llm_tts, _resample_to_16khz
+        import base64 as _b64
+
+        from src.api.routes import _execute_llm_tts
+        from src.pipeline.stt import decode_bytes
         from src.pipeline.stt import transcribe as stt_transcribe
 
-        audio, sample_rate = _decode_base64_audio(audio_b64)
-        audio = _resample_to_16khz(audio, sample_rate)
+        # Whatever the browser recorded, sent as-is. The page used to decode it
+        # with AudioContext, resample by hand and write a WAV, and that failed on
+        # a real Android phone -- the user saw "falha ao enviar o áudio" with
+        # recording, transcription and everything else working fine. PyAV, which
+        # is already here as a dependency of faster-whisper, opens webm, opus,
+        # ogg, mp4/aac and wav alike. One step instead of three, and the step
+        # that cannot fail lives on the server where it can be measured.
+        raw = _b64.b64decode(audio_b64)
+        audio = decode_bytes(raw)
     except Exception as exc:  # noqa: BLE001 - report, never 500 a tap on a phone
-        logger.warning("voice: audio decode failed: %s", exc)
-        return jsonify({"success": False, "error": "Não consegui ler o áudio."}), 400
+        # The reason goes in the log AND in the response, so a failure that
+        # cannot be reproduced in a headless browser can still be told apart by
+        # the person who has the phone.
+        logger.warning("voice: audio decode failed: %s: %s", type(exc).__name__, exc)
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Não consegui ler o áudio.",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            ),
+            400,
+        )
 
     # Silence is the common case for a mis-tap, and the recogniser will happily
     # return a confident transcription of room noise. Rejecting it here means the
@@ -1001,6 +1023,25 @@ def handle_request():
                     flex: 1 1 auto;
                 }
             }
+                /* THE TOP BAR. A row: the ghost flush left, the sky in reading
+                   order, the burger at the far right. The indicators used to sit
+                   in two stacked groups either side of the logo, so telling the
+                   air from the weather meant reading two places at once. */
+                #brand-row {
+                    display: flex; align-items: center; gap: 10px;
+                    width: 100%; min-width: 0;
+                }
+                #sky-stage { display: flex; align-items: center; gap: 10px; min-width: 0; }
+                /* Night and UV only when they mean something. Hidden by default
+                   so a stale value from an hour ago does not sit there claiming
+                   the moon is up at noon. */
+                #moon-slot, #uv-slot { display: none; }
+                #moon-slot.night, #uv-slot.day { display: flex; }
+                #moon-slot svg, #uv-slot svg, #aqi-indicator svg,
+                #main-weather-icon svg, #main-moon-icon svg {
+                    width: 1.1em; height: 1.1em; display: block;
+                }
+                #uv-indicator, #aqi-indicator { display: flex; align-items: center; }
             #brand {
                 display: flex; flex-direction: column; align-items: center; justify-content: center;
                 /* The brand is the identity block and nothing else. It was
@@ -1021,8 +1062,13 @@ def handle_request():
 
             /* ZONA DO CÉU (Tempo + Lua) */
             #sky-stage {
-                display: flex; align-items: flex-end; justify-content: center;
-                gap: 15px; margin-bottom: 5px; width: 100%;
+                /* A row of indicators that follows the ghost, so `width: 100%`
+                   and `justify-content: center` are both wrong now: they made it
+                   a full-width centred strip, which put the weather at x=170 of a
+                   375px screen with nothing between it and the logo. It is a
+                   group of readings that belong to the mark, not a banner. */
+                display: flex; align-items: center; justify-content: flex-start;
+                gap: 10px; margin-bottom: 0; width: auto;
             }
             .sky-element {
                 display: flex; flex-direction: column; align-items: center;
@@ -1412,6 +1458,13 @@ def handle_request():
                    #main-weather-icon sat at top:-23px on EVERY mobile size --
                    the weather icon was half off-screen. Let the brand take its
                    natural height so nothing is clipped. */
+                    /* The word mark has no room on a phone: at 375px there is
+                       space for the logo, four indicators and the burger, or the
+                       logo, four indicators and the name. The ghost is already
+                       the name. And the ghost gets bigger, because it is the
+                       thing you look at first. */
+                    #brand-name { display: none; }
+                    #sky-stage { gap: 12px; }
                 #brand { flex: 0 0 auto; height: auto; }
 
                 #chat-input { min-height: 44px; height: auto; }
@@ -1454,11 +1507,19 @@ def handle_request():
                 #devices { flex: 1 1 auto; min-height: 64px; width: 100%; overflow-y: auto; }
                 #brand {
                     width: 100%; height: auto; flex-direction: row; align-items: center;
-                    justify-content: space-between; border-right: none; padding: 8px 12px;
+                    /* flex-start, not space-between. The bar is a row that reads
+                       left to right -- ghost, sky, burger -- and space-between
+                       pushed the sky to the middle of the screen, which is not
+                       "a seguir" anything. The burger is fixed to the right
+                       independently, so nothing here needs pushing. */
+                    justify-content: flex-start; border-right: none; padding: 8px 12px;
                 }
-                #sky-stage { margin-bottom: 0; gap: 8px; }
+                #sky-stage { margin-bottom: 0; gap: 10px; }
                 #ghost-stage { margin-bottom: 0; }
-                #brand-logo { font-size: 0.8rem !important; }
+                /* Bigger than the 0.8rem this used to be, and last in the
+                   stylesheet: both rules carry !important, so the later one wins,
+                   and this one has to be the later one. */
+                #brand-logo svg { width: 1em; height: 1em; }
                 /* right was -8px, hanging outside the box on purpose on desktop. With
                    #header-strip overflow:hidden on mobile that clipped the AQI value
                    in half at the screen edge, so it reads as a stray character. */
@@ -1864,21 +1925,41 @@ def handle_request():
 
           <div id="header-strip">
               <div id="brand" onclick="triggerEasterEgg()">
-                  <div id="sky-stage">
-                      <div class="sky-element" title="Meteorologia">
-                          <div id="main-weather-icon"><svg class='ghost-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z'/></svg></div>
-                          <div id="main-weather-temp">--°</div>
+                  <!-- A ROW, on owner instruction: the ghost flush left, then the
+                       sky, in the order it is read -- weather, moon, UV, air --
+                       and the burger sits at the far right. The indicators used
+                       to be in two stacked groups on either side of the logo, so
+                       "which is the air and which is the weather" was a puzzle
+                       before you could read either.
+
+                       The word mark is hidden on a phone, and that is a
+                       consequence rather than a flourish: at 375px there is room
+                       for the logo, four indicators and the burger, or for the
+                       logo, four indicators and the name, but not both. The ghost
+                       already IS the name. -->
+                  <div id="brand-row">
+                      <div id="brand-logo" class="ghost-normal"></div>
+                      <div id="sky-stage">
+                          <div class="sky-element" title="Meteorologia">
+                              <div id="main-weather-icon"></div>
+                              <div id="main-weather-temp">--°</div>
+                          </div>
+                          <!-- Night only. The moon phase means something when it
+                               is dark and nothing when it is not, so it is not
+                               shown at noon; JS adds the class. -->
+                          <div class="sky-element" id="moon-slot" title="Fase Lunar">
+                              <div id="main-moon-icon"></div>
+                          </div>
+                          <div class="sky-element" id="uv-slot" title="Índice UV">
+                              <div id="uv-indicator"></div>
+                          </div>
+                          <div class="sky-element" title="Qualidade do Ar">
+                              <div id="aqi-indicator"></div>
+                          </div>
                       </div>
-                      <div class="sky-element" title="Fase Lunar">
-                          <div id="main-moon-icon"></div>
-                      </div>
+                      <div id="brand-name">pHantasma</div>
                   </div>
-                  <div id="ghost-stage">
-                      <div id="brand-logo" class="ghost-normal"><svg class='ghost-svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z'/><circle cx='9.5' cy='11' r='1.2'/><circle cx='14.5' cy='11' r='1.2'/></svg></div>
-                      <div id="aqi-indicator" title="Qualidade do Ar"></div>
-                  </div>
-                  <div id="brand-name">pHantasma</div>
-                  <div id="power-display" title="Consumo Geral">-- W</div>
+              </div>
               </div>
               <!-- Secondary nav, always visible. Shares .nav-menu styling with
                    the admin pages but has no toggle: on this screen a burger
@@ -2040,6 +2121,27 @@ def handle_request():
                rendered differently per platform, and `innerText` on an emoji is
                the only reason the moon ever appeared at all. */
             const _wrap = (inner) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + inner + '</svg>';
+            /* UV, as a sun with rays that shrink with the index: a number in a
+               circle reads as a badge nobody learns. A sun whose ray count and
+               stroke mean something is a picture you get at a glance. */
+            const _uvSvg = (uv) => {
+                const v = Math.max(0, Math.min(11, Math.round(Number(uv) || 0)));
+                const rays = ['', 'M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2',
+                              'M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6',
+                              'M3.4 3.4l2 2M18.6 18.6l2 2M20.6 3.4l-2 2M5.4 20.6l-2-2'];
+                const body = rays[Math.min(3, Math.floor(v / 3))];
+                return _wrap('<circle cx="12" cy="12" r="3.6"/>' + body +
+                    '<path d="M12 8.4v7.2M8.4 12h7.2" opacity="0"/>');
+            };
+            function uvAdvice(uv) {
+                const v = Number(uv);
+                if (isNaN(v)) return 'desconhecido';
+                if (v < 3) return 'Baixo';
+                if (v < 6) return 'Moderado';
+                if (v < 8) return 'Alto';
+                if (v < 11) return 'Muito alto';
+                return 'Extremo';
+            }
             const AQI = {
                 good: _wrap('<path d="M12 3c5 3 7 7 7 10a7 7 0 0 1-14 0c0-3 2-7 7-10Z"/><path d="M12 20V9"/>'),
                 moderate: _wrap('<circle cx="12" cy="12" r="8"/><path d="M8 14h.01M16 14h.01M9 17h.01M15 17h.01"/>'),
@@ -2059,6 +2161,17 @@ def handle_request():
             };
             const GHOST_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z"/><circle cx="9.5" cy="11" r="1.2"/><circle cx="14.5" cy="11" r="1.2"/></svg>';
             const CLOUD_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z"/></svg>';
+
+            /* The brand and the sky icon are filled here rather than written as
+               literal markup. A JavaScript string of SVG cannot be inlined into
+               this Python string literal without either quote-escaping -- which
+               is exactly how the ghost ended up as stroke="&apos;currentColor"
+               and drew NOTHING, invisibly, for a release -- or entity-escaping,
+               which is the same bug. Empty markup, one injection point. */
+            const _brandEl = document.getElementById('brand-logo');
+            if (_brandEl) _brandEl.innerHTML = GHOST_SVG;
+            const _skyEl = document.getElementById('main-weather-icon');
+            if (_skyEl) _skyEl.innerHTML = CLOUD_SVG;
 
             function icon(kind) {
                 return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -2641,6 +2754,28 @@ def handle_request():
                 else if (ambient.mode !== 'none') ambient.set(ambient.mode, ambient.level);
             });
 
+            /* Is it night? The moon phase is the honest answer when we have one,
+               and the sky is when we do not: weatherType 1 is clear sky, which is
+               daytime by definition, and a waning or new moon is a dark one. With
+               neither, it is a guess, and it is labelled as one by the comment
+               rather than pretending otherwise. */
+            function _isNight(moon, today) {
+                /* The SKY decides first. WeatherType 1 is clear sky, which is
+                   daytime whatever the moon is doing, and putting the phase first
+                   showed a waning moon at noon and then hid the UV index because
+                   "it was night" -- so a clear afternoon rendered neither.
+
+                   Then the phase, for the days that are not clear. Then, with
+                   neither, night: a wrong moon is a cosmetic mistake, and no
+                   moon at all is the same mistake. */
+                if (Number(today && today.idWeatherType) === 1) return false;
+                const m = String(moon || '');
+                if (m.includes('Cheia')) return false;
+                if (m.includes('Minguante')) return true;
+                if (m.includes('Crescente')) return false;
+                return true;
+            }
+
             /* The real forecast, mapped onto the layer. IPMA weatherType: 1
                clear, 2-5 partly, 6-15 rain, 16+ fog. `precipitaProb` and
                `classWindSpeed` are what decide how hard it comes down. */
@@ -2710,6 +2845,25 @@ def handle_request():
                     else if (moon.includes("Minguante")) mIcon = MOON.waning;
                     document.getElementById('main-moon-icon').innerHTML = mIcon;
                     document.querySelector('.sky-element[title="Fase Lunar"]').title = moon || "Fase Lunar";
+                    /* Night and UV are shown only when they are TRUE. The moon
+                       phase at noon is noise, and a UV index from three hours
+                       ago is a lie, so each slot is a function of the current
+                       sky rather than a leftover from the last fetch. */
+                    const isNight = _isNight(moon, today);
+                    const moonSlot = document.getElementById('moon-slot');
+                    if (moonSlot) moonSlot.classList.toggle('night', isNight);
+                    const uvNum = Number(data.uv_index);
+                    const uvSlot = document.getElementById('uv-slot');
+                    const uvEl = document.getElementById('uv-indicator');
+                    /* Below 3 the advice is "no precautions needed" and a badge
+                       about it is clutter; it earns its place from Moderate up. */
+                    const showUv = !!uvSlot && !isNaN(uvNum) && !isNight && uvNum >= 3;
+                    if (uvSlot) uvSlot.classList.toggle('day', showUv);
+                    if (uvEl) uvEl.innerHTML = showUv ? _uvSvg(uvNum) : '';
+                    if (uvSlot) uvSlot.title = showUv
+                        ? `Índice UV ${Math.round(uvNum)} (${uvAdvice(uvNum)})`
+                        : 'Índice UV';
+
                     const aqi = data.aqi; const aqiEl = document.getElementById('aqi-indicator');
                     if (aqi !== undefined) {
                         /* Air quality, as SVG and not emoji. A leaf for "good"
@@ -2952,6 +3106,14 @@ def handle_request():
                appears. What IS tested is the server half (tests/test_ui_voice.py).
                Verified by hand on a real phone before this was called done. */
             let _voiceStream = null, _voiceRec = null, _voiceChunks = [], _voiceBusy = false;
+            /* The container the recorder actually produced, kept at page scope
+               for the same reason as the buttons below: sendRecording() is a
+               SIBLING of initVoice() and used a variable declared inside it, so
+               the send path threw `_voiceMime is not defined` on its very first
+               line -- before touching the network. That is why the user saw
+               "falha ao enviar o áudio" with the recording working perfectly:
+               the failure was never in the audio, it was a name. */
+            let _voiceMime = 'audio/webm';
             const voiceBtn = document.getElementById('voice-btn');
             const voiceStatus = document.createElement('div');
             voiceStatus.className = 'voice-status';
@@ -2965,54 +3127,6 @@ def handle_request():
                 voiceStatus.classList.add('show');
                 clearTimeout(_voiceStatusTimer);
                 if (ms) _voiceStatusTimer = setTimeout(() => voiceStatus.classList.remove('show'), ms);
-            }
-
-            /* 16 kHz mono PCM -> WAV container. Whisper wants 16 kHz; the
-               browser records at whatever the hardware prefers (usually 48 kHz),
-               and the recogniser's accuracy on Portuguese collapses if it is fed
-               the wrong rate rather than resampled. */
-            function pcmToWav(samples) {
-                const buf = new ArrayBuffer(44 + samples.length * 2);
-                const view = new DataView(buf);
-                const wstr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-                wstr(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true);
-                wstr(8, 'WAVE'); wstr(12, 'fmt ');
-                view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-                view.setUint16(22, 1, true); view.setUint32(24, 16000, true);
-                view.setUint32(28, 32000, true); view.setUint16(32, 2, true);
-                view.setUint16(34, 16, true);
-                wstr(36, 'data'); view.setUint32(40, samples.length * 2, true);
-                for (let i = 0; i < samples.length; i++) {
-                    const s = Math.max(-1, Math.min(1, samples[i]));
-                    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-                }
-                return buf;
-            }
-
-            /* Resample to 16 kHz by linear interpolation, then average the
-               channels down to mono. Not a windowed-sinc: the recogniser is
-               trained on 16 kHz telephone-ish audio and this is well inside
-               its tolerance, while a proper filter would be a lot of code to
-               carry in a string literal. */
-            async function toMono16k(blob) {
-                const Ctx = window.AudioContext || window.webkitAudioContext;
-                const ctx = new Ctx();
-                try {
-                    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
-                    const target = 16000;
-                    const frames = Math.max(1, Math.round(decoded.duration * target));
-                    const out = new Float32Array(frames);
-                    const chans = decoded.numberOfChannels;
-                    for (let c = 0; c < chans; c++) {
-                        const data = decoded.getChannelData(c);
-                        for (let i = 0; i < frames; i++) {
-                            const pos = i * decoded.sampleRate / target;
-                            const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, data.length - 1);
-                            out[i] += (data[i0] + (data[i1] - data[i0]) * (pos - i0)) / chans;
-                        }
-                    }
-                    return out;
-                } finally { ctx.close(); }
             }
 
             function bytesToBase64(bytes) {
@@ -3073,14 +3187,39 @@ def handle_request():
                 allVoiceBtns.forEach(b => { b.classList.add('busy'); b.disabled = true; });
                 voiceSay('A ouvir...');
                 try {
-                    const pcm = await toMono16k(blob);
+                    /* The recording goes up as the microphone produced it.
+
+                       This used to be: decodeAudioData, a hand-written
+                       resampler, a hand-written WAV container, then base64. Three
+                       things to get wrong in a browser -- and on a real Android
+                       phone it failed at the first, with "falha ao enviar o
+                       áudio", while the recording and everything else worked.
+
+                       The server already carries PyAV: it ships with
+                       faster-whisper, and it opens webm, opus, ogg, mp4/aac and
+                       wav, resampling to 16 kHz mono on the way in. So the page
+                       sends bytes and the one job that needs a decoder happens
+                       where it can be measured. The content type travels for the
+                       log; PyAV sniffs the container and does not need it. */
+                    const bytes = new Uint8Array(await blob.arrayBuffer());
                     const res = await fetch('/api/voz', {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ audio_base64: bytesToBase64(pcmToWav(pcm)) }),
+                        body: JSON.stringify({
+                            audio_base64: bytesToBase64(bytes),
+                            content_type: blob.type || 'audio/webm',
+                        }),
                     });
                     if (res.status === 401) { location.href = '/login?next=/'; return; }
                     const data = await res.json();
-                    if (data.success === false) { voiceSay(data.error || 'Não deu.', 3000); return; }
+                    if (data.success === false) {
+                        /* The server's reason, in the message. A generic
+                           "não deu" on a phone is the one failure nobody can
+                           debug, because it cannot be reproduced anywhere else. */
+                        voiceSay((data.error || 'Não deu.')
+                            + (data.detail ? ' (' + data.detail + ')' : ''), 6000);
+                        console.error('voice: refused', data);
+                        return;
+                    }
                     if (data.transcript) addToChatLog(data.transcript, 'user');
                     if (data.text) addToChatLog(data.text, 'ia');
                     /* A spoken command always opens the panel. The transcript
@@ -3120,7 +3259,6 @@ def handle_request():
                     });
                     return;
                 }
-                let _voiceMime = 'audio/webm';
                 /* PRESS AND HOLD, which is what a microphone button is.
 
                    It was a click handler that toggled: tap once to start, tap
