@@ -23,8 +23,16 @@ TRIGGER_TYPE = "contains"
 # per host. In production the resolved path is byte-identical to the old one.
 CACHE_FILE = str(Path(config.CACHE_DIR) / "tuya_cache.json")
 PORTS_TO_LISTEN = [6666, 6667]
-POLL_COOLDOWN = 10 
+POLL_COOLDOWN = 10
+# Antes so havia poll no boot e ao recibir UDP da app. A app oficial so
+# transmite quando o telemóvel esta aberto e em foreground, entao fechar a app
+# deixava a cache envelhecer sem limite. 60s e o mesmo cadencia do skill_cloogy.
+POLL_INTERVAL = 60
 LAST_POLL = {}
+# Names whose poll is currently running. See _poll_device_task for why the
+# timestamp cooldown alone is not enough to prevent overlapping polls.
+_INFLIGHT = set()
+_INFLIGHT_LOCK = threading.Lock()
 VERBOSE_LOGGING = False 
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
@@ -78,7 +86,23 @@ def _poll_device_task(name, details, force=False):
     if not ip or ip.endswith('x'): return 
     global LAST_POLL
     if not force and (time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN): return
-    LAST_POLL[name] = time.time()
+    # One poll in flight per device. LAST_POLL records the START of a poll, not
+    # its end, so it cannot prevent a pile-up: a dead device burns up to 4
+    # versions x 3s, and measured across 9 dead devices one turn took 80s --
+    # longer than POLL_INTERVAL, so the next turn started while the last was
+    # still running and threads accumulated without bound. The sensor fleet is
+    # currently offline, which is precisely when this happens.
+    with _INFLIGHT_LOCK:
+        if name in _INFLIGHT: return
+        _INFLIGHT.add(name)
+    try:
+        _poll_device_body(name, details)
+    finally:
+        with _INFLIGHT_LOCK: _INFLIGHT.discard(name)
+
+def _poll_device_body(name, details):
+    ip = details.get('ip')
+    dps = None
     dps = None
     for ver in VERSIONS_TO_TRY:
         try:
@@ -107,22 +131,55 @@ def _udp_listener(port):
             if name: threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
         except: continue
 
+def _poll_all(force=True):
+    """Um poll por dispositivo, cada um na sua thread.
+
+    Threads separadas porque _poll_device_task tenta 4 versoes com timeout de
+    3s: um dispositivo morto custa ate 12s, e um loop sequencial sobre 9
+    dispositivos passaria o intervalo de poll antes de recomecar.
+    """
+    if not hasattr(config, 'TUYA_DEVICES'): return
+    for name, details in config.TUYA_DEVICES.items():
+        threading.Thread(target=_poll_device_task, args=(name, details, force), daemon=True).start()
+
+def _poll_loop():
+    while True:
+        _poll_all(force=False)
+        time.sleep(POLL_INTERVAL)
+
 def init_skill_daemon():
     if not hasattr(config, 'TUYA_DEVICES'): return
     print("[Tuya] A iniciar daemon...")
-    for name, details in config.TUYA_DEVICES.items(): threading.Thread(target=_poll_device_task, args=(name, details, True)).start()
+    _poll_all(force=True)
     for port in PORTS_TO_LISTEN: threading.Thread(target=_udp_listener, args=(port,), daemon=True).start()
+    threading.Thread(target=_poll_loop, daemon=True).start()
 
-# Declared DPS schemas for known Tuya sensors, based on observed cache values.
-# dps 1 for these devices arrives in deci-celsius (245 -> 24.5 °C). Values are
-# evidence-based, not verified against a live device. No device in the fleet
-# currently declares a humidity DPS, so humidity is not reported until a live
-# reading confirms the DPS number.
-SENSOR_TEMP_MAP = {
-    "sensor do quarto": {"temperature": (1, 10.0)},
-    "sensor do wc": {"temperature": (1, 10.0)},
-}
+# Declared DPS schemas for Tuya sensors, based on observed cache values.
+# dps 1 arrives in deci-celsius (245 -> 24.5 °C). dps 2 arrives in whole
+# percent and is only present on devices that report it -- in the production
+# cache only "Sensor do Quarto" carries it, so it is read per device rather
+# than declared per device: a sensor that grows a humidity sensor later
+# reports it without a code change.
+#
+# These are NOT verified against a live device. The DPS numbers come from
+# cached readings only, and a wrong guess here fabricates a measurement the
+# owner has no way to distrust. The range guards below are the last defence:
+# a value outside a physically possible range is dropped, never reported.
+SENSOR_DPS_TEMP = 1
+SENSOR_DPS_HUMIDITY = 2
+SENSOR_TEMP_SCALE = 10.0
+SENSOR_TEMP_MIN, SENSOR_TEMP_MAX = 5.0, 45.0
+SENSOR_HUMIDITY_MIN, SENSOR_HUMIDITY_MAX = 0.0, 100.0
 STALE_AFTER_S = 300  # 5 minutes - after this the reading is considered stale
+
+def _is_sensor(nickname):
+    """Um sensor e um dispositivo que mede, nao um que liga e desliga.
+
+    Antes, o schema vinha de duas entradas fixas na lista e qualquer sensor
+    novo nao tinha entrada: "Sensor da Sala" devolvia 'on'/'off' e nunca
+    temperatura, sem erro e sem aviso. O nome e o unico sinal disponivel.
+    """
+    return 'sensor' in nickname.lower()
 
 def get_status_for_device(nickname):
     cached = _get_cached_status(nickname)
@@ -140,20 +197,23 @@ def get_status_for_device(nickname):
     result['age_s'] = age_s
     result['stale'] = age_s > STALE_AFTER_S
 
-    # Temperature: only when the device class declares which DPS holds temperature.
-    # This prevents the previous heuristic from guessing a DPS number based on value
-    # range and silently fabricating temperature/humidity (OPS-005).
-    schema = SENSOR_TEMP_MAP.get(nickname.lower())
-    if schema:
-        for field, (dps_id, scale) in schema.items():
-            raw = dps.get(str(dps_id))
-            if raw is None: continue
-            try:
-                value = float(raw) / scale
-            except (ValueError, TypeError):
-                continue
-            if field == "temperature" and 5.0 <= value <= 45.0:
-                result["temperature"] = round(value, 1)
+    # Measurements: only for a device the caller identifies as a sensor, and
+    # only from a DPS the device actually reported. This keeps the previous
+    # heuristic (guessing a DPS number from the value's range) removed --
+    # that one fabricated temperature and humidity, OPS-005.
+    if _is_sensor(nickname):
+        raw_t = dps.get(str(SENSOR_DPS_TEMP))
+        if raw_t is not None:
+            try: temp = float(raw_t) / SENSOR_TEMP_SCALE
+            except (ValueError, TypeError): temp = None
+            if temp is not None and SENSOR_TEMP_MIN <= temp <= SENSOR_TEMP_MAX:
+                result['temperature'] = round(temp, 1)
+        raw_h = dps.get(str(SENSOR_DPS_HUMIDITY))
+        if raw_h is not None:
+            try: hum = float(raw_h)
+            except (ValueError, TypeError): hum = None
+            if hum is not None and SENSOR_HUMIDITY_MIN <= hum <= SENSOR_HUMIDITY_MAX:
+                result['humidity'] = round(hum, 1)
     return result
 
 def handle(user_prompt_lower, user_prompt_full):
@@ -201,10 +261,20 @@ def handle(user_prompt_lower, user_prompt_full):
         target_nick, _ = targets[0]
         st = get_status_for_device(target_nick)
         if st['state'] == 'unreachable': return f"O {target_nick} não responde das sombras."
-        res_parts = [f"O {target_nick} está {st['state']}"]
+        # A sensor has no on/off. Saying "o Sensor do Quarto está on" is a
+        # switch statement about a device that only measures.
+        res_parts = [f"O {target_nick}"]
+        if not _is_sensor(target_nick): res_parts.append(f"está {st['state']}")
         if 'temperature' in st: res_parts.append(f"com {st['temperature']} graus")
-        if 'humidity' in st: res_parts.append(f"e {st['humidity']}% de humidade")
+        if 'humidity' in st: res_parts.append(f"e {st['humidity']:g}% de humidade")
         if 'power_w' in st: res_parts.append(f"a gastar {st['power_w']} Watts")
+        # The reading's age is the difference between a measurement and a lie.
+        # The UI already dims a stale reading, but this path never said so: it
+        # answered "24.6 graus" for a value 48h old, with no qualification.
+        if st.get('stale'):
+            age_min = max(1, int(st['age_s']) // 60)
+            age = f"{age_min // 60}h" if age_min >= 60 else f"{age_min} minutos"
+            res_parts.append(f"mas é uma leitura de há {age}")
         return ", ".join(res_parts) + "."
 
     # Processar AÇÃO (On/Off)

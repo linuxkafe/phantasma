@@ -230,6 +230,9 @@ def _set_state(device_id, state_on):
         val = "1" if state_on else "0"
         url = f"https://api.cloogy.com/api/1.4/tag/{device_id}"
         resp = httpx.put(url, json={"Value": val}, headers=_get_headers(), timeout=10, verify=False)
+        if resp.status_code == 401:
+            if _login():
+                resp = httpx.put(url, json={"Value": val}, headers=_get_headers(), timeout=10, verify=False)
         return resp.status_code in [200, 204]
     except Exception: return False
 
@@ -353,9 +356,20 @@ def handle(user_prompt_lower, user_prompt_full):
     is_off = any(x in user_prompt_lower for x in ["desliga", "apaga"])
 
     # FIX: Prioridade ao DESLIGAR para evitar conflito de string ("desliga" contém "liga")
-    if is_off:
-        return "Ok." if _set_state(target_id, False) else "Erro."
-    elif is_on:
-        return "Ok." if _set_state(target_id, True) else "Erro."
+    if is_off or is_on:
+        # Check if this is an actuator tag (like the oven plug) - Cloogy API
+        # returns 401 on PUT despite CanActuate:true. The tag endpoint appears to
+        # not support write operations for third-party clients. The device endpoint
+        # returns 400 "not_allowed_change.device.device_type" for PLUG types.
+        tag_kind = _tag_kind(target_id)
+        if tag_kind == "actuator":
+            return (
+                f"O {target_name} e uma ficha Zigbee (atuador), mas a API do Cloogy "
+                f"nao permite controlar atuadores via API publica. "
+                f"So e possivel ler consumo/estado. Para ligar/desligar, "
+                f"usa a app Cloogy ou integra o plug via Zigbee2MQTT/Tasmota."
+            )
+        desired = is_on
+        return "Ok." if _set_state(target_id, desired) else "Erro ao comunicar com a API."
 
     return None

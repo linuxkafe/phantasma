@@ -1,4 +1,4 @@
-.PHONY: setup run test lint format build check doctor help venv typecheck check-wakewords
+.PHONY: setup run test test-mobile lint format build check doctor help venv typecheck check-wakewords
 
 AES_LANGUAGE ?= python
 AES_LINT ?= ruff check
@@ -31,6 +31,9 @@ check-wakewords:
 
 test: venv
 	@$(VENV_PYTHON) -m pytest
+
+test-mobile: venv
+	@$(VENV_PYTHON) -m pytest tests/test_mobile_*.py -v
 
 lint: venv
 	@$(VENV_PYTHON) -m ruff check src tests assistant.py config.py src/main.py

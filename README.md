@@ -528,21 +528,83 @@ pHantasma/
 └── Makefile              # Quality gates and commands
 ```
 
-## Mobile
+## Mobile / Desktop Interface
 
-There is no native app. The interface is the one served at `/`: it is
-responsive, and the same page is the phone interface. Voice is push-to-talk on
-screen (hold to record, release to send) with TTS playback, and the house is
-controlled from the device tiles. The only requirement is that the phone
-reaches the service — over the LAN, or through a tunnel.
+The interface at `/` is responsive and serves as both desktop and mobile UI.
 
-The reason is the one that matters for a house. The app was bound to a second,
-divergent command endpoint (`/api/command`, whose handlers were stubs that
-answered "Comando de dispositivo executado." without touching a device). Because
-it had its own client contract, the fix that made the web path real could not
-reach it — and the phone kept confirming switches that never happened. That is
-the whole class of bug this project keeps hitting: two paths to the same house.
-One interface, one dispatch path, one thing to keep correct.
+### Screenshots
+
+| Desktop (≥900px) | Mobile (375×667) |
+|------------------|------------------|
+| ![Desktop UI](docs/screenshots/desktop.png) | ![Mobile UI](docs/screenshots/mobile.png) |
+
+**Desktop features:**
+- Side-by-side: device tiles (left) + conversation (right)
+- Admin burger menu (top-right) with 6 links
+- Room-grouped tiles with SVG icons
+- Live weather widget
+
+**Mobile features:**
+- Full-width device strip (rooms stack, tiles wrap)
+- Bottom dock (pull up for conversation)
+- Top-right burger menu (thumb-reachable)
+- Two microphones (nav + composer), shared stream
+- Blind animation (clip-path) for panel open/close
+
+### Mobile Layout Validation
+
+Automated browser tests (`tests/test_mobile_*.py`, 33 tests) verify:
+- No JS errors, microphone reachable (44×44 target)
+- Zero tiles cut off (rooms stack, no horizontal scroll)
+- SVG icons (no emoji), grayscale filter works on OFF
+- Burger in top 20%/right half, sign-out visible
+- Dock ≥90% width, 56px tall, 40px grip
+- Blind animation (not translate), dock stays above panel
+- Device states loaded ≤1.5s after page load
+
+Run: `make test-mobile` (requires Chromium + Playwright)
+
+### Voice from Browser (Phone)
+
+- **Press-to-talk**: hold mic → release to send
+- **Audio decoded in browser** (MediaRecorder → AudioContext.decodeAudioData)
+- **POST /api/voz** → returns transcript, text answer, base64 audio
+- **~20s end-to-end** (1.6s utterance → 12s STT + 6s LLM + 2.5s TTS on i5-8500T)
+- **Transcript echoed** in chat log before answer
+
+### Layout Comparison
+
+| Element | Desktop | Mobile |
+|---------|---------|--------|
+| Device tiles | Left column (fixed) | Full width, stacked rooms |
+| Conversation | Right column | Bottom dock (pull up) |
+| Admin menu | Top-right burger | Top-right burger |
+| Weather | Top of tiles | In dock panel |
+| Mic button | Nav bar + composer | Composer only (nav shortcut) |
+
+## Zigbee Local Control (NEW)
+
+**Problem:** Oven plug on Cloogy Cloud returns 401 on control attempts — API doesn't support actuator writes for PLUG device types.
+
+**Solution:** Add Zigbee2MQTT with a USB coordinator dongle (~€25) for fully local control.
+
+### Quick Setup
+
+```bash
+# 1. Hardware: Sonoff ZBDongle-E (CC2652P) ~€25
+# 2. Docker services (Mosquitto + Zigbee2MQTT)
+# 3. Pair oven plug (IEEE: 0x00124b00023771d1 → friendly_name: forno)
+# 4. Add skill_zigbee2mqtt.py (PRIORITY 70)
+# 5. Deploy
+```
+
+See [`docs/ZIGBEE_INTEGRATION.md`](docs/ZIGBEE_INTEGRATION.md) for full guide.
+
+| Current (Cloogy) | With Zigbee2MQTT |
+|------------------|------------------|
+| ❌ Control returns 401 | ✅ Local ON/OFF via MQTT |
+| ❌ No state feedback | ✅ Real-time power/energy |
+| ☁️ Cloud-dependent | 🏠 100% offline |
 
 ## Privacy
 
@@ -550,6 +612,7 @@ One interface, one dispatch path, one thing to keep correct.
 - **All processing local**: hotword, STT, LLM, TTS
 - **Optional**: SearxNG web search (self-hosted)
 - **No telemetry**, no accounts, no API keys required
+- **Zigbee local**: No vendor cloud for device control
 
 ## Branch Status
 
