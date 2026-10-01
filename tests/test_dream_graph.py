@@ -729,3 +729,112 @@ def test_consolidation_fails_loudly_when_the_summary_is_not_written(db, monkeypa
     ).fetchone()[0]
     con.close()
     assert archived == 8, "the original rows must remain recoverable"
+
+
+# --- replies that rewarded a node the graph did not have -------------------
+
+def test_the_sleep_cycle_places_a_queued_reply_and_keeps_the_reward(db, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(
+        dream, "_concept_from_reply", lambda text: "energia eolica no Porto"
+    )
+    rewarded = []
+    monkeypatch.setattr(
+        dream, "_safe_ollama_chat", lambda *a, **kw: pytest.fail("should not need the LLM")
+    )
+    import src.brain.memory_graph as mg
+
+    monkeypatch.setattr(
+        mg,
+        "apply_reward",
+        lambda r, topic_key=None: rewarded.append((r, topic_key)) or "k",
+    )
+
+    from src.brain import unplaced
+
+    conn = sqlite3.connect(db)
+    unplaced.ensure_schema(conn)
+    rid = unplaced.enqueue(conn, "a turbina eolica do Porto", emoji="👍", reward=1.0)
+    conn.commit()
+    conn.close()
+
+    assert dream._place_unplaced_reactions() == 1
+
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT outcome, node_key FROM unplaced_reactions WHERE id = ?", (rid,)
+    ).fetchone()
+    conn.close()
+    assert row[0] == "placed", f"the queued reply was not placed: {row}"
+    assert rewarded, "the owner's reward did not travel with the node"
+
+
+def test_the_sleep_cycle_refuses_a_reply_with_no_concept(db, monkeypatch):
+    """"Claro!" is not a concept, and refusing it is the point.
+
+    Promoting greetings and generic answers is how the graph fills with nodes
+    nobody can defend. The refusal is recorded so the same reply is not
+    reconsidered every night.
+    """
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(dream, "_concept_from_reply", lambda text: None)
+
+    from src.brain import unplaced
+
+    conn = sqlite3.connect(db)
+    unplaced.ensure_schema(conn)
+    rid = unplaced.enqueue(conn, "Claro! Já treatment.", reward=1.0)
+    conn.commit()
+    conn.close()
+
+    assert dream._place_unplaced_reactions() == 0
+
+    conn = sqlite3.connect(db)
+    row = conn.execute(
+        "SELECT outcome, note FROM unplaced_reactions WHERE id = ?", (rid,)
+    ).fetchone()
+    pending = unplaced.pending(conn)
+    conn.close()
+    assert row[0] == "refused", f"a valueless reply was not refused: {row}"
+    assert pending == [], "a refused reply must not be asked about again"
+
+
+def test_a_reply_too_long_to_be_a_concept_is_never_queued(db, monkeypatch):
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    from src.brain import unplaced
+
+    conn = sqlite3.connect(db)
+    unplaced.ensure_schema(conn)
+    assert unplaced.enqueue(conn, "x" * (unplaced.MAX_TEXT + 1), reward=1.0) is None
+    assert unplaced.pending(conn) == []
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        ("energia eolica no Porto", "energia eolica no Porto"),
+        ("Claro!", None),
+        ("NADA", None),
+        ("Não tenho CERTEZA de que isso é verdade", None),
+        ("Obrigado pela pergunta", None),
+    ],
+)
+def test_a_concept_must_be_a_thing_and_not_a_sentence(db, monkeypatch, reply, expected):
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: reply)
+    got = dream._concept_from_reply("uma resposta qualquer do pHantasma")
+    if expected is None:
+        assert got is None, f"a courtesy was accepted as a concept: {got!r}"
+    else:
+        assert got == expected, got
+
+
+def test_a_wall_of_text_is_refused_before_the_model_is_asked(db, monkeypatch):
+    """Length is checked here, not delegated: no transcript is a concept, and
+    sending one to an 8B model to be told no is a wasted minute of GPU."""
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(
+        dream, "_safe_ollama_chat", lambda *a, **kw: pytest.fail("asked the LLM")
+    )
+    assert dream._concept_from_reply("linha\n" * 40) is None

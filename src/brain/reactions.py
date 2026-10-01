@@ -25,7 +25,10 @@ whole point of a reward signal rather than a like counter.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Optional
+
+import config
 
 logger = logging.getLogger("phantasma.reaction")
 
@@ -153,6 +156,31 @@ def record(
             # Text was supplied and named nothing: refuse rather than guess.
             report["graph"] = "no_match"
             report["topic_key"] = None
+            # ...but do not lose it. The reply is queued for the sleep cycle,
+            # which decides where it belongs with the rest of the graph open.
+            # The front end used to offer a button here and expect the owner to
+            # press it; the placement is the brain's housekeeping, not theirs,
+            # and it is a better judgement made there than from a chat bubble.
+            try:
+                from src.brain import unplaced
+
+                qconn = sqlite3.connect(config.DB_PATH)
+                try:
+                    unplaced.ensure_schema(qconn)
+                    qid = unplaced.enqueue(
+                        qconn, message_text, emoji=emoji, reward=reward,
+                        source=source, actor=actor,
+                    )
+                    qconn.commit()
+                finally:
+                    qconn.close()
+                report["queued"] = bool(qid)
+            except Exception as exc:  # noqa: BLE001 - a queue must never cost the gesture
+                report["queued"] = False
+                logger.warning(
+                    "Could not queue an unplaced reaction: %s: %s",
+                    type(exc).__name__, exc,
+                )
         else:
             # No text at all (Discord, or an older client): fall back to the
             # topic, and label the report so it can never be mistaken for a

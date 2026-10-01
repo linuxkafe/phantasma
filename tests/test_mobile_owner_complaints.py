@@ -827,3 +827,76 @@ def test_a_successful_action_clears_a_previous_failure(page):
 # conversation on purpose, and asserting that needs a real recording, not a
 # window.fetch swap. Duplicating that harness here would have been a worse test
 # of a better thing.
+
+
+# --- the device that is doing something looks like it ----------------------
+
+def _running_motion(page):
+    """Which SVG parts are animating, per tile, as the browser reports it."""
+    return page.evaluate(
+        """() => {
+            const out = {};
+            document.querySelectorAll('.device-toggle').forEach(t => {
+                const svg = t.querySelector('.device-icon svg');
+                if (!svg) return;
+                out[t.title] = [...svg.querySelectorAll('*')]
+                    .filter(n => getComputedStyle(n).animationName !== 'none')
+                    .map(n => n.getAttribute('class') || n.tagName);
+            });
+            return out;
+        }"""
+    )
+
+
+def test_the_extractor_blades_turn_only_while_it_runs(page):
+    """An extractor that is off has blades that do not move.
+
+    Keyed on `data-state="on"`, which is the tile's real device state and not a
+    guess: the owner asked for a fan that spins, not for every extractor icon in
+    the app to spin all the time.
+    """
+    motion = _running_motion(page)
+    assert motion["Exaustor da Sala"], (
+        f"the running extractor has nothing moving: {motion['Exaustor da Sala']}"
+    )
+    assert "tile-icon-fan" in motion["Exaustor da Sala"], motion["Exaustor da Sala"]
+    assert motion["Exaustor do WC"] == [], (
+        f"an extractor that is off is still animating: {motion['Exaustor do WC']}"
+    )
+
+
+def test_the_dehumidifier_drop_falls_only_while_it_runs(page):
+    motion = _running_motion(page)
+    assert "tile-icon-drop" in motion["Desumidificador do Armário"], (
+        motion["Desumidificador do Armário"]
+    )
+    assert motion["Desumidificador do Quarto"] == [], (
+        f"a dehumidifier that is off is still animating: "
+        f"{motion['Desumidificador do Quarto']}"
+    )
+
+
+def test_a_running_device_does_not_resize(page):
+    """Transform-only, so the tile grid never reflows while something spins.
+
+    Animating width/height/top would move the icon's box; the layout would
+    jitter on every cycle, and a still screenshot would differ from a running
+    one. This asserts the geometry is identical between a running and a stopped
+    device, which is what makes the motion safe to add at all.
+    """
+    boxes = page.evaluate(
+        """() => {
+            const out = {};
+            document.querySelectorAll('.device-toggle').forEach(t => {
+                const svg = t.querySelector('.device-icon svg');
+                if (svg) {
+                    const r = svg.getBoundingClientRect();
+                    out[t.title] = [Math.round(r.width), Math.round(r.height)];
+                }
+            });
+            return out;
+        }"""
+    )
+    on = boxes["Exaustor da Sala"]
+    off = boxes["Exaustor do WC"]
+    assert on == off, f"a running extractor is a different size: {on} vs {off}"

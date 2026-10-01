@@ -358,3 +358,41 @@ def test_negative_reaction_lowers_the_reply_node(graph, monkeypatch):
     _stub_flybrain(monkeypatch)
     reactions.record("\U0001F621", message_text="sobre o Bimby")
     assert _row(graph, "node:bimby")["affinity"] == pytest.approx(1.0)
+
+
+def test_a_no_match_is_queued_for_the_sleep_cycle(graph, monkeypatch):
+    """A reply that rewarded no node is queued, not offered as a button.
+
+    The front end used to raise a "Guardar esta resposta como nó do grafo"
+    control on the message whenever this happened, so the common case -- a good
+    answer the graph has never heard of -- ended in something the owner had to
+    notice and press. He asked for the placement to be decided in the sleep
+    session instead and never surfaced, so the reply is queued here and
+    `_place_unplaced_reactions` (skills/skill_dream.py) decides what it is.
+
+    The refusal itself is unchanged and still correct: the graph is not written
+    by a click, and the existing no_match test still holds.
+    """
+    from src.brain import reactions, unplaced
+
+    _insert_node(graph, "node:capitalismo", "capitalismo tardio", 1.0)
+    mg.set_current_topic("node:capitalismo")
+    _stub_flybrain(monkeypatch)
+
+    report = reactions.record("\U0001F44D", message_text="uma resposta sobre nada")
+
+    assert report["graph"] == "no_match", f"report: {report}"
+    assert report.get("queued") is True, (
+        f"the reply was lost instead of queued: {report}"
+    )
+    assert _row(graph, "node:capitalismo")["affinity"] == pytest.approx(1.0), (
+        "queuing must not also write the graph"
+    )
+
+    con = sqlite3.connect(graph)
+    unplaced.ensure_schema(con)
+    rows = unplaced.pending(con)
+    con.close()
+    assert len(rows) == 1, f"expected exactly one queued reply, got {rows}"
+    assert rows[0]["message_text"] == "uma resposta sobre nada"
+    assert rows[0]["outcome"] is None, "a fresh row must be unresolved"

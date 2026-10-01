@@ -3,18 +3,22 @@
 import ast  # Essencial para lidar com aspas simples do LLM
 import datetime
 import json
+import logging
 import os
 import random
 import re
 import sqlite3
 import threading
 import time
+from typing import Optional
 
 import ollama
 
 import config
 from data_utils import save_to_rag
 from tools import search_with_searxng
+
+logger = logging.getLogger("phantasma.dream")
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
@@ -726,6 +730,8 @@ def _optimize_graph(materialize: bool = True):
           f"{len(gaps['weak_edges'])} fracas, {len(gaps['disconnected_pairs'])} desconectadas, "
           f"{len(gaps['missing_requirements'])} sem tipo, {len(gaps['causal_gaps'])} causais")
 
+    placed = _place_unplaced_reactions()
+
     researched = applied = 0
     for gap_type, gap_list in (
         ('causal_gap', gaps['causal_gaps']),
@@ -746,7 +752,152 @@ def _optimize_graph(materialize: bool = True):
             time.sleep(5)
 
     print(f"🧬 [Dream-GMIF] Ciclo completo: {researched} pesquisados, "
-          f"{applied} aplicados ao grafo.")
+          f"{applied} aplicados ao grafo, {placed} respostas reactions "
+          f"colocados no grafo.")
+
+
+def _place_unplaced_reactions(limit: int = 3) -> int:
+    """Decide what to do with replies that rewarded a node the graph lacked.
+
+    A reaction that named no node was queued by `src.brain.reactions` rather
+    than shown to the owner as a button. This is where that decision is made,
+    and the reason for doing it here rather than at the click is the whole point:
+    a reaction is a sentiment about one text, while whether that text deserves a
+    concept is a separate judgement that wants the rest of the graph open and
+    SearXNG to check the claim against.
+
+    Two outcomes, never a third:
+
+    * `placed` -- the reply turned out to be about a node that exists after all,
+      or it named something concrete enough to become a node, and it is written
+      with the reward it carried;
+    * `refused` -- it is chit-chat, a transcript, or a claim nothing supports,
+      and the row is marked so it is never reconsidered.
+
+    The refusal is recorded rather than silent. A queue whose rejected rows stay
+    pending forever would re-ask the same question every night.
+    """
+    from src.brain import unplaced
+
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        unplaced.ensure_schema(conn)
+        rows = unplaced.pending(conn, limit=limit)
+        if not rows:
+            return 0
+
+        from src.brain.memory_graph import (
+            find_node_for_text,
+            upsert_node,
+        )
+
+        placed = 0
+        for row in rows:
+            text = row["message_text"]
+            reward = row["reward"] or 0.0
+            try:
+                # The graph may have gained the node since the reaction: it is
+                # the same graph the cycle has been reshaping all night.
+                existing = find_node_for_text(text)
+                if existing:
+                    node_key = existing["node_key"]
+                    unplaced.mark(conn, row["id"], "placed", node_key,
+                                  "encontrado no ciclo: " + existing["label"])
+                    placed += 1
+                    continue
+
+                concept = _concept_from_reply(text)
+                if not concept:
+                    unplaced.mark(conn, row["id"], "refused", None,
+                                  "nao ha conceito extraivel desta resposta")
+                    continue
+
+                node_key = upsert_node(concept, affinity=abs(reward) * 0.5)
+                if not node_key:
+                    unplaced.mark(conn, row["id"], "refused", None,
+                                  "o grafo nao aceitou o no")
+                    continue
+                # The reward the owner gave travels with the node: a concept
+                # promoted from a thumbs-up starts weighted, so the graph
+                # already knows the owner valued it.
+                if reward:
+                    from src.brain.memory_graph import apply_reward
+
+                    apply_reward(reward, topic_key=node_key)
+                unplaced.mark(conn, row["id"], "placed", node_key, concept[:120])
+                placed += 1
+            except Exception as exc:  # noqa: BLE001
+                # Leave the row pending: a crash here is not a judgement about
+                # the text, and dropping it would lose a real reaction.
+                logger.warning("Could not place queued reaction %s: %s",
+                               row["id"], exc)
+        conn.commit()
+        return placed
+    finally:
+        conn.close()
+
+
+def _concept_from_reply(text: str) -> Optional[str]:
+    """A concept label from an owner-approved reply, or None.
+
+    Asks the model for a noun phrase and then refuses it unless it looks like
+    one. The refusal matters more than the extraction: replies include
+    "Claro!", "Não tenho CERTEZA de que..." and multi-paragraph transcripts,
+    and promoting any of those to a concept is how the graph fills with nodes
+    nobody can defend. A phrase with more than six words, or one carrying a
+    first-person pronoun or a closing courtesy, is not a concept.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    # Too long to be a concept, whatever the model says about it.
+    if len(text) > 300 or text.count("\n") > 2:
+        return None
+
+    answer = _safe_ollama_chat(
+        "Extrai o assunto principal desta resposta, em substantivo singular, "
+        "no máximo 4 palavras, sem artigos e sem(pronomes). "
+        "Se a resposta não for sobre nada concreto e verificável "
+        "(saudações, frases genéricas, texto sem assunto), responde "
+        "exatamente: NADA\n"
+        f"Resposta: {text}",
+        "Analista de conhecimento conciso.",
+    )
+    if not answer:
+        return None
+    candidate = answer.strip().strip('"').splitlines()[0].strip(" .:;-")
+    if not candidate:
+        return None
+    if candidate.upper().startswith(("NADA", "NAO HÁ", "SEM", "NENHUM")):
+        return None
+
+    lowered = candidate.lower()
+    # A concept is a thing, not a sentence, not a courtesy, and not a sentence
+    # with punctuation left on. The first version of this listed a handful of
+    # words -- "olá", "obrigado" -- and "Claro!" sailed straight through it,
+    # which is what a spot-check of a rule always does. So the test is
+    # structural: at most six words, no terminal punctuation, and no
+    # first-person or second-person pronoun anywhere in it. A courtesy and a
+    # sentence both fail all three; a noun phrase passes all three.
+    if len(candidate.split()) > 6:
+        return None
+    if candidate[-1] in "!?.,;:":
+        return None
+    for pronoun in ("eu", "meu", "minha", "meus", "minhas", "você", "voce"):
+        if re.search(rf"\b{re.escape(pronoun)}\b", lowered):
+            return None
+    # Stems, matched at the START of a word rather than as whole words:
+    # `\bobrigad\b` does not match "obrigado" -- there is no word boundary
+    # after the d -- so a whole-word list let every Portuguese courtesy through
+    # while still reading like a guard against them.
+    for stem in ("obrigad", "claro", "certo", "olá", "ola", "bom dia",
+                 "boa noite", "bem-vindo", "desculpa", "sim", "não", "nao"):
+        if re.search(rf"\b{re.escape(stem)}", lowered):
+            return None
+    if not re.search(r"[a-zA-ZÀ-ÿ]{3,}", candidate):
+        return None
+    return candidate
 
 
 # --- Daemon & Logic ---

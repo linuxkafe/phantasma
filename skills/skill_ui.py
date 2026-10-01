@@ -1608,6 +1608,40 @@ def handle_request():
                       0%, 12% { transform: translateX(0); }
                       88%, 100% { transform: translateX(var(--marquee-shift, 0px)); }
                   }
+                  /* The device that is doing something looks like it. An
+                     extractor with its blades turning and a dehumidifier with
+                     the drop running down reads as running from across the
+                     room, at a glance, without reading a single word.
+
+                     Scoped to `[data-state="on"]`, which is the tile's real
+                     device state and not a guess: an extractor that is off has
+                     blades that do not move. Transform-only, centred on the
+                     fan hub, so the icon's box never changes -- the tile grid
+                     does not reflow, and the rest of the icon does not drift
+                     with the blades.
+
+                     The blade path is a single path holding all four blades,
+                     so it is one element rotating; the droplet falls as a
+                     short translate, looping, so it reads as running rather
+                     than as a bounce. */
+                  @keyframes fanSpin { to { transform: rotate(360deg); } }
+                  @keyframes dropFall {
+                      0%   { transform: translateY(0);    opacity: 1; }
+                      55%  { transform: translateY(2.5px); opacity: .45; }
+                      70%  { transform: translateY(0);    opacity: 0; }
+                      71%  { transform: translateY(0);    opacity: 0; }
+                      100% { transform: translateY(0);    opacity: 1; }
+                  }
+                  .tile-icon-fan, .tile-icon-drop {
+                      transform-box: fill-box;
+                      transform-origin: center;
+                  }
+                  [data-state="on"] .tile-icon-fan { animation: fanSpin 1.6s linear infinite; }
+                  [data-state="on"] .tile-icon-drop { animation: dropFall 2.4s ease-in infinite; }
+                  @media (prefers-reduced-motion: reduce) {
+                      [data-state="on"] .tile-icon-fan,
+                      [data-state="on"] .tile-icon-drop { animation: none; }
+                  }
                   /* Reduced motion: wrap to two lines instead of moving. The
                      full name is still readable; only the motion is gone. */
                   .device-label.wrap {
@@ -1989,14 +2023,6 @@ def handle_request():
             .react-note.is-error { color:var(--destructive, #ef4444); }
             /* "Guardar esta resposta como no": the explicit alternative to
                auto-creating a concept on every unmatched reaction. */
-            .react-savenode {
-              align-self:flex-end; margin-top:4px; padding:4px 8px;
-              font-size:.7rem; font-family:inherit; cursor:pointer;
-              color:var(--muted, #999); background:transparent;
-              border:1px dashed var(--border, #333); border-radius:var(--radius, 8px);
-            }
-            .react-savenode:hover { color:var(--brand-400, #22d3ee); border-color:var(--brand-500, #06b6d4); }
-            .react-savenode:disabled { opacity:.5; cursor:default; }
             .react-count { font-size:.75rem; color:var(--muted); align-self:center; }
 
             /* Accessibility: visible focus outline */
@@ -2729,8 +2755,12 @@ def handle_request():
                    as the one thing it is not. This is a disc seen from above:
                    body, a bumper line, a sensor turret and a side brush. */
                 aspirador: '<circle cx="12" cy="12" r="8.2"/><path d="M3.8 12a8.2 8.2 0 0 0 16.4 0"/><circle cx="12" cy="10.5" r="2.2"/><path d="M12 15.5v2"/><path d="M18.6 17.8l1.6 1.6M5.4 17.8l-1.6 1.6"/>',
-                exaustor: '<circle cx="12" cy="12" r="2.5"/><path d="M12 9.5c0-4 1-6 4-6-1 3-1 6-4 6ZM14.5 12c4 0 6 1 6 4-3-1-6-1-6-4ZM12 14.5c0 4-1 6-4 6 1-3 1-6 4-6ZM9.5 12c-4 0-6-1-6-4 3 1 6 1 6 4Z"/>',
-                desumidificador: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11Z"/>',
+                /* The blade path and the droplet carry their own class so CSS can
+                   animate them without touching the outline: one rotating hub,
+                   one running drop, both transform-only and scoped to
+                   `data-state="on"` on the tile. */
+                exaustor: '<circle cx="12" cy="12" r="2.5"/><path class="tile-icon-fan" d="M12 9.5c0-4 1-6 4-6-1 3-1 6-4 6ZM14.5 12c4 0 6 1 6 4-3-1-6-1-6-4ZM12 14.5c0 4-1 6-4 6 1-3 1-6 4-6ZM9.5 12c-4 0-6-1-6-4 3 1 6 1 6 4Z"/>',
+                desumidificador: '<path class="tile-icon-drop" d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11Z"/>',
                 gas: '<path d="M12 2c2 4-1 5 1 8 1.5 2.5 4 3 4 6a5 5 0 0 1-10 0c0-2 1-3 1-5 1 1.5 2 1.5 2 0 .5-3-1-5 2-9Z"/>',
                 carro: '<path d="M5 11l1.5-4.5A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.5L19 11v6h-2v-2H7v2H5v-6Z"/><circle cx="7.5" cy="13" r="1"/><circle cx="16.5" cy="13" r="1"/>',
                 forno: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/><rect x="7" y="12" width="10" height="5" rx="1"/>',
@@ -3013,7 +3043,7 @@ def handle_request():
               // deliberately left alone. Saying so is the whole point -- the
               // previous behaviour credited an unrelated node and looked fine.
               if (d.graph === 'no_match') {
-                bits.push('esta resposta nao nomeia nenhum no do grafo, por isso o grafo ficou intacto');
+                bits.push('sem no no grafo; a resposta fica para o sono decidir');
               } else if (d.graph === 'topic_fallback') {
                 bits.push('grafo: no do topico actual (a resposta nao foi usada)');
               } else if (d.graph) {
@@ -3024,39 +3054,6 @@ def handle_request():
               return bits.join(' \u00b7 ');
             }
 
-            function addSaveNodeAction(msgEl, btn) {
-              const row = msgEl.parentElement;
-              if (row.querySelector('.react-savenode')) return;
-              const b = document.createElement('button');
-              b.className = 'react-savenode';
-              b.type = 'button';
-              b.textContent = 'Guardar esta resposta como nó do grafo';
-              b.title = 'Cria um nó a partir desta resposta, para que futuras '
-                      + 'reações a ela reforcem esse nó';
-              b.addEventListener('click', async () => {
-                b.disabled = true;
-                const r = await fetch('/api/graph/node', {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({
-                    label: (msgEl.innerText || '').trim().slice(0, 120),
-                    text: (msgEl.innerText || '').trim().slice(0, 2000),
-                  }),
-                });
-                const d = await r.json();
-                const note = row.querySelector('.react-note');
-                if (d.ok) {
-                  if (note) {
-                    note.textContent += ' \u00b7 nó criado: ' + (d.result.label || '');
-                  }
-                  b.remove();
-                } else {
-                  b.disabled = false;
-                  if (note) note.textContent = 'Nó não criado: ' + (d.error || 'erro');
-                }
-              });
-              row.appendChild(b);
-            }
 
             async function sendReaction(emoji, msgEl, btn) {
               msgEl.classList.add('reacted');
@@ -3087,15 +3084,14 @@ def handle_request():
                   btn.classList.add('is-chosen');
                 }
                 reactionNote(msgEl, emoji + ' ' + reactionReport(d), false);
-                // When the reply named no node, the graph was deliberately left
-                // alone. Creating one automatically is NOT the right default: a
-                // reaction is a sentiment, and turning every unanswered text into
-                // a concept would bloat the graph with whatever happened to be
-                // said. So the capability is offered as an explicit action, and
-                // the operator decides.
-                if (d.graph === 'no_match' && btn) {
-                  addSaveNodeAction(msgEl, btn);
-                }
+                /* No button here any more. When a reply named no node, this
+                   used to offer "Guardar esta resposta como nó do grafo" and
+                   wait for the owner to press it -- so the common case, a good
+                   answer the graph had never heard of, ended in a control they
+                   had to notice. The reply is queued instead (the backend's
+                   `queued`), and the sleep cycle decides where it belongs with
+                   the whole graph open. Where a reply lands is the brain's
+                   housekeeping, and it is not worth the owner's attention. */
               } catch (e) {
                 msgEl.classList.remove('reacted');
                 reactionNote(msgEl, 'Erro de rede: ' + e, true);
