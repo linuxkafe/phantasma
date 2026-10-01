@@ -2829,7 +2829,8 @@ def knowledge_editor():
         nodes = [
             dict(r)
             for r in conn.execute(
-                "SELECT id, label, source, affinity FROM memory_graph ORDER BY affinity ASC, id"
+                "SELECT id, label, source, affinity FROM memory_graph "
+                "WHERE node_key NOT LIKE 'memory:%' ORDER BY affinity ASC, id"
             )
         ]
         memories = [
@@ -2868,7 +2869,8 @@ def _knowledge_nodes():
         return [
             dict(r)
             for r in conn.execute(
-                "SELECT id, label, source, affinity FROM memory_graph ORDER BY affinity ASC, id"
+                "SELECT id, label, source, affinity FROM memory_graph "
+                "WHERE node_key NOT LIKE 'memory:%' ORDER BY affinity ASC, id"
             )
         ]
     finally:
@@ -3602,7 +3604,9 @@ def api_stats():
     conn.row_factory = sqlite3.Row
     try:
         memories = conn.execute("SELECT COUNT(*) as c FROM memories").fetchone()["c"]
-        graph_nodes = conn.execute("SELECT COUNT(*) as c FROM memory_graph").fetchone()["c"]
+        graph_nodes = conn.execute(
+            "SELECT COUNT(*) as c FROM memory_graph WHERE node_type = 'node'"
+        ).fetchone()["c"]
         flybrain_row = conn.execute("SELECT data FROM flybrain_state WHERE id = 1").fetchone()
         flybrain_data = flybrain_row["data"] if flybrain_row else None
     finally:

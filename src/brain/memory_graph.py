@@ -124,6 +124,22 @@ MIN_CONCEPT_LEN = 4
 MAX_CONCEPT_LEN = 60
 
 
+def concept_edge_key(a: str, b: str) -> str:
+    """Canonical node_key for the UNDIRECTED edge between two concepts.
+
+    The key used to be built in the order the tags appeared in the row, so
+    "leite" and "pecuária" produced both ``edge:leite|pecuária`` and
+    ``edge:pecuária|leite``. The two rows then grew apart and the same
+    relationship looked like two facts -- 11 such pairs were found in
+    production. Sorting the lowercased endpoints gives one key per
+    relationship, whichever order the tags arrived in.
+    """
+    x, y = str(a).strip().lower(), str(b).strip().lower()
+    if y < x:
+        x, y = y, x
+    return f"edge:{x}|{y}"
+
+
 def materialize_memories(limit: int = 0, only_unparsed: bool = False) -> dict[str, int]:
     """Write the concepts held in stored memories into `memory_graph`.
 
@@ -222,7 +238,7 @@ def materialize_memories(limit: int = 0, only_unparsed: bool = False) -> dict[st
             # the same mistake that made the research path unsafe.
             for i, a in enumerate(keys):
                 for b in keys[i + 1:]:
-                    edge_key = f"edge:{a.lower()}|{b.lower()}"
+                    edge_key = concept_edge_key(a, b)
                     edge_is_new = not conn.execute(
                         f"SELECT 1 FROM {GRAPH_TABLE} WHERE node_key = ?", (edge_key,)
                     ).fetchone()
@@ -246,12 +262,16 @@ def materialize_memories(limit: int = 0, only_unparsed: bool = False) -> dict[st
                         report["edges_written"] += 1
 
             # Mark the row as indexed so only_unparsed can skip it next time.
+            # node_type 'marker', never 'node': this is bookkeeping, not a
+            # concept. As a 'node' it rendered in the admin graph and inflated
+            # the node count (47 phantom nodes in production) and, being a
+            # sentence-shaped label, fed the gap scan with noise.
             conn.execute(
                 f"""
                 INSERT INTO {GRAPH_TABLE}
                     (node_key, node_type, label, affinity, touch_count,
                      created_at, updated_at)
-                VALUES (?, 'node', ?, 0.0, 0, ?, ?)
+                VALUES (?, 'marker', ?, 0.0, 0, ?, ?)
                 ON CONFLICT(node_key) DO UPDATE SET updated_at = excluded.updated_at
                 """,
                 (marker, f"memória #{memory_id}", now, now),

@@ -287,6 +287,11 @@ def build_graph(
             if source and target:
                 graph_edge_labels.append((str(source), str(target), float(affinity or 0.0)))
             continue
+        if (node_type or "").lower() != "node":
+            # Indexing markers ("memory:<id>:<hash>") are bookkeeping, not
+            # knowledge; drawing them as concepts inflated the count and the
+            # 3D view. Anything that is neither a node nor an edge is skipped.
+            continue
 
         stats["graph_nodes"] += 1
         concept = concepts.get(label or node_key)

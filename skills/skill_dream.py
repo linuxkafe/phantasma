@@ -131,7 +131,7 @@ def _extract_json(text):
 
 # --- Módulos do Sonho ---
 
-def _archive_purged_memories(conn, rows):
+def _archive_purged_memories(conn, rows, reason="dream_consolidation"):
     """Keep what consolidation deletes, so a bad merge is recoverable.
 
     The consolidation below is a real DELETE of the 20 most recent rows and then
@@ -157,7 +157,7 @@ def _archive_purged_memories(conn, rows):
         conn.executemany(
             "INSERT OR IGNORE INTO memories_purged (id, timestamp, text, purged_at, reason)"
             " VALUES (?,?,?,?,?)",
-            [(r[0], r[1], r[2], purged_at, "dream_consolidation") for r in rows],
+            [(r[0], r[1], r[2], purged_at, reason) for r in rows],
         )
         return len(rows)
     except Exception as e:
@@ -205,6 +205,44 @@ def _consolidate_memories():
     except Exception as e: print(f"❌ Erro Consolidação: {e}")
     finally:
         if conn: conn.close()
+
+
+def _dedupe_memories():
+    """Delete memories whose text is an exact duplicate of an earlier one.
+
+    Consolidation merges the 20 *most recent* rows, so identical rows sitting
+    apart in the table were never compared: the same text kept several ids and
+    the graph grew a separate clique and a marker for each copy (3 texts held 14
+    rows in production). Concepts are materialised before this runs, so the
+    duplicate rows' concepts survive; only the repeated raw text goes. Archived
+    first, exactly like consolidation, so a mistaken delete is recoverable.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        rows = conn.execute("SELECT id, timestamp, text FROM memories ORDER BY id").fetchall()
+        seen = set()
+        dupes = []
+        for rid, ts, text in rows:
+            key = (text or "").strip()
+            if not key:
+                continue
+            if key in seen:
+                dupes.append((rid, ts, text))
+            else:
+                seen.add(key)
+        if not dupes:
+            return
+        _archive_purged_memories(conn, dupes, reason="dream_dedupe")
+        marks = ",".join(["?"] * len(dupes))
+        conn.execute(f"DELETE FROM memories WHERE id IN ({marks})", [d[0] for d in dupes])
+        conn.commit()
+        print(f"🧠 [Dream] Deduplicadas {len(dupes)} memórias idênticas.")
+    except Exception as e:
+        print(f"❌ Erro Deduplicação: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def _perform_news_dream():
     """ Procura notícias reais, ignorando metadados de sites. """
@@ -453,6 +491,13 @@ def _apply_research_to_graph(research_results, gap_type, gap_data):
     rel_type = research_results.get('tipo_relacao', 'related_to')
     now = datetime.datetime.now().isoformat()
 
+    # The key must be the same canonical undirected key the materialiser
+    # writes. This used to build "edge:{source}|{target}" in the gap's order
+    # with its original case, while the stored rows are lowercased: the UPDATE
+    # matched nothing and no weakness was ever fixed, which is why the same
+    # gaps kept reappearing every night.
+    from src.brain.memory_graph import concept_edge_key
+
     conn = sqlite3.connect(config.DB_PATH)
     try:
         if gap_type in ('weak_edge', 'causal_gap'):
@@ -463,7 +508,8 @@ def _apply_research_to_graph(research_results, gap_type, gap_data):
                 "WHERE node_key = ?",
                 (desired_level, GMIF_VALIDATION_TYPE, confidence,
                  json.dumps(evidence), now, "dream_gmif_research",
-                 gap_data.get('node_key') or f"edge:{gap_data['source']}|{gap_data['target']}"),
+                 gap_data.get('node_key')
+                 or concept_edge_key(gap_data['source'], gap_data['target'])),
             )
             changed = conn.total_changes
         elif gap_type == 'disconnected_pair':
@@ -476,7 +522,7 @@ def _apply_research_to_graph(research_results, gap_type, gap_data):
                 " gmif_extraction_confidence, gmif_validation_confidence, "
                 " gmif_source_chunks, gmif_classified_at, gmif_classified_by) "
                 "VALUES (?, 'edge', ?, ?, ?, 0.0, 1.0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (f"edge:{source}|{target}", f"{source} {rel_type} {target}",
+                (concept_edge_key(source, target), f"{source} {rel_type} {target}",
                  source, target, now, now, desired_level, GMIF_VALIDATION_TYPE,
                  confidence, confidence, json.dumps(evidence), now, "dream_gmif_research"),
             )
@@ -582,6 +628,11 @@ def perform_dreaming(mode="auto"):
     # "reduce memory to concepts, remove repetitions" has to mean.
     if GMIF_DREAM_ENABLED:
         _reduce_to_concepts()
+
+    # After materialisation, before the merge: the duplicate rows' concepts are
+    # already in the graph, so deduping now removes the repeated raw text
+    # without losing a concept.
+    _dedupe_memories()
 
     _consolidate_memories()
 

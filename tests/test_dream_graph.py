@@ -235,3 +235,59 @@ def test_the_graph_step_respects_its_own_switch(db, monkeypatch, capsys):
     monkeypatch.setattr(dream, "_reduce_to_concepts", lambda: called.append("reduce"))
     dream._optimize_graph()
     assert called == [], "the graph step ran while switched off"
+
+
+def test_dedupe_removes_exact_duplicate_memories(db):
+    """Identical rows that sit apart were never compared, so they piled up."""
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i, text in enumerate(
+        ["mesma coisa", "mesma coisa", "mesma coisa", "outra coisa"], start=1
+    ):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", text))
+    con.commit()
+    con.close()
+
+    dream._dedupe_memories()
+
+    con = sqlite3.connect(db)
+    left = con.execute("SELECT id, text FROM memories ORDER BY id").fetchall()
+    archived = con.execute(
+        "SELECT COUNT(*) FROM memories_purged WHERE reason='dream_dedupe'"
+    ).fetchone()[0]
+    con.close()
+    assert [r[1] for r in left] == ["mesma coisa", "outra coisa"], left
+    assert left[0][0] == 1, "dedupe must keep the earliest id"
+    assert archived == 2, "the deleted duplicates must be recoverable"
+
+
+def test_a_weak_edge_is_found_by_its_canonical_key(db):
+    """The key the research path builds must match the materialiser's.
+
+    The gap carried the endpoints in original case and gap order; the stored
+    row is lowercased and sorted. The UPDATE silently matched nothing, so the
+    same weakness was re-researched every night and never fixed.
+    """
+    _insert(db, "edge:alfa|beta", "edge", "Alfa + Beta", "Alfa", "Beta",
+            gmif_level="M1")
+
+    wrote = dream._apply_research_to_graph(
+        {
+            "conhecimento": "Alfa suporta Beta",
+            "confianca": 0.7,
+            "evidencia": ["trecho"],
+            "desired_level": "M3",
+        },
+        "weak_edge",
+        {"source": "Beta", "target": "Alfa"},  # reversed, no node_key
+    )
+
+    assert wrote is True
+    con = sqlite3.connect(db)
+    row = con.execute(
+        "SELECT gmif_level, gmif_classified_by FROM memory_graph WHERE node_key='edge:alfa|beta'"
+    ).fetchone()
+    con.close()
+    assert row is not None
+    assert row[0] == "M3"
+    assert row[1] == "dream_gmif_research"

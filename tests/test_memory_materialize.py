@@ -79,6 +79,45 @@ def test_co_mentioned_concepts_get_an_edge(db):
     assert "edge:leite|pecuária de leite" in edges
 
 
+def test_an_unordered_pair_gets_one_key_whichever_order_it_arrives(db):
+    """The relation is undirected; two tag orders are still one relationship.
+
+    Keyed in arrival order, "leite" + "pecuária" and "pecuária" + "leite"
+    produced two rows that then grew apart -- 11 such pairs in production.
+    """
+    _memory(db, 1, {"tags": ["leite", "pecuária"]})
+    _memory(db, 2, {"tags": ["pecuária", "leite"]})
+
+    report = mg.materialize_memories()
+
+    _, edges = _graph(db)
+    assert list(edges) == ["edge:leite|pecuária"], edges
+    assert edges["edge:leite|pecuária"]["touch_count"] == 2
+    assert report["edges_written"] == 1
+
+
+def test_index_markers_are_bookkeeping_not_concepts(db):
+    """A marker says "this row is indexed"; it is not something believed.
+
+    Stored as node_type='node' these 47 rows rendered as concepts and inflated
+    the node count, and their sentence-shaped labels fed the gap scan.
+    """
+    _memory(db, 1, {"tags": ["leite"]})
+    mg.materialize_memories()
+
+    con = sqlite3.connect(db)
+    markers = con.execute(
+        "SELECT COUNT(*) FROM memory_graph WHERE node_type='marker'"
+    ).fetchone()[0]
+    as_nodes = con.execute(
+        "SELECT COUNT(*) FROM memory_graph WHERE node_type='node' AND node_key LIKE 'memory:%'"
+    ).fetchone()[0]
+    con.close()
+
+    assert markers == 1
+    assert as_nodes == 0, "an indexing marker was stored as a concept"
+
+
 def test_a_co_occurrence_edge_is_external_not_logical(db):
     """The only warrant is that both appeared in one row: an observation."""
     _memory(db, 1, {"tags": ["leite", "pecuária"]})
@@ -207,3 +246,18 @@ def test_the_admin_reads_the_same_graph(db):
 
     assert payload["stats"]["graph_nodes"] >= 2
     assert payload["stats"]["graph_edges"] >= 1
+
+
+def test_the_admin_does_not_draw_index_markers(db):
+    """The explorer must show concepts, not the bookkeeping that indexes them."""
+    from src.api.memory_graph import build_graph_from_db
+
+    _memory(db, 1, {"tags": ["leite"]})
+    _memory(db, 2, "sem tags nenhumas")
+    mg.materialize_memories()
+
+    payload = build_graph_from_db(db)
+
+    leaked = [n for n in payload["nodes"] if str(n.get("label", "")).startswith("memória #")]
+    assert leaked == [], f"markers leaked into the graph view: {leaked}"
+    assert payload["stats"]["graph_nodes"] == 1
