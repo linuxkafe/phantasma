@@ -3370,11 +3370,43 @@ def handle_request():
             const ROOM_SLOTS = new Map();     /* room -> the span */
             const ROOM_PARTS = new Map();     /* room -> Map(sensor -> text) */
 
+            /* room -> last temperature (°C), one entry per room. Kept apart
+               from ROOM_PARTS because the average needs the numbers, not the
+               formatted text, and because a reading that carries temperature
+               AND humidity must contribute its temperature once. */
+            const ROOM_TEMPS = new Map();
+
+            /* The average of every room currently reporting a temperature, or
+               null when none is. Rooms with no sensor (Entrada) contribute
+               nothing; a sensor that has gone unreachable is deleted in
+               fetchSensorStatus, so a stale number cannot keep the average
+               alive. */
+            function averageRoomTemperature() {
+                const vals = [...ROOM_TEMPS.values()].filter(v => Number.isFinite(v));
+                if (!vals.length) return null;
+                return (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1);
+            }
+
+            /* A room sensor changed the set of temperatures, but the average
+               lives in the Geral header, which that sensor does not write to.
+               Re-render it so the number tracks the rooms instead of waiting
+               for the next gas poll. */
+            function refreshGeralAverage() {
+                if (ROOM_SLOTS.has('Geral')) renderRoomReadings('Geral');
+            }
+
             function renderRoomReadings(room) {
                 const el = ROOM_SLOTS.get(room);
                 if (!el) return;
                 const parts = ROOM_PARTS.get(room);
-                const txt = parts ? [...parts.values()].filter(Boolean).join(' · ') : '';
+                const values = parts ? [...parts.values()].filter(Boolean) : [];
+                /* "Geral" has no sensor of its own: it is where the gas meter
+                   and anything without a room land. The average of the rooms
+                   belongs there, before the gas reading, so the header answers
+                   "how is the house" before it answers "is there gas". */
+                const avg = room === 'Geral' ? averageRoomTemperature() : null;
+                const txt = (avg !== null ? ['média ' + avg + '°'] : [])
+                    .concat(values).join(' · ');
                 el.innerText = txt;
                 /* The attribute, not an empty string: a header that has never
                    had a reading must not reserve the space for one, and this is
@@ -3396,7 +3428,9 @@ def handle_request():
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
                     if (data.state === 'unreachable') {
+                        ROOM_TEMPS.delete(room);
                         putRoomReading(room, readings, name, 'indisponível');
+                        refreshGeralAverage();
                         readings.style.color = '#737373';
                         readings.style.opacity = .6;
                         readings.title = name + ' — indisponível';
@@ -3408,7 +3442,12 @@ def handle_request():
                         measurements.push(Math.round(data.power_w) + ' W');
                         color = '#ffb74d';
                     }
-                    if (data.temperature !== undefined) measurements.push(data.temperature + '°');
+                    if (data.temperature !== undefined) {
+                        measurements.push(data.temperature + '°');
+                        /* Room sensors are the only source of the Geral
+                           average: the gas meter reports ppm, not degrees. */
+                        ROOM_TEMPS.set(room, Number(data.temperature));
+                    }
                     if (data.humidity !== undefined) measurements.push(data.humidity + '%');
                     if (data.ppm !== undefined) {
                         measurements.push(data.ppm + ' ppm');
@@ -3422,6 +3461,10 @@ def handle_request():
                     const base = measurements.length ? measurements.join(' · ') : 'sem leitura';
                     const text = agePart ? base + ' · ' + agePart : base;
                     putRoomReading(room, readings, name, text);
+                    /* A room sensor does not write to the Geral header, so the
+                       average it feeds would otherwise only move on the next
+                       gas poll. */
+                    if (room !== 'Geral') refreshGeralAverage();
                     /* This line used to read `parts.length`, a name that does not
                        exist in this function -- the array is `measurements`. It
                        threw a ReferenceError, and because the body sits in a

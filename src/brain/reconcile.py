@@ -120,7 +120,7 @@ def _search(prompt: str) -> list[dict[str, Any]]:
 
 def _ask(prompt: str, system: str) -> Optional[str]:
     try:
-        from skills.skill_gmif_dream import _safe_ollama_chat
+        from skills.skill_dream import _safe_ollama_chat
     except Exception:  # noqa: BLE001
         return None
     try:

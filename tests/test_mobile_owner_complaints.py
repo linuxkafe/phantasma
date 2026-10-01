@@ -56,12 +56,15 @@ TOGGLES = [
     "Candeeiro do Quarto", "Aspirador", "Desumidificador do Armário",
     "Desumidificador do Quarto", "forno", "carregador do carro",
 ]
-SENSORS = ["Sensor da Sala", "Sensor do Quarto", "Sensor do WC"]
+SENSORS = ["Sensor da Sala", "Sensor do Quarto", "Sensor do WC", "Sensor de Gás"]
 
 READINGS = {
     "Sensor da Sala": {"state": "on", "temperature": 21.4, "humidity": 48, "age_s": 120},
     "Sensor do Quarto": {"state": "on", "temperature": 19.8, "humidity": 55, "age_s": 300},
     "Sensor do WC": {"state": "on", "temperature": 18.1, "humidity": 62, "age_s": 900},
+    # The gas meter has no room word of its own (getRoomName -> "Geral"), which
+    # is exactly where the average of the rooms must appear, before the ppm.
+    "Sensor de Gás": {"state": "on", "ppm": 340, "status": "normal", "age_s": 60},
     "Luz da Sala": {"state": "on", "power_w": 0},
     "Luz do Quarto": {"state": "off", "power_w": 0},
     "Exaustor da Sala": {"state": "on", "power_w": 24.5},
@@ -589,6 +592,33 @@ def test_the_reading_says_how_old_it_is(page):
 def test_an_unreachable_sensor_says_so_in_the_header(page):
     rooms = {r["room"]: r for r in _rooms(page)}
     assert rooms["WC"]["readings"], "the WC sensor produced nothing at all"
+
+
+# ------------------------------------------------- the Geral average ----
+
+def test_the_geral_header_shows_the_average_temperature(page):
+    """The owner asked for the average of the room sensors in "Geral". The
+    three stubbed rooms read 21.4, 19.8 and 18.1, so the average is 19.8 --
+    the value is computed, not echoed from any single sensor."""
+    rooms = {r["room"]: r for r in _rooms(page)}
+    assert "média 19.8°" in rooms["Geral"]["readings"], rooms["Geral"]["readings"]
+
+
+def test_the_average_comes_before_the_gas_reading(page):
+    """The owner: "antes das medições de gás". The header answers "how is the
+    house" before "is there gas"."""
+    rooms = {r["room"]: r for r in _rooms(page)}
+    readings = rooms["Geral"]["readings"]
+    assert "340 ppm" in readings, readings
+    assert readings.index("média") < readings.index("ppm"), readings
+
+
+def test_the_average_does_not_appear_in_a_room_header(page):
+    """It is the house average, and it belongs in "Geral" only. A copy in every
+    room would be three new numbers saying the same thing."""
+    for room in _rooms(page):
+        if room["room"] != "Geral":
+            assert "média" not in room["readings"], room
 
 
 # ------------------------------------------------ activating a device ----

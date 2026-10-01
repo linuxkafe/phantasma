@@ -11,6 +11,8 @@ semantic store (memory.db): the graph is the shared landscape both read and
 write.
 """
 
+import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -24,6 +26,36 @@ logger = logging.getLogger(__name__)
 
 GRAPH_TABLE = "memory_graph"
 TOPIC_TABLE = "topic_state"
+
+# The GMIF claim columns, in the order they were added to production.
+#
+# `init_db()` created `memory_graph` without any of these and used
+# CREATE TABLE IF NOT EXISTS, which never alters a table that already exists.
+# The eleven columns therefore lived only in /opt/phantasma/data/brain.db,
+# added by hand and owned by no code. Any tree without them -- which was dev,
+# and is any fresh checkout -- had every GMIF query raise "no such column",
+# and the blanket `except` in the dream cycle turned that into a print. That
+# is the "runs and always fails" recorded in docs/ROADMAP.md:111, and it is
+# why the graph stopped growing with eleven nodes sitting at
+# gmif_validation_confidence = 0.0.
+#
+# Declarations are copied from the production table, defaults included. The
+# CREATE TABLE below deliberately does NOT inline them: one migration path
+# serves both a fresh database and an existing one, so the two cannot end up
+# with different columns. tests/test_graph_schema.py pins this list.
+GMIF_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("gmif_logical_form", "TEXT"),
+    ("gmif_validation_type", "TEXT"),
+    ("gmif_extraction_confidence", "REAL DEFAULT 0.0"),
+    ("gmif_validation_confidence", "REAL DEFAULT 0.0"),
+    ("gmif_source_chunks", "TEXT"),
+    ("gmif_level", "TEXT"),
+    ("gmif_classified_at", "TEXT"),
+    ("gmif_classified_by", "TEXT"),
+    ("node_gmif_type", "TEXT"),
+    ("node_gmif_confidence", "REAL DEFAULT 0.0"),
+    ("node_gmif_evidence", "TEXT"),
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -60,12 +92,172 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS {TOPIC_TABLE} (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 current_key TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT
             )
             """
         )
+        # Bring an existing graph up to the full claim schema. Additive only:
+        # every declaration is nullable or has a DEFAULT, so no row is touched
+        # and no data is lost. Idempotent, because the presence check below
+        # skips columns that are already there -- which is what production
+        # looks like, so a deploy is a no-op there rather than a rewrite.
+        _present = {row[1] for row in conn.execute(f"PRAGMA table_info({GRAPH_TABLE})")}
+        _added = []
+        for _name, _decl in GMIF_COLUMNS:
+            if _name not in _present:
+                conn.execute(f"ALTER TABLE {GRAPH_TABLE} ADD COLUMN {_name} {_decl}")
+                _added.append(_name)
+        if _added:
+            logger.info("Memory graph GMIF columns added: %s", ", ".join(_added))
         conn.commit()
         logger.info("Memory graph initialized")
+
+
+# ---------------------------------------------------------------------------
+# Materialising stored memories into the graph
+# ---------------------------------------------------------------------------
+
+# Tags this short are pronouns, greetings and single letters. They are the
+# noise found in the stored rows ("Olá", "Ok", "Eu") and indexing them produces
+# a graph of the conversation rather than of what was discussed.
+MIN_CONCEPT_LEN = 4
+MAX_CONCEPT_LEN = 60
+
+
+def materialize_memories(limit: int = 0, only_unparsed: bool = False) -> dict[str, int]:
+    """Write the concepts held in stored memories into `memory_graph`.
+
+    The graph used to be filled only by :func:`index_memory`, which runs when
+    skill_memory stores a memory. Rows that reached the table another way --
+    a migration, an import, the consolidation step writing a summary -- were
+    never indexed, so `/admin` reported an empty graph while the memories were
+    demonstrably there. The admin derives its own nodes per request and never
+    writes them back, so nothing else would ever close that gap.
+
+    Concepts come from the parsed payload the model already produced: tags
+    become nodes, and each memory's tags become edges between each other, so
+    "these two subjects were discussed together" is a stored relationship
+    rather than something recomputed on every page load. Provenance is kept in
+    ``gmif_source_chunks``: the ids of the memories the node came from, so a
+    concept can always be traced to the text that produced it.
+
+    Idempotent: nodes and edges are upserted by key, so running it twice writes
+    the same graph and only bumps ``touch_count``. Safe to call every cycle.
+
+    Args:
+        limit: stop after this many memories; 0 means all of them.
+        only_unparsed: index rows that have no node yet, instead of every row.
+
+    Returns:
+        Counts of what was written.
+    """
+    from src.api.memory_graph import parse_memory
+
+    report = {"memories_read": 0, "nodes_written": 0, "edges_written": 0, "skipped": 0}
+    with _connect() as conn:
+        already = {
+            r[0]
+            for r in conn.execute(
+                f"SELECT node_key FROM {GRAPH_TABLE} WHERE node_key LIKE 'memory:%'"
+            )
+        }
+        sql = "SELECT id, text FROM memories ORDER BY id"
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        rows = conn.execute(sql).fetchall()
+
+        for row in rows:
+            memory_id, text = row[0], row[1]
+            # The marker carries a content fingerprint, not just the id. Row ids
+            # are reused: consolidation deletes the highest-numbered memories and
+            # inserts one new row, which then takes a freed id. An id-only marker
+            # would make only_unparsed skip that brand-new memory as if it had
+            # already been indexed, silently losing its concepts.
+            marker = f"memory:{memory_id}:{_fingerprint(text or '')}"
+            if only_unparsed and marker in already:
+                report["skipped"] += 1
+                continue
+            report["memories_read"] += 1
+
+            parsed = parse_memory(text or "")
+            concepts = [
+                c.strip()
+                for c in parsed["tags"]
+                if isinstance(c, str)
+                and MIN_CONCEPT_LEN <= len(c.strip()) <= MAX_CONCEPT_LEN
+            ]
+            if not concepts:
+                report["skipped"] += 1
+                continue
+
+            now = _now()
+            keys: list[str] = []
+            for concept in concepts:
+                key = f"node:{concept.lower()}"
+                is_new = not conn.execute(
+                    f"SELECT 1 FROM {GRAPH_TABLE} WHERE node_key = ?", (key,)
+                ).fetchone()
+                conn.execute(
+                    f"""
+                    INSERT INTO {GRAPH_TABLE}
+                        (node_key, node_type, label, affinity, touch_count,
+                         created_at, updated_at, gmif_source_chunks, gmif_classified_by)
+                    VALUES (?, 'node', ?, 0.0, 1, ?, ?, ?, ?)
+                    ON CONFLICT(node_key) DO UPDATE SET
+                        touch_count = touch_count + 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, concept, now, now,
+                     json.dumps([{"memory_id": memory_id}]), "materialize_memories"),
+                )
+                keys.append(concept)
+                if is_new:
+                    report["nodes_written"] += 1
+
+            # Concepts from one memory are co-mentioned, so they get an edge.
+            # Each is recorded at M1 with validation_type 'external': the only
+            # warrant is that the two appeared in the same stored row, which is
+            # an observation about the text, not a derivation. Marking it
+            # 'logical' would claim the link was reasoned out, and it was not --
+            # the same mistake that made the research path unsafe.
+            for i, a in enumerate(keys):
+                for b in keys[i + 1:]:
+                    edge_key = f"edge:{a.lower()}|{b.lower()}"
+                    edge_is_new = not conn.execute(
+                        f"SELECT 1 FROM {GRAPH_TABLE} WHERE node_key = ?", (edge_key,)
+                    ).fetchone()
+                    conn.execute(
+                        f"""
+                        INSERT INTO {GRAPH_TABLE}
+                            (node_key, node_type, label, source, target, weight,
+                             touch_count, created_at, updated_at, gmif_level,
+                             gmif_validation_type, gmif_extraction_confidence,
+                             gmif_source_chunks, gmif_classified_at, gmif_classified_by)
+                        VALUES (?, 'edge', ?, ?, ?, 1.0, 1, ?, ?, 'M1', 'external',
+                                0.0, ?, ?, 'materialize_memories')
+                        ON CONFLICT(node_key) DO UPDATE SET
+                            touch_count = touch_count + 1,
+                            updated_at = excluded.updated_at
+                        """,
+                        (edge_key, f"{a} + {b}", a, b, now, now,
+                         json.dumps([{"memory_id": memory_id}]), now),
+                    )
+                    if edge_is_new:
+                        report["edges_written"] += 1
+
+            # Mark the row as indexed so only_unparsed can skip it next time.
+            conn.execute(
+                f"""
+                INSERT INTO {GRAPH_TABLE}
+                    (node_key, node_type, label, affinity, touch_count,
+                     created_at, updated_at)
+                VALUES (?, 'node', ?, 0.0, 0, ?, ?)
+                ON CONFLICT(node_key) DO UPDATE SET updated_at = excluded.updated_at
+                """,
+                (marker, f"memória #{memory_id}", now, now),
+            )
+        conn.commit()
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +267,11 @@ def init_db() -> None:
 
 def _now() -> str:
     return datetime.now().isoformat()
+
+
+def _fingerprint(text: str) -> str:
+    """A short content hash, so a reused row id is not mistaken for a seen row."""
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
 
 
 def upsert_node(label: str, affinity: float = 0.0) -> str:

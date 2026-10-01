@@ -3262,9 +3262,11 @@ def brain_sleep():
                 _consolidate_memories,
             )
             from skills.skill_dream import (
+                _optimize_graph as _gmif_dream_cycle,
+            )
+            from skills.skill_dream import (
                 perform_dreaming as _perform_dreaming,
             )
-            from skills.skill_gmif_dream import _gmif_dream_cycle
             from src.pipeline.gmif_classifier import (
                 classify_all_edges,
                 classify_all_nodes,

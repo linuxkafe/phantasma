@@ -408,7 +408,7 @@ class Config:
             errors.append(f"Skills directory not found: {skills_path}")
 
         # Check brain DB parent dir
-        brain_db = Path(self.brain_db_path) if self.brain_db_path else base / "data" / "flybrain.db"
+        brain_db = Path(self.brain_db_path) if self.brain_db_path else base / "data" / "brain.db"
         if not brain_db.parent.exists():
             errors.append(f"Brain DB parent dir not found: {brain_db.parent}")
 
@@ -458,8 +458,21 @@ class Config:
 
         # Base paths
         cfg.skills_dir = os.getenv("SKILLS_DIR", str(base / "skills"))
-        cfg.memory_db_path = os.getenv("MEMORY_DB_PATH", str(base / "data" / "memory.db"))
-        cfg.brain_db_path = os.getenv("BRAIN_DB_PATH", str(base / "data" / "flybrain.db"))
+        # Memory and FlyBrain are ONE store, not two files that happen to agree.
+        # `src/brain/memory_graph.py` writes memory_graph through DB_PATH while
+        # `/admin` reads it through BRAIN_DB_PATH, so if those two names resolve
+        # to different files the graph the writer builds is invisible to the
+        # reader -- and in a dev checkout it also lands the admin on a
+        # non-existent flybrain.db, which reads as "the graph is empty".
+        #
+        # Production has pointed both at data/brain.db via .env since the graph
+        # was introduced, which is why the unified store works there. That made
+        # the unification a host value rather than a property of the code, so a
+        # checkout without a .env silently split in two. The default is now the
+        # unified file; .env still overrides both, for a host that must place its
+        # databases outside the tree.
+        cfg.memory_db_path = os.getenv("MEMORY_DB_PATH", str(base / "data" / "brain.db"))
+        cfg.brain_db_path = os.getenv("BRAIN_DB_PATH", str(base / "data" / "brain.db"))
         cfg.config_db_path = os.getenv("CONFIG_DB_PATH", str(base / "data" / "config.db"))
         # Resolve to absolute here, once, so no downstream module is tempted to
         # re-derive a path. See Config.db_path() for the two silent failures
@@ -767,8 +780,10 @@ config = Config.from_env()
 
 # Backward compatibility exports (for existing code)
 BASE_DIR = Path(__file__).parent
+# Legacy alias. It now resolves to the same unified file as BRAIN_DB_PATH, so
+# the six writers still using it land in the database the readers open.
 DB_PATH = (
-    BASE_DIR / config.memory_db_path if config.memory_db_path else BASE_DIR / "data" / "memory.db"
+    BASE_DIR / config.memory_db_path if config.memory_db_path else BASE_DIR / "data" / "brain.db"
 )
 MEMORY_DB_PATH = config.memory_db_path
 BRAIN_DB_PATH = config.brain_db_path

@@ -153,8 +153,7 @@ def test_sleep_endpoint_starts_a_cycle_that_runs_the_dream_step(cycle, monkeypat
 
     monkeypatch.setattr(skill_dream, "perform_dreaming", fake_dream)
     monkeypatch.setattr(skill_dream, "_consolidate_memories", lambda: None)
-    import skills.skill_gmif_dream as gmif
-    monkeypatch.setattr(gmif, "_gmif_dream_cycle", lambda: None)
+    monkeypatch.setattr(skill_dream, "_optimize_graph", lambda: None)
     from src.pipeline import gmif_classifier
     monkeypatch.setattr(gmif_classifier, "classify_all_edges", lambda conn: None)
     monkeypatch.setattr(gmif_classifier, "classify_all_nodes", lambda conn: None)
