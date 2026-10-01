@@ -900,3 +900,79 @@ def test_a_running_device_does_not_resize(page):
     on = boxes["Exaustor da Sala"]
     off = boxes["Exaustor do WC"]
     assert on == off, f"a running extractor is a different size: {on} vs {off}"
+
+
+def test_every_room_is_on_the_screen_not_just_in_the_dom(page):
+    """The Quarto division was never missing. It was painted off-screen.
+
+    #devices is a flex COLUMN on mobile, and it inherited `flex-wrap: wrap`
+    from the desktop rule. In a column container wrapping creates new COLUMNS,
+    so the rooms that did not fit in the capped height were placed to the
+    right instead of below.
+
+    Measured at 375x667 with the real device list: Geral, WC and Sala at x=0,
+    and Quarto at x=375 -- one viewport width to the right, clipped by
+    `overflow-x: hidden`. Every tile was in the DOM; the whole division was
+    simply outside the screen, with no scrollbar, because the element scrolls
+    vertically only.
+
+    Asserted on geometry rather than presence, because the DOM check passed the
+    whole time the division was invisible. And every tile has to be on screen,
+    not just the room: a room can be in view with half its tiles wrapped away.
+    """
+    geometry = page.evaluate(
+        """() => {
+            const vw = innerWidth, vh = innerHeight;
+            return [...document.querySelectorAll('.device-room')].map(r => {
+                const b = r.getBoundingClientRect();
+                const tiles = [...r.querySelectorAll('.device-toggle')].map(t => {
+                    const tb = t.getBoundingClientRect();
+                    return {name: t.title, x: Math.round(tb.x), y: Math.round(tb.y)};
+                });
+                return {
+                    room: r.querySelector('.room-name')?.textContent.trim() || '?',
+                    x: Math.round(b.x), y: Math.round(b.y),
+                    w: Math.round(b.width), h: Math.round(b.height),
+                    tiles,
+                };
+            });
+        }"""
+    )
+    assert geometry, "no rooms rendered at all"
+
+    off_right = [g for g in geometry if g["x"] >= page.viewport_size["width"]]
+    assert not off_right, (
+        f"a whole division is painted outside the viewport: {off_right}"
+    )
+    for g in geometry:
+        assert g["x"] >= 0 and g["w"] > 0, f"{g['room']} is collapsed: {g}"
+        stranded = [
+            t for t in g["tiles"]
+            if t["x"] < 0 or t["x"] >= page.viewport_size["width"]
+        ]
+        assert not stranded, f"tiles in {g['room']} are off the edge: {stranded}"
+
+
+def test_the_rooms_stack_downwards_and_do_not_wrap_into_columns(page):
+    """The wrap itself, stated directly so a future edit to flex-wrap fails here.
+
+    Two rooms sharing a y means they are in the same wrapped column, which is
+    how Quarto ended up sharing a row with Geral.
+    """
+    rooms = page.evaluate(
+        """() => [...document.querySelectorAll('.device-room')].map(r => {
+            const b = r.getBoundingClientRect();
+            return {room: r.querySelector('.room-name')?.textContent.trim() || '?',
+                    x: Math.round(b.x), y: Math.round(b.y)};
+        })"""
+    )
+    wrap = page.evaluate("() => getComputedStyle(document.getElementById('devices')).flexWrap")
+    assert wrap == "nowrap", (
+        f"#devices is flex-wrap: {wrap}; in a column container that places rooms "
+        f"sideways instead of downwards: {rooms}"
+    )
+    by_y = {}
+    for r in rooms:
+        by_y.setdefault(r["y"], []).append(r["room"])
+    overlapping = {y: names for y, names in by_y.items() if len(names) > 1}
+    assert not overlapping, f"rooms sharing a y are in one wrapped column: {overlapping}"

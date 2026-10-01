@@ -2089,6 +2089,30 @@ def handle_request():
                        so the "no side scroll" test passed. Rooms stack, tiles
                        wrap inside a room, and the strip scrolls vertically only. */
                     #devices { flex-direction: column; align-items: stretch; }
+                    /* ...and flex-wrap has to become nowrap with it.
+
+                       The desktop rule above sets `flex-wrap: wrap`, and in a
+                       COLUMN flex container wrapping creates new COLUMNS. With
+                       #devices capped at the height of the viewport, the rooms
+                       that do not fit wrapped off to the right instead of
+                       downwards.
+
+                       Measured at 375x667 with the real device list: Geral,
+                       WC and Sala sat at x=0, and Quarto sat at x=375 -- one
+                       full viewport width to the right, with `overflow-x:
+                       hidden` clipping it. So the Quarto division was never
+                       missing: it was in the DOM with all three of its tiles,
+                       painted outside the screen, and with no scrollbar to
+                       find it by, because it was horizontal overflow on an
+                       element that scrolls vertically only.
+
+                       This is the same failure the comment higher up describes
+                       for the desktop strip -- tiles painted outside the edge
+                       while scrollWidth == innerWidth, so the "no side scroll"
+                       test passed. Column + wrap just moved it from many
+                       rooms in a row to many rooms in a column.
+                    */
+                    #devices { flex-wrap: nowrap; }
                     .device-room {
                         display: block; width: 100%; margin-right: 0;
                         border-right: 0; padding-right: 0;
