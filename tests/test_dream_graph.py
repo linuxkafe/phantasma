@@ -10,6 +10,7 @@ record of what it deleted.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -585,3 +586,146 @@ def test_a_failed_merge_does_not_cost_the_cycle_its_graph_and_research(
     assert "graph" in calls and "research" in calls, (
         f"the merge failure took the other halves down with it: {calls}"
     )
+
+
+# --- the model actually answers this way; the extractor has to cope ---------
+
+def test_extract_json_does_not_destroy_newlines():
+    """A newline between JSON tokens is whitespace. Escaping it breaks the parse.
+
+    The extractor used to do `json_str.replace('\\n', '\\\\n')`, which turned a
+    valid reply into an invalid one and produced exactly the error seen in
+    production: "unexpected character after line continuation character". The
+    model was answering correctly the whole time.
+    """
+    raw = 'Aqui está:\n```\n{\n  "memoria_consolidada": "linha 1\nlinha 2"\n}\n```'
+    got = dream._extract_json(raw)
+    assert got == {"memoria_consolidada": "linha 1\nlinha 2"}, got
+
+
+def test_extract_json_survives_a_code_fence_and_preamble():
+    raw = 'Aqui está a memória consolidada:\n\n```\n{"memoria_consolidada": "x"}\n```'
+    assert dream._extract_json(raw) == {"memoria_consolidada": "x"}
+
+
+def test_extract_json_recovers_a_truncated_reply():
+    """The model hits its token limit mid-object, as it did in production.
+
+    A summary is worth more than nothing, and `_close_open_json` closes what
+    was left open so the completed prefix survives.
+    """
+    raw = (
+        '{"memoria_consolidada": {"tags": ["a", "b"], "fatos": '
+        '[{"S": "one", "P": "p", "O": "o"}, {"S": "two", "P": "p"'
+    )
+    got = dream._extract_json(raw)
+    assert got is not None, "a truncated reply yielded nothing"
+    assert got["memoria_consolidada"]["tags"] == ["a", "b"]
+
+
+def test_extract_json_still_reads_a_plain_object():
+    assert dream._extract_json('{"k": 1}') == {"k": 1}
+
+
+def test_extract_json_returns_none_for_prose():
+    assert dream._extract_json("não tenho nada a dizer") is None
+
+
+def test_consolidation_accepts_the_nested_summary_the_model_returns(
+    db, monkeypatch
+):
+    """`memoria_consolidada` comes back as an object, not a sentence.
+
+    Measured on prod: {"memoria_consolidada": {"tags": [...], "fatos": [...]}}.
+    Passing that dict straight to _as_memory raised AttributeError on
+    text.strip(), and the tags -- the part the RAG matches on -- were nested one
+    level below where the code looked for them.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i in range(1, 9):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", f"memoría {i}"))
+    con.commit()
+    con.close()
+
+    reply = json.dumps({
+        "memoria_consolidada": {
+            "tags": ["Capitalismo", "Gato"],
+            "fatos": [{"S": "Bimby", "P": "gato", "O": "Lola"}],
+        }
+    })
+    # save_to_rag is NOT stubbed: it is what writes the summary back, and
+    # stubbing it would leave the memories table empty and prove nothing about
+    # whether the summary is stored with its tags.
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: reply)
+
+    assert dream._consolidate_memories() is True
+
+    con = sqlite3.connect(db)
+    rows = con.execute("SELECT text FROM memories").fetchall()
+    archived = con.execute(
+        "SELECT COUNT(*) FROM memories_purged WHERE reason='dream_consolidation'"
+    ).fetchone()[0]
+    con.close()
+    assert len(rows) == 1, f"the 8 rows should collapse into one summary, got {len(rows)}"
+    assert archived == 8, f"every deleted row must be recoverable, archived {archived}"
+    assert "Capitalismo" in rows[0][0], (
+        f"the tags did not survive into the stored memory: {rows[0][0][:200]}"
+    )
+
+
+def test_consolidation_keeps_the_rows_when_the_summary_is_empty(db, monkeypatch):
+    """An unusable summary must not cost 20 memories.
+
+    The DELETE used to run before there was anything to write, so a summary the
+    extractor could not use meant the rows were gone and nothing was stored --
+    the one irreversible step in the dream, and the one _archive_purged_memories
+    exists to make recoverable.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i in range(1, 9):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", f"m{i}"))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: '{"memoria_consolidada": ""}')
+    with pytest.raises(RuntimeError):
+        dream._consolidate_memories()
+
+    con = sqlite3.connect(db)
+    left = con.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    con.close()
+    assert left == 8, "an empty summary still deleted the rows"
+
+
+def test_consolidation_fails_loudly_when_the_summary_is_not_written(db, monkeypatch):
+    """save_to_rag swallows its own errors, so the merge must not trust it.
+
+    Measured: the DELETE was still uncommitted while save_to_rag opened a
+    second connection to the same file, so it hit "database is locked", printed
+    `ERRO:` and returned None. _consolidate_memories saw no exception and
+    reported "Consolidação terminada" after deleting 20 rows and storing
+    nothing -- silent data loss dressed as a clean run. The rows are archived,
+    so nothing is truly lost, but the cycle must not claim otherwise.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i in range(1, 9):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", f"m{i}"))
+    con.commit()
+    con.close()
+
+    reply = json.dumps({"memoria_consolidada": "uma memória consolidada com texto suficiente"})
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: reply)
+    monkeypatch.setattr(dream, "save_to_rag", lambda mem: None)  # writes nothing
+
+    with pytest.raises(RuntimeError, match="não gravou"):
+        dream._consolidate_memories()
+
+    con = sqlite3.connect(db)
+    archived = con.execute(
+        "SELECT COUNT(*) FROM memories_purged WHERE reason='dream_consolidation'"
+    ).fetchone()[0]
+    con.close()
+    assert archived == 8, "the original rows must remain recoverable"

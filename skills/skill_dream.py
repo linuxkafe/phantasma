@@ -115,19 +115,89 @@ def _as_memory(text, tags=None, facts=None):
 
 
 def _extract_json(text):
-    """ Extração robusta de blocos JSON. """
-    if not text: return None
+    """Extrai o primeiro objeto JSON de uma resposta que pode estar cercado
+    de prosa, de uma cerca de código, ou truncada a meio.
+
+    Não escapar as newlines. Havia aqui um
+    `json_str.replace('\\n', '\\\\n')` que só podia estragar: uma quebra de
+    linha entre tokens JSON é espaço em branco legal e `json.loads` aceita-a
+    sem esforço, enquanto uma quebra DENTRO de um valor de string chega
+    escapada pelo próprio modelo. Trocar as duas convertia JSON válido em
+    inválido, e o erro que saía era exactamente
+    "unexpected character after line continuation character". Foi esse o
+    motivo de a consolidação nunca ter corrido: o modelo respondia, a resposta
+    estava boa, e o extractor é que a destruía.
+
+    Truncamento: o modelo tem um limite de tokens e o resumo pode cortar a
+    meio, como aconteceu com `fatos` a ficar sem fecho. Em vez de devolver
+    None, fecha o que falta -- chaves e parênteses abertos -- para recuperar o
+    prefixo já completo, que é onde está a memória consolidada.
+    """
+    if not text:
+        return None
     try:
         match = re.search(r'(\{.*\})', text, re.DOTALL)
         json_str = match.group(1) if match else text
-        json_str = json_str.replace('\n', '\\n').replace('\r', '\\r')
         try:
             return json.loads(json_str, strict=False)
-        except Exception:
+        except json.JSONDecodeError:
+            pass
+        # Truncado a meio: recovers o prefixo fechando o que ficou aberto.
+        repaired = _close_open_json(json_str)
+        if repaired is not None:
+            try:
+                return json.loads(repaired, strict=False)
+            except Exception:
+                pass
+        # O modelo às vezes responde com literais Python (aspas simples, None).
+        try:
             return ast.literal_eval(json_str)
+        except Exception:
+            pass
+        repaired = _close_open_json(json_str)
+        if repaired is not None:
+            try:
+                return ast.literal_eval(repaired)
+            except Exception:
+                pass
+        raise ValueError("nenhum JSON válido na resposta")
     except Exception as e:
         print(f"⚠️ [Dream] Erro no parse: {e}")
         return None
+
+
+def _close_open_json(text):
+    """Fecha o que ficou por fechar num JSON cortado a meio.
+
+    Só o delimitador conta: percorre o texto a contar delimitadores fora de
+    strings e devolve o objeto com as chaves e parênteses abertos fechados.
+    Devolve None se o texto não estiver truncado (ou não for JSON nenhum), para
+    não remendar uma resposta que já era válida.
+    """
+    stack = []
+    in_str = False
+    esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in '{[':
+            stack.append(ch)
+        elif ch in '}]':
+            if stack:
+                stack.pop()
+    if not stack:
+        return None
+    if in_str:
+        text += '"'
+    return text + ''.join('}' if opener == '{' else ']' for opener in reversed(stack))
 
 # --- Módulos do Sonho ---
 
@@ -212,14 +282,49 @@ def _consolidate_memories():
         if not (merged and 'memoria_consolidada' in merged):
             raise RuntimeError("a resposta do modelo não trouxe 'memoria_consolidada'")
 
+        # O modelo devolve `memoria_consolidada` como um objeto com tags e fatos
+        # dentro, não como a frase que o prompt pedia. Medido em producao:
+        # {"memoria_consolidada": {"tags": [...], "fatos": [...]}, "tags": [...]}.
+        # Passar esse dict a _as_memory rebentava em text.strip(). As tags são o
+        # que torna a memória encontrável pelo RAG (que procura por palavras
+        # com LIKE), e estavam a ser descartadas por estarem um nível dentro.
+        summary = merged['memoria_consolidada']
+        if isinstance(summary, dict):
+            tags = summary.get('tags') or merged.get('tags')
+            facts = summary.get('fatos') or summary.get('facts')
+            summary = json.dumps(summary, ensure_ascii=False)
+        else:
+            tags, facts = merged.get('tags'), None
+
         archived = _archive_purged_memories(conn, rows)
         marks = ",".join(["?"] * len(ids_to_purge))
         cursor.execute(f"DELETE FROM memories WHERE id IN ({marks})", ids_to_purge)
-        mem = _as_memory(merged['memoria_consolidada'],
-                         tags=merged.get('tags'))
-        if mem:
-            save_to_rag(mem)
+        mem = _as_memory(summary, tags=tags, facts=facts)
+        if not mem:
+            # Nada para gravar: ainda nem apagámos, o DELETE está por confirmar.
+            raise RuntimeError(
+                "a memória consolidada veio vazia: nada foi apagado"
+            )
+        # Commit ANTES de save_to_rag, e não depois.
+        #
+        # save_to_rag abre a sua própria ligação à mesma base de dados. Com o
+        # DELETE ainda por confirmar nesta ligação, essa segunda escrita batia
+        # numa "database is locked" -- e save_to_rag engole a falha (imprime
+        # `ERRO:` e devolve None), pelo que a consolidação reportava sucesso
+        # depois de apagar as 20 linhas sem gravar nada. Medido: 8 memórias
+        # arquivadas, 0 gravadas, "Consolidação terminada".
+        #
+        # Como save_to_rag não confirma nada de si, a escrita é verificada pelo
+        # número de linhas em vez de se acreditar no seu silêncio.
         conn.commit()
+        expected = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        save_to_rag(mem)
+        stored = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        if stored <= expected:
+            raise RuntimeError(
+                "save_to_rag não gravou o resumo: as memórias originais estão "
+                "arquivadas em memories_purged, nada foi perdido"
+            )
         print(f"🧠 [Dream] Consolidação terminada: {archived} memórias arquivadas em memories_purged.")
         return True
     finally:
