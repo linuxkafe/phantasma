@@ -208,3 +208,24 @@ Verificado antes de forçar:
 
 Causa: `ruff format` reformatou `config.py` no dev e o gate compara
 bytes. O código não mudou. Reformatado com `--force-host`.
+
+## `--force-host` em config.py — 2026-10-01
+
+O gate byte-idêntico voltou a disparar, agora por uma mudança de código
+deliberada: `memory_db_path` e `brain_db_path` passaram a resolver ambos
+`data/brain.db` por omissão (antes `memory.db` e `flybrain.db`). Não é um
+valor de host — é a correcção de que a memória e o flybrain são UM store.
+O prod já apontava ambos para `data/brain.db` via `.env`, portanto o
+comportamento em produção não muda: o `.env` continua a sobrepor. O que muda
+é que um checkout sem `.env` deixa de se dividir em dois ficheiros e de
+mostrar um grafo vazio no `/admin`.
+
+Verificado antes de forçar:
+- A mudança está nos defaults e no comentário; nenhuma credencial, IP ou
+  chave foi introduzida.
+- Prod resolve ambos os nomes pelo `.env`; o default de prod não é lido.
+- O gate de áudio (`block_size=512`, `auto_detect=False`) passou antes e
+  depois.
+
+Forçado com `scripts/deploy.sh --force-host`. A partir daqui os dois
+ficheiros voltam a ser byte-idênticos.
