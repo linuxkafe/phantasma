@@ -145,6 +145,29 @@ def test_build_graph_never_creates_self_loops_or_duplicates():
     assert len(payload["links"]) == 1  # one tagged link, self-edge dropped
 
 
+def test_a_label_beyond_the_display_limit_does_not_duplicate_the_node():
+    """Regression, found in the live database.
+
+    Node labels are truncated to 60 chars for display, but edge endpoints used
+    to be resolved by scanning those *truncated* labels. A label longer than
+    the limit therefore looked absent, the endpoint fell into the "dangling"
+    branch, ``concepts.get`` returned the SAME node, and it was appended to
+    ``nodes`` a second time -- two nodes with one id. The structural-invariant
+    test on the real brain.db caught it: 260 nodes, 259 unique ids.
+    """
+    long_label = "A" * 80  # beyond _MAX_LABEL
+    rows = [(1, "t", json.dumps({"tags": [long_label]}))]
+    graph_rows = [
+        ("node:a", "node", long_label, None, None, 0.0, 1.0, 0),
+        ("edge:a|b", "edge", "a -> b", long_label, long_label + "B", 0.5, 1.0, 0),
+    ]
+    payload = build_graph(rows, graph_rows)
+    ids = [n["id"] for n in payload["nodes"]]
+    assert len(ids) == len(set(ids)), f"duplicate node ids: {ids}"
+    # The known source resolved; only the unknown target is unresolved.
+    assert payload["stats"]["unresolved_edges"] == 1
+
+
 def test_nodes_expose_degree_used_by_the_3d_layout():
     rows = [
         (1, "t", json.dumps({"tags": ["A"]})),

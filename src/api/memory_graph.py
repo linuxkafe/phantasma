@@ -153,6 +153,18 @@ class _ConceptRegistry:
             self._label_to_key.setdefault(key, key)
         return self._by_key[key]
 
+    def find(self, label: str) -> dict[str, Any] | None:
+        """Return the existing concept for this label, or None. Does not create.
+
+        The identity is ``normalise(label)``, the same key ``get`` uses, and not
+        the node's stored ``label`` -- that one is truncated to ``_MAX_LABEL``.
+        Resolving edges against the truncated label made a label longer than 60
+        chars look absent, so the endpoint fell into the "dangling" branch and
+        ``get`` returned the SAME node, which was then appended to ``nodes`` a
+        second time: two nodes, one id. See test_long_labels_do_not_duplicate.
+        """
+        return self._by_key.get(normalise(label))
+
     def key_for(self, label: str) -> str:
         return normalise(label)
 
@@ -303,14 +315,9 @@ def build_graph(
 
     # Resolve stored graph edges by label; flag the ones that dangle.
     for src_label, tgt_label, affinity in graph_edge_labels:
-        src = next(
-            (c for c in concept_nodes if normalise(c["label"]) == normalise(src_label)),
-            None,
-        )
-        tgt = next(
-            (c for c in concept_nodes if normalise(c["label"]) == normalise(tgt_label)),
-            None,
-        )
+        # Through the registry, not a scan of ``concept_nodes``: see find().
+        src = concepts.find(src_label)
+        tgt = concepts.find(tgt_label)
         if src is None:
             src = concepts.get(src_label)
             src["unresolved"] = True
