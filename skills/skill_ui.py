@@ -1581,22 +1581,42 @@ def handle_request():
                     margin-bottom: 0.5rem;
                 }
                 .device-toggle:hover .device-icon { transform: scale(1.05); }
+                  /* One line, the full name, and a marquee only when it does
+                     not fit. The old rule wrapped to 3 lines and shortened the
+                     text, which is why the owner saw tiles that only said
+                     "luz". A window that clips to one line cannot show a name
+                     wider than itself, so an overflowing name is moved instead
+                     of cut (applyLabelMarquee sets the shift and duration). */
                   .device-label {
                       font-size: 0.65rem; color: #aaa; width: 100%; text-align: center;
-                      line-height: 1.15; white-space: normal; overflow: hidden;
-                      /* Clamp at 3, not 2: the tile is taller now, so a 2-line
-                         clamp was cutting real device names in half. Three is
-                         also what the longest real name needs -- "Desumidificador
-                         do Armário" is three lines at this width, and a 2-line
-                         clamp would have turned the fix for the naming into a
-                         different truncation. */
-                      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
-                      /* Hyphenation, so a long name breaks between words instead
-                         of overflowing the tile. A device name is a name, not a
-                         URL: breaking "Desumidifi-cador" is more readable than
-                         "Desumidificad…". */
-                      overflow-wrap: break-word; hyphens: auto;
+                      line-height: 1.15; white-space: nowrap; overflow: hidden;
+                      position: relative;
                   }
+                  /* The mover. Separate from the window, because a box cannot
+                     clip itself and `text-overflow` needs a block to act on. */
+                  .device-label .device-label-text { display: inline-block; }
+                  /* Left-aligned while moving, so the drift starts at the first
+                     word instead of at the middle of the text. */
+                  .device-label.marquee { text-align: left; }
+                  .device-label.marquee .device-label-text {
+                      animation: device-marquee var(--marquee-duration, 10s) linear infinite;
+                      will-change: transform;
+                  }
+                  /* A pause at each end: the first word must be readable before
+                     the line moves. */
+                  @keyframes device-marquee {
+                      0%, 12% { transform: translateX(0); }
+                      88%, 100% { transform: translateX(var(--marquee-shift, 0px)); }
+                  }
+                  /* Reduced motion: wrap to two lines instead of moving. The
+                     full name is still readable; only the motion is gone. */
+                  .device-label.wrap {
+                      white-space: normal; overflow-wrap: break-word; hyphens: auto;
+                  }
+                  /* A lamp that is on is filled, not just un-greyed. The wash is
+                     amber to match .device-power, and only the `luz` glyph (luz,
+                     candeeiro) is filled -- the class comes from icon(kind). */
+                  .device-toggle.active .device-icon svg.dev-icon-luz { fill: #ffcf52; }
 
 
                               /* The watts, on their own line under the name. Amber because
@@ -2739,7 +2759,11 @@ def handle_request():
             if (_skyEl) _skyEl.innerHTML = CLOUD_SVG;
 
             function icon(kind) {
-                return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+                /* The kind is a class, so a single icon can be recoloured without
+                   a parallel data attribute: the lit-bulb fill targets
+                   `svg.dev-icon-luz` and nothing else needs to know the kind. */
+                return '<svg class="dev-icon dev-icon-' + kind + '" viewBox="0 0 24 24" '
+                     + 'fill="none" stroke="currentColor" '
                      + 'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" '
                      + 'aria-hidden="true" focusable="false">' + SVG[kind] + '</svg>';
             }
@@ -3167,94 +3191,22 @@ def handle_request():
                 }
             }
 
-            /* What a tile actually says.
+            /* What a tile actually says: the device's full name.
+
                It used to be `device.split(' ').pop().substring(0,12)`, which
-               threw away everything but the LAST word. Measured at 375x667 with
-               the real device list, that made six of eight tiles unreadable:
+               threw away everything but the LAST word -- measured at 375x667
+               with the real device list, "Luz da Sala" and "Exaustor da Sala"
+               both read "Sala". A middle version shortened a name by the room
+               word the header already carries, so "Luz da Sala" became "Luz".
+               The owner's 2026-10-01 report is that this left many tiles that
+               only said "luz". The full name is the label again, and a name
+               wider than its tile scrolls (applyLabelMarquee) rather than being
+               cut down to a word.
 
-                   Luz da Sala            -> "Sala"        Exaustor da Sala -> "Sala"
-                   Luz do Quarto          -> "Quarto"      Candeeiro do Quarto -> "Quarto"
-                   Desumidificador do Quarto -> "Quarto"    Exaustor do WC   -> "WC"
-                   Desumidificador do Armário -> "Armário"   Aspirador       -> "Aspirador"
-
-               Two devices both called "Sala" and three all called "Quarto". The
-               full name survived only in the `title`, which a phone cannot show
-               on demand, so on the device the owner actually uses these tiles
-               did not say what they controlled. The room word is the part that
-               was being thrown away and it is the part the group header ALREADY
-               says, so the fix is not "show everything" -- it is "show the part
-               that distinguishes, and only that".
-
-               Shortening is conditional on uniqueness within the room, computed
-               from the whole list rather than per tile. "Luz do Balcão" and
-               "Luz da Sala" both land in the Sala group (getRoomName maps
-               balcao to Sala), so shortening both to "Luz" would have invented
-               exactly the ambiguity this is fixing. A short form is used only
-               when it is the only one of its kind in that room. */
-            /* The room a name actually names, or null when it names none.
-
-               getRoomName answers "Geral" for anything it does not recognise, and
-               comparing that against the room we happen to be in made the test
-               vacuously true in the Geral group: "Desumidificador do Armário"
-               was shortened to "Desumidificador" because getRoomName("Armário")
-               returned "Geral" and the room WAS "Geral". The tail of the name --
-               the only thing saying where the device lives -- was thrown away,
-               in the one group where there is no header to put it back. */
-            function explicitRoom(name) {
-                const n = (name || '').toLowerCase();
-                if (n.includes("wc") || n.includes("banho")) return "WC";
-                if (n.includes("balcao") || n.includes("balcão")) return "Sala";
-                if (n.includes("sala")) return "Sala";
-                if (n.includes("quarto")) return "Quarto";
-                if (n.includes("entrada") || n.includes("corredor")) return "Entrada";
-                return null;
-            }
-            function shortDeviceName(name, room) {
-                if (explicitRoom(name) !== room) return name;
-                for (const joiner of [' da ', ' do ', ' das ', ' dos ']) {
-                    const at = name.toLowerCase().lastIndexOf(joiner);
-                    if (at <= 0) continue;
-                    const tail = name.slice(at + joiner.length).trim();
-                    /* Only drop a tail that NAMES this room. "do Armário" names
-                       no room, so it stays: in the Geral group it is the only
-                       thing saying where the desumidifier is. */
-                    if (explicitRoom(tail) !== room) continue;
-                    return name.slice(0, at).trim();
-                }
-                return name;
-            }
-            /* One decision, made once, from the full list. Returns a Map of
-               device name -> label, and the caller never recomputes it: the
-               refresh path used to recompute the label on every poll, from a
-               different expression, so a device that dropped below the power
-               threshold silently reverted from its full name back to its last
-               word. Two expressions for one label is how that happens. */
-            /* The one place a device's visible name is decided. Filled once per
-               load by computeDeviceLabels and read by both the builder and the
-               poller, so the two cannot express the same label two ways -- which
-               is exactly how a tile ended up named "Luz da Sala" when it was off
-               and "Sala" when it was drawing power. */
-            let DEVICE_LABELS = new Map();
-            function deviceLabelFor(name) { return DEVICE_LABELS.get(name) || name; }
-            function computeDeviceLabels(grouped) {
-                const labels = new Map();
-                ROOMS_ORDER.forEach(room => {
-                    const devs = (grouped[room] || []).filter(d => d.type !== 'sensor');
-                    const short = devs.map(d => ({ d, s: shortDeviceName(d.name, room) }));
-                    const counts = {};
-                    short.forEach(x => { counts[x.s] = (counts[x.s] || 0) + 1; });
-                    short.forEach(x => {
-                        /* Unique in the room: the short form is enough. Not
-                           unique: the full name, because two tiles with the same
-                           word are worse than two long ones. */
-                        labels.set(x.d.name, counts[x.s] === 1 ? x.s : x.d.name);
-                    });
-                });
-                DEVICE_LABELS = labels;
-                return labels;
-            }
-
-            function createToggle(device, labelText) {
+               The text is written once, here, and never again: both the builder
+               and the poller show `device`, so they cannot disagree about what
+               a tile is called. */
+            function createToggle(device) {
                 const container = getOrCreateRoomContainer(getRoomName(device));
                 const div = document.createElement('div'); div.className = 'device-toggle'; div.title = device;
                 div.dataset.state = 'unreachable'; div.dataset.type = 'toggle';
@@ -3272,8 +3224,15 @@ def handle_request():
                     if(input.checked) div.classList.add('active'); else div.classList.remove('active');
                 };
                 const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
+                /* Two elements, because a box cannot clip and scroll itself:
+                   `.device-label` is the fixed-width window and
+                   `.device-label-text` is the mover its animation translates.
+                   Keeping them apart also keeps textContent == the full name,
+                   which is what the title and the tests read. */
                 const label = document.createElement('span'); label.className = 'device-label';
-                label.innerText = labelText || device;
+                const labelTextEl = document.createElement('span'); labelTextEl.className = 'device-label-text';
+                labelTextEl.textContent = device;
+                label.appendChild(labelTextEl);
                 /* Watts get their own line instead of overwriting the name. The
                    label used to become "210 W" whenever the device drew power,
                    which meant the desumidifier -- the single most expensive thing
@@ -3283,7 +3242,45 @@ def handle_request():
                 const power = document.createElement('span'); power.className = 'device-power';
                 power.setAttribute('data-empty', '1');
                 div.append(icon, switchLabel, label, power); container.appendChild(div);
-                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, power: power, labelText: label.innerText });
+                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, labelTextEl: labelTextEl, power: power });
+            }
+
+            /* The full name gets the space it needs, in motion.
+
+               A name wider than the tile used to be shortened to a word ("Luz"),
+               which is the owner's complaint, and a 3-line clamp cannot show a
+               single word wider than the tile at all. So the label is one line,
+               and only when the text is genuinely wider than its window does it
+               drift -- with a pause at each end so the first word is readable
+               before the text moves. The overflow is measured, not assumed: a
+               short name like "forno" never animates.
+
+               `matchMedia` is read once. Reduced motion is not "scroll slower"
+               -- a name that moves is the thing the preference is about, so the
+               fallback wraps the text to a second line instead of running it. */
+            const PREFERS_REDUCED_MOTION = !!(window.matchMedia
+                && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+            function applyLabelMarquee(label, textEl) {
+                if (!label || !textEl) return;
+                label.classList.remove('marquee', 'wrap');
+                label.style.removeProperty('--marquee-shift');
+                label.style.removeProperty('--marquee-duration');
+                const overflow = textEl.offsetWidth - label.clientWidth;
+                if (overflow <= 2) return;
+                if (PREFERS_REDUCED_MOTION) { label.classList.add('wrap'); return; }
+                label.style.setProperty('--marquee-shift', `-${overflow}px`);
+                /* ~25px a second, floored so a barely-overflowing name is not a
+                   blur. The distance is measured in px, so duration and
+                   distance stay proportional at any tile width. */
+                label.style.setProperty('--marquee-duration',
+                                        `${Math.max(6, Math.round(overflow / 25) + 4)}s`);
+                label.classList.add('marquee');
+            }
+            function applyAllLabelMarquees() {
+                ALL_DEVICES_ELEMENTS.forEach(i => {
+                    if (i.type === 'toggle') applyLabelMarquee(i.label, i.labelTextEl);
+                });
             }
             
             /* Temperature and humidity have no tile of their own any more.
@@ -3310,7 +3307,7 @@ def handle_request():
             }
 
             async function fetchDeviceStatus(item) {
-                const { name, element, input, label, power } = item;
+                const { name, element, input, label, labelTextEl, power } = item;
                 try {
                     const res = await fetch(`/device_status?nickname=${encodeURIComponent(name)}`);
                     const data = await res.json();
@@ -3331,14 +3328,15 @@ def handle_request():
                     if (data.state !== 'unreachable' && element.classList.contains('action-failed')) {
                         markTileResult(element, true, '');
                     }
-                    /* The name is written on every poll, from the one source, and
-                       never depends on the reading. It used to be written only in
-                       the `else` branch and recomputed there from a second
-                       expression, so a light that stopped drawing power lost
-                       "Luz da Sala" and went back to reading "Sala": the tile's
-                       name changed depending on whether it happened to be on.
-                       Anything conditional about a label is a label that lies. */
-                    label.innerText = item.labelText || deviceLabelFor(name);
+                    /* The name never depends on the reading. It used to be
+                       recomputed on every poll from a second expression, so a
+                       light that stopped drawing power lost "Luz da Sala" and
+                       went back to reading "Sala": the tile's name changed
+                       depending on whether it happened to be on. Anything
+                       conditional about a label is a label that lies. The text
+                       is already `name` from createToggle; rewritten here from
+                       the same variable so there is still one source. */
+                    if (labelTextEl) labelTextEl.textContent = name;
                     label.style.color = "#aaa";
                     /* Watts on their own line. Overwriting the name with the
                        wattage meant the desumidifier -- the biggest load in the
@@ -3787,20 +3785,21 @@ def handle_request():
                     const grouped = {};
                     ROOMS_ORDER.forEach(r => grouped[r] = []);
                     allDevices.forEach(d => grouped[getRoomName(d.name)].push(d));
-                    /* Names are decided here, with the whole list in hand, not
-                       inside the tile builder where a device can only see itself. */
-                    const labels = computeDeviceLabels(grouped);
                     for (const room of ROOMS_ORDER) {
                         const devs = grouped[room];
                         if (devs && devs.length > 0) devs.forEach(d => {
                             if (d.type === 'sensor') createSensor(d.name);
-                            else createToggle(d.name, labels.get(d.name));
+                            else createToggle(d.name);
                         });
                     }
                     updateHomePower(); updateWeather();
                     /* Prime the states before the first paint settles, so the
                        switches are live when they are first seen. */
                     await refreshDeviceStates();
+                    /* Measured after the tiles carry their `loaded` border, so
+                       the overflow test uses the width the user actually gets. */
+                    applyAllLabelMarquees();
+                    window.addEventListener('resize', applyAllLabelMarquees);
                     setInterval(refreshDeviceStates, 5000);
                     setInterval(updateWeather, 600000);
                 } catch (e) {}

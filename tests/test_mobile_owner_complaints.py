@@ -522,12 +522,73 @@ def test_a_name_that_carries_its_own_place_keeps_it(page):
     )
 
 
-def test_the_short_form_is_used_where_it_is_unambiguous(page):
-    """Not everything stays long. "Luz da Sala" under a header that says SALA is
-    "Luz", and that is the space the owner asked to save."""
+def test_every_tile_shows_the_full_device_name(page):
+    """The 2026-10-01 report: many tiles only said "luz". The visible label is
+    the full device name -- not its last word, and not a room-shortened form.
+    "Luz da Sala" is "Luz da Sala", never just "Luz"."""
     labels = {t["device"]: t["label"] for r in _rooms(page) for t in r["tiles"]}
-    assert labels.get("Luz da Sala") == "Luz", labels.get("Luz da Sala")
-    assert labels.get("Exaustor da Sala") == "Exaustor", labels.get("Exaustor da Sala")
+    for name in ("Luz da Sala", "Exaustor da Sala", "Luz do Quarto",
+                 "Candeeiro do Quarto", "Desumidificador do Armário"):
+        assert labels.get(name) == name, (name, labels.get(name))
+
+
+def test_a_name_wider_than_its_tile_scrolls_instead_of_being_cut(page):
+    """"Desumidificador do Armário" does not fit a phone tile. It drifts instead
+    of being truncated -- and the drift is measured, so a short name is left
+    still.
+
+    The label is narrowed here on purpose. The flex layout widens a tile to fit
+    its own name, so on this viewport the overflow the production phone shows is
+    constructed rather than waited for; the mechanism is the thing under test,
+    not the harness's flexbox."""
+    result = page.evaluate(
+        """() => {
+            const narrow = (title, px) => {
+                const t = [...document.querySelectorAll('.device-toggle')]
+                    .find(t => t.title === title);
+                const l = t.querySelector('.device-label');
+                l.style.width = px + 'px';
+                window.applyLabelMarquee(l, t.querySelector('.device-label-text'));
+                return {
+                    marquee: l.classList.contains('marquee'),
+                    shift: l.style.getPropertyValue('--marquee-shift'),
+                    duration: l.style.getPropertyValue('--marquee-duration'),
+                };
+            };
+            return {long: narrow('Desumidificador do Armário', 40),
+                    short: narrow('forno', 40)};
+        }"""
+    )
+    assert result["long"]["marquee"], result["long"]
+    assert result["long"]["shift"].startswith("-"), result["long"]
+    assert result["long"]["duration"].endswith("s"), result["long"]
+    assert not result["short"]["marquee"], result["short"]
+
+
+def test_the_lamp_fills_when_its_toggle_is_on(page):
+    """When on, the lamp glyph is filled amber, not merely un-greyed. Only the
+    lamp glyph is filled: a light that is off stays an outline."""
+    tiles = page.evaluate(
+        """() => {
+            const out = {};
+            document.querySelectorAll('.device-toggle').forEach(t => {
+                const svg = t.querySelector('.device-icon svg');
+                out[t.title] = {
+                    active: t.classList.contains('active'),
+                    cls: svg ? svg.getAttribute('class') : null,
+                    fill: svg ? getComputedStyle(svg).fill : null,
+                };
+            });
+            return out;
+        }"""
+    )
+    on = tiles["Luz da Sala"]
+    assert on["active"], on
+    assert "dev-icon-luz" in (on["cls"] or ""), on
+    assert on["fill"] == "rgb(255, 207, 82)", on
+    off = tiles["Luz do Quarto"]
+    assert not off["active"], off
+    assert off["fill"] == "none", off
 
 
 def test_the_full_name_is_still_reachable(page):
