@@ -272,3 +272,68 @@ def test_polling_starts_with_the_daemon(monkeypatch):
 def test_a_missing_device_still_reads_as_unreachable(cache):
     """Honesty about absence must survive the new code path."""
     assert skill_tuya.get_status_for_device("Sensor da Sala")["state"] == "unreachable"
+
+
+# --- a switch is a boolean, and nothing else -------------------------------
+
+def test_a_temperature_is_not_a_switch_position(cache):
+    """246 is 24.6 degrees. It is not "on".
+
+    The state came from `dps.get('1') or dps.get('20')`, which read any truthy
+    value as on. Measured on the real cache, "Sensor da Sala" with dps1=246 was
+    reported `state: on` -- and a tile marked on draws its animation and its
+    readings, so a thermometer switched a light on in the interface.
+    """
+    cache({"Sensor da Sala": _fresh({"1": 246, "2": 53, "3": "middle"})})
+    st = skill_tuya.get_status_for_device("Sensor da Sala")
+    assert st["state"] != "on", f"a temperature was read as a switch: {st}"
+    assert st["temperature"] == 24.6, st
+
+
+def test_a_sensor_is_given_no_switch_state_at_all(cache):
+    cache({"Sensor do Quarto": _fresh({"1": 246})})
+    assert skill_tuya.get_status_for_device("Sensor do Quarto")["state"] == "n/a"
+
+
+def test_an_energy_reading_is_not_a_switch_position(cache):
+    """dps1=False and dps20=2367 read as "on" for want of a boolean.
+
+    This is the Armário dehumidifier exactly as the cache held it: its switch
+    DPS says False, and the truthy number next to it is an energy-meter value.
+    The device was off and the interface said on.
+    """
+    cache({"Desumidificador do Armário": _fresh({"1": False, "20": 2367})})
+    st = skill_tuya.get_status_for_device("Desumidificador do Armário")
+    assert st["state"] == "off", f"a meter reading overrode the switch: {st}"
+
+
+@pytest.mark.parametrize(
+    "dps,expected",
+    [
+        ({"1": True}, "on"),
+        ({"20": True}, "on"),
+        ({"1": False}, "off"),
+        ({"20": False}, "off"),
+        # 1 and 20 are ALTERNATIVE switch keys, not complementary ones, and no
+        # real device in the house reports them as opposing booleans. So the
+        # first boolean found is the switch; the pair below only asserts that a
+        # boolean is preferred over a number in the same DPS.
+        ({"1": False, "20": 2367}, "off"),
+        ({"1": False, "20": True}, "off"),
+        ({"1": 2367}, "unreachable"),          # no boolean anywhere
+        ({"20": "middle"}, "unreachable"),
+        ({}, "unreachable"),
+    ],
+)
+def test_only_a_boolean_dps_is_a_switch(cache, dps, expected):
+    cache({"Desumidificador do Armário": _fresh(dps)})
+    st = skill_tuya.get_status_for_device("Desumidificador do Armário")
+    assert st["state"] == expected, f"{dps} -> {st['state']}, wanted {expected}"
+
+
+def test_the_switch_state_helper_is_the_single_rule():
+    """Stated directly, so the `or` that caused it cannot come back."""
+    assert skill_tuya._switch_state({"1": False, "20": 2367}) is False
+    assert skill_tuya._switch_state({"1": 246}) is None
+    assert skill_tuya._switch_state({"20": True}) is True
+    assert skill_tuya._switch_state({}) is None

@@ -181,12 +181,45 @@ def _is_sensor(nickname):
     """
     return 'sensor' in nickname.lower()
 
+def _switch_state(dps):
+    """True, False or None, from whichever DPS is actually a boolean.
+
+    Was `dps.get('1') or dps.get('20')`, which read any truthy value as "on".
+    Measured on the real cache:
+
+      Sensor da Sala          dps1=246   dps20=None   -> "on"
+      Desumidificador do Armário dps1=False dps20=2367 -> "on"
+      Exaustor da Sala        dps1=False dps20=None   -> "off"
+
+    The sensor was "on" because 246 is a temperature in deci-celsius, and the
+    dehumidifier was "on" while its own switch DPS said False, because 2367 is
+    not a switch -- it is one of the energy-meter readings. So the whole house
+    showed states nobody had measured, and a tile marked on also draws its
+    animation and its readings, which is what made the second symptom look
+    like the first.
+
+    The type is the test, not the value. Tuya switch DPS arrive as JSON
+    booleans; a measurement arrives as a number or a string. "middle", 246 and
+    2367 are all truthy and none of them is a position.
+    """
+    for key in ('1', '20'):
+        value = dps.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
 def get_status_for_device(nickname):
     cached = _get_cached_status(nickname)
     if not cached or 'dps' not in cached: return {"state": "unreachable"}
     dps = cached['dps']; result = {}
-    is_on = dps.get('1') or dps.get('20')
-    result['state'] = 'on' if is_on else 'off'
+    # A sensor has no switch position, so it gets no state at all rather than
+    # one derived from its temperature.
+    if _is_sensor(nickname):
+        result['state'] = 'n/a'
+    else:
+        switch = _switch_state(dps)
+        result['state'] = 'unreachable' if switch is None else ('on' if switch else 'off')
     power_raw = dps.get('19') or dps.get('104')
     if power_raw: result['power_w'] = float(power_raw) / 10.0
 
