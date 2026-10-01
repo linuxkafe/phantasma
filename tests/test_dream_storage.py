@@ -142,18 +142,36 @@ def test_sleep_endpoint_starts_a_cycle_that_runs_the_dream_step(cycle, monkeypat
     exist at module level, and then asserted `... or True` -- a test that
     cannot fail. The cycle body is a closure inside brain_sleep, so the only
     honest way to observe it is through the route and the status it writes.
+
+    This used to assert that `perform_dreaming` itself was called by the cycle.
+    It no longer is: the cycle runs each dream phase as its own step, and the
+    "dream" step is the research half alone (`_research_half`). Calling
+    `perform_dreaming` from the cycle would run consolidation and the graph
+    dream a second time, on top of the steps above it. The regression guard for
+    that is in tests/test_dream_graph.py
+    (`test_the_sleep_cycle_does_not_consolidate_twice`); here we only assert the
+    endpoint reaches a terminal state with a dream step that ran.
     """
     import time
 
     ran = []
 
-    def fake_dream(mode="auto"):
+    def fake_research_half(mode="auto"):
         ran.append(mode)
         return ""
 
-    monkeypatch.setattr(skill_dream, "perform_dreaming", fake_dream)
+    monkeypatch.setattr(skill_dream, "_research_half", fake_research_half)
+    monkeypatch.setattr(skill_dream, "_reduce_to_concepts", lambda: None)
+    monkeypatch.setattr(skill_dream, "_dedupe_memories", lambda: None)
     monkeypatch.setattr(skill_dream, "_consolidate_memories", lambda: None)
-    monkeypatch.setattr(skill_dream, "_optimize_graph", lambda: None)
+    monkeypatch.setattr(skill_dream, "_optimize_graph", lambda **_: None)
+    monkeypatch.setattr(
+        skill_dream, "perform_dreaming",
+        lambda *a, **kw: pytest.fail(
+            "the cycle must not call perform_dreaming: it re-runs the "
+            "consolidation and graph-dream steps the cycle already did"
+        ),
+    )
     from src.pipeline import gmif_classifier
     monkeypatch.setattr(gmif_classifier, "classify_all_edges", lambda conn: None)
     monkeypatch.setattr(gmif_classifier, "classify_all_nodes", lambda conn: None)
@@ -174,7 +192,7 @@ def test_sleep_endpoint_starts_a_cycle_that_runs_the_dream_step(cycle, monkeypat
     assert "dream" in (status.get("steps") or {}), (
         f"the dream step never ran; steps seen: {sorted(status.get('steps') or {})}"
     )
-    assert ran, "perform_dreaming was never called"
+    assert ran, "the research half (_research_half) was never called"
 
 
 def test_dream_step_is_registered_in_the_cycle(cycle):

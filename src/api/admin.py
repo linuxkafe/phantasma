@@ -1350,7 +1350,17 @@ BRAIN_TEMPLATE = (
     #brain-inspect {
         position: absolute;
         inset: 0;
-        z-index: 30;
+        /* Above the floating sleep bar (z-index 40), not 30. In fullscreen that
+           bar is `position: fixed; top/right: 12px`, so it floats over the
+           top-right corner of this drawer -- exactly where the drawer's own
+           "Dormir e Sonhar" button is. At 30 the button lost the click to the
+           bar: the drawer reported the button as visible and enabled while
+           elementFromPoint over its centre returned the bar, so a click did
+           nothing at all. The bar is informational only (its summary div is
+           display:none in fullscreen), and the drawer repeats the same stats,
+           so putting the drawer on top costs no information. Must stay below
+           .brain-tabs (60) or the subnav stops taking clicks. */
+        z-index: 50;
         overflow-y: auto;
         background: color-mix(in srgb, var(--surface) 92%, transparent);
         background: rgba(20, 20, 24, 0.92);
@@ -1655,7 +1665,7 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
         btn.addEventListener('click', async () => {
           const row = btn.closest('tr');
           const target = row.querySelector('[data-ref]');
-          const mode = row.querySelector('[data-ref-mode]');
+          const mode = row.querySelector('[data-ref-edge]');
           if (!target || !target.value) {
             if (status) status.textContent =
               'Escolhe um nó para esta extremidade.';
@@ -3260,15 +3270,7 @@ def brain_sleep():
         """Background worker for sleep/dream cycle."""
         conn = sqlite3.connect(BRAIN_DB_PATH)
         try:
-            from skills.skill_dream import (
-                _consolidate_memories,
-            )
-            from skills.skill_dream import (
-                _optimize_graph as _gmif_dream_cycle,
-            )
-            from skills.skill_dream import (
-                perform_dreaming as _perform_dreaming,
-            )
+            from skills import skill_dream as _dream
             from src.pipeline.gmif_classifier import (
                 classify_all_edges,
                 classify_all_nodes,
@@ -3277,18 +3279,36 @@ def brain_sleep():
             _step("classify_edges", classify_all_edges, conn)
             _step("classify_nodes", classify_all_nodes, conn)
             _step("reconcile_refs", _reconcile_refs, conn)
-            _step("consolidate_memories", _consolidate_memories)
+
+            # The phases of perform_dreaming, in perform_dreaming's order, each
+            # named on its own in /brain/sleep/status. perform_dreaming is NOT
+            # called: it runs these same phases, so calling it after them ran
+            # consolidation and the graph dream twice in a single press -- the
+            # second consolidation merging the summary the first had just
+            # written (up to 40 memories removed instead of 20), and the graph
+            # dream repeating work. Its last phase, the news/web research, is
+            # the "dream" step below; that is what this endpoint was describing.
+            #
+            # reduce_to_concepts comes BEFORE consolidate_memories, not after:
+            # consolidation deletes the 20 most recent rows, so extracting the
+            # concepts afterwards destroyed the concepts those rows held, once
+            # per press. perform_dreaming orders it this way for exactly that
+            # reason and is the source of truth for the sequence.
+            if _dream.GMIF_DREAM_ENABLED:
+                _step("reduce_to_concepts", _dream._reduce_to_concepts)
+            _step("dedupe_memories", _dream._dedupe_memories)
+            _step("consolidate_memories", _dream._consolidate_memories)
             # A GMIF failure must not erase the classification work above, so
             # it is recorded and swallowed rather than aborting the cycle.
             try:
-                _step("gmif_dream", _gmif_dream_cycle)
+                _step("gmif_dream", _dream._optimize_graph, materialize=False)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GMIF dream cycle step failed: %s", exc)
             # The dreaming half of skill_dream: news and web research, stored
             # with the keyword structure the RAG matches on. Consolidation
             # above only merges what is already stored.
             try:
-                _step("dream", _perform_dreaming)
+                _step("dream", _dream._research_half)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Dream step failed: %s", exc)
         except Exception as exc:  # noqa: BLE001

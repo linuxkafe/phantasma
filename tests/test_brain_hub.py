@@ -114,8 +114,16 @@ def test_the_unified_panel_offers_the_dangling_refs(get_hub):
     endpoint with no interface at all: the count was visible, the fix was
     not."""
     body = get_hub()
-    assert "data-ref-mode" in body or "data-ref=" in body, (
-        "no control to resolve an unresolved reference"
+    # Was `"data-ref-mode" in body or "data-ref=" in body`, which the target
+    # select's unrelated `data-ref` always satisfied -- so the attribute the
+    # handler actually reads was never required to exist, and a handler reading
+    # `[data-ref-mode]` against a `data-ref-edge` template shipped. The names
+    # must match the handler, so assert the ones it uses.
+    assert "data-ref-edge=" in body, (
+        "the resolve mode select is missing data-ref-edge, which the handler reads"
+    )
+    assert "data-ref-side=" in body, (
+        "the resolve mode select is missing data-ref-side, which the handler reads"
     )
     assert "action" in body, "the resolve form is missing"
 

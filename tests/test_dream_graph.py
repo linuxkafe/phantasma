@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import time
 
 import pytest
 
@@ -237,6 +238,55 @@ def test_the_graph_step_respects_its_own_switch(db, monkeypatch, capsys):
     assert called == [], "the graph step ran while switched off"
 
 
+@pytest.mark.parametrize(
+    "gap_type,gap",
+    [
+        ("disconnected_pair", {"source": "A", "target": "B", "shared_words": 2}),
+        ("missing_requirement", {"node": "A", "node_key": "node:a"}),
+        ("weak_edge", {"label": "liga A B", "source": "A", "target": "B"}),
+        ("causal_gap", {"label": "A leva a B", "source": "A", "target": "B"}),
+    ],
+)
+def test_every_gap_type_reaches_the_search(db, monkeypatch, gap_type, gap):
+    """Research must not raise for any gap shape the analyser produces.
+
+    On prod, `_research_gap` raised `KeyError: 'label'` for every
+    `disconnected_pair`, because its templates were a dict of f-strings built
+    eagerly: the `weak_edge` entry formatted `gap_data['label']` even when the
+    caller asked about a disconnected pair, whose dict has no `label`. The
+    exception escaped before the `gap_type not in templates` guard, so
+    `_optimize_graph` died on its first gap and the whole research half of the
+    cycle never ran. The caller catches it, which is why it looked like a slow
+    night rather than a dead feature.
+
+    Asserted for all four shapes, not just the one that broke: the bug was that
+    the *unused* templates were evaluated, so any shape missing any key could
+    take down the whole call.
+    """
+    asked = []
+
+    def fake_chat(prompt, *a, **kw):
+        asked.append(prompt)
+        return None  # stop before the network; the prompt is what is under test
+
+    monkeypatch.setattr(dream, "_safe_ollama_chat", fake_chat)
+    monkeypatch.setattr(dream, "search_with_searxng", lambda *a, **kw: [])
+
+    assert dream._research_gap(gap_type, gap) is None
+    assert asked, f"{gap_type} never reached the LLM"
+    if gap_type == "disconnected_pair":
+        assert "A" in asked[0] and "B" in asked[0], asked[0]
+    if gap_type == "missing_requirement":
+        assert "A" in asked[0], asked[0]
+
+
+def test_an_unknown_gap_type_is_ignored_rather_than_raised(db, monkeypatch):
+    monkeypatch.setattr(
+        dream, "_safe_ollama_chat", lambda *a, **kw: pytest.fail("asked the LLM")
+    )
+    assert dream._research_gap("not_a_gap_type", {"source": "A"}) is None
+
+
 def test_dedupe_removes_exact_duplicate_memories(db):
     """Identical rows that sit apart were never compared, so they piled up."""
     con = sqlite3.connect(db)
@@ -291,3 +341,202 @@ def test_a_weak_edge_is_found_by_its_canonical_key(db):
     assert row is not None
     assert row[0] == "M3"
     assert row[1] == "dream_gmif_research"
+
+
+def test_consolidation_reports_an_unreachable_model_instead_of_succeeding(db, monkeypatch):
+    """A silent no-op read as success on the page the owner watches.
+
+    `_consolidate_memories` caught every exception and only printed, so
+    /admin/brain/sleep/status reported the step as `ok` after ~180s while the
+    memory count never moved and nothing was archived. On prod that is exactly
+    what happened: both Ollama hosts timed out and the cycle still said the
+    brain had been consolidated. The step has to fail loudly instead.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i in range(1, 9):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", f"m{i}"))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: None)
+    with pytest.raises(RuntimeError, match="Ollama"):
+        dream._consolidate_memories()
+
+    con = sqlite3.connect(db)
+    left = con.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+    con.close()
+    assert left == 8, "a failed merge must not delete anything"
+
+
+def test_consolidation_rejects_a_reply_with_no_summary(db, monkeypatch):
+    """A model that answers but not with the field asked for is also a failure.
+
+    Silently doing nothing here is how the brain ends up with the same
+    repetitions the owner asked to have removed, while the log says the cycle
+    consolidated.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    for i in range(1, 9):
+        con.execute("INSERT INTO memories VALUES (?,?,?)", (i, "2026-01-01", f"m{i}"))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(dream, "_safe_ollama_chat", lambda *a, **kw: '{"outra_coisa": 1}')
+    with pytest.raises(RuntimeError, match="memoria_consolidada"):
+        dream._consolidate_memories()
+
+
+def test_consolidation_with_too_few_rows_is_a_benign_no_op(db, monkeypatch):
+    """Fewer than five rows is nothing to do, not an error.
+
+    The distinction matters: the sleep cycle treats a raise as a failed cycle,
+    so a fresh brain must not be reported as broken.
+    """
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE memories (id INTEGER PRIMARY KEY, timestamp TEXT, text TEXT)")
+    con.execute("INSERT INTO memories VALUES (1,'2026-01-01','so uma')")
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(
+        dream, "_safe_ollama_chat", lambda *a, **kw: pytest.fail("asked the model")
+    )
+    assert dream._consolidate_memories() is False
+
+
+def test_one_failing_phase_does_not_abort_the_night(db, monkeypatch):
+    """Consolidate fails, the graph dream and the research still run.
+
+    Before the phases were isolated, an exception in the merge ended
+    perform_dreaming before the research half, so a slow model cost the night
+    its whole second half.
+    """
+    called = []
+    monkeypatch.setattr(dream, "DREAM_ENABLED", True)
+    monkeypatch.setattr(dream, "GMIF_DREAM_ENABLED", True)
+    monkeypatch.setattr(dream, "_reduce_to_concepts", lambda: called.append("reduce"))
+    monkeypatch.setattr(dream, "_dedupe_memories", lambda: called.append("dedupe"))
+    monkeypatch.setattr(
+        dream,
+        "_consolidate_memories",
+        lambda: (_ for _ in ()).throw(RuntimeError("LLM inacessível")),
+    )
+    monkeypatch.setattr(
+        dream, "_optimize_graph", lambda **_: called.append("graph")
+    )
+    monkeypatch.setattr(dream, "_research_half", lambda mode="auto": called.append("research"))
+
+    dream.perform_dreaming()
+
+    assert called == ["reduce", "dedupe", "graph", "research"], called
+
+
+def _sleep_client(monkeypatch, tmp_path):
+    """A test client for /admin/brain/sleep with the loopback identity."""
+    from pathlib import Path
+
+    from src.api import admin as admin_mod
+    from src.api.routes import create_app
+
+    ident = {"role": "admin", "email": "owner@example.invalid"}
+    monkeypatch.setattr(admin_mod, "BRAIN_DB_PATH", Path(tmp_path / "brain.db"))
+    monkeypatch.setattr(admin_mod, "_current_user_data", lambda: ident)
+    monkeypatch.setattr(admin_mod, "_current_user", lambda: "owner@example.invalid")
+    monkeypatch.setattr(admin_mod, "_bypass_or_none", lambda: ident)
+    app = create_app()
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def _wait_for_sleep_cycle(timeout=15.0):
+    """The endpoint returns 202 and runs the cycle in a thread."""
+    from src.api import admin as admin_mod
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = admin_mod._LAST_SLEEP_CYCLE.get("state") or {}
+        if state.get("status") in {"done", "failed"}:
+            return state
+        time.sleep(0.05)
+    raise AssertionError("the sleep cycle never reached a terminal state")
+
+
+def test_the_sleep_cycle_does_not_consolidate_twice(db, monkeypatch, tmp_path):
+    """The manual cycle ran the merge twice: 40 rows removed, summary re-merged.
+
+    `_run_sleep_cycle` stepped `_consolidate_memories` and `_optimize_graph`,
+    then called `perform_dreaming` for its "dream" step -- which runs both of
+    them again. So one press of "Dormir e Sonhar" deleted up to 40 memories
+    instead of 20, and the second pass consolidated the summary the first pass
+    had just written. That is the opposite of removing redundancy, and it is why
+    a manual cycle was more destructive than a nightly one.
+    """
+    calls = []
+
+    def _record(name, returns=True):
+        def _fn(*a, **kw):
+            calls.append(name)
+            return returns
+        return _fn
+
+    monkeypatch.setattr(dream, "GMIF_DREAM_ENABLED", True)
+    monkeypatch.setattr(dream, "_reduce_to_concepts", _record("_reduce_to_concepts"))
+    monkeypatch.setattr(dream, "_dedupe_memories", _record("_dedupe_memories"))
+    monkeypatch.setattr(dream, "_consolidate_memories", _record("_consolidate_memories"))
+    monkeypatch.setattr(dream, "_optimize_graph", _record("_optimize_graph"))
+    monkeypatch.setattr(dream, "_research_half", _record("_research_half"))
+
+    import src.brain.reconcile as reconcile_mod
+    monkeypatch.setattr(
+        reconcile_mod, "reconcile_refs", lambda path: {"pending": 0, "relinked": 0}
+    )
+
+    client = _sleep_client(monkeypatch, tmp_path)
+    assert client.post("/admin/brain/sleep").status_code == 202
+    state = _wait_for_sleep_cycle()
+
+    assert state["status"] == "done", state
+    for phase in ("_consolidate_memories", "_optimize_graph"):
+        assert calls.count(phase) == 1, (
+            f"{phase} ran {calls.count(phase)} times in one cycle: {calls}"
+        )
+    assert calls.count("_research_half") == 1, calls
+    assert calls.index("_reduce_to_concepts") < calls.index("_consolidate_memories"), (
+        "concepts must be extracted before the merge deletes the rows that "
+        f"held them, or the concepts are lost once per press: {calls}"
+    )
+    assert calls.index("_dedupe_memories") < calls.index("_consolidate_memories"), (
+        "duplicates are removed before the merge, not after: " f"{calls}"
+    )
+
+
+def test_the_sleep_cycle_records_a_failed_merge_as_a_failed_step(db, monkeypatch, tmp_path):
+    """An unreachable model must show up in /brain/sleep/status as a failure.
+
+    The step used to be reported as `ok` after three minutes of timeouts,
+    because `_consolidate_memories` swallowed the error. The status endpoint
+    exists so that this is visible.
+    """
+    monkeypatch.setattr(dream, "GMIF_DREAM_ENABLED", False)
+    monkeypatch.setattr(dream, "_dedupe_memories", lambda: None)
+    monkeypatch.setattr(dream, "_reduce_to_concepts", lambda: None)
+    monkeypatch.setattr(
+        dream,
+        "_consolidate_memories",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("nenhum host Ollama")),
+    )
+
+    import src.brain.reconcile as reconcile_mod
+    monkeypatch.setattr(
+        reconcile_mod, "reconcile_refs", lambda path: {"pending": 0}
+    )
+
+    client = _sleep_client(monkeypatch, tmp_path)
+    assert client.post("/admin/brain/sleep").status_code == 202
+    state = _wait_for_sleep_cycle()
+
+    step = state["steps"]["consolidate_memories"]
+    assert step["ok"] is False, f"a failed merge was reported as ok: {state}"
+    assert "Ollama" in step["error"], state

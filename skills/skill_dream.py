@@ -166,15 +166,29 @@ def _archive_purged_memories(conn, rows, reason="dream_consolidation"):
 
 
 def _consolidate_memories():
-    """ Funde memórias recentes e purga redundâncias. """
+    """Funde memórias recentes e purga redundâncias.
+
+    Returns True when a merge was written, False when there was legitimately
+    nothing to do (fewer than five rows). Raises on a real failure: an
+    unreachable model, or a reply with no `memoria_consolidada`.
+
+    It used to catch every exception and only print. That made an LLM timeout
+    indistinguishable from a successful merge: /admin/brain/sleep/status
+    reported the consolidate step as `ok` after 180 seconds while the memory
+    count did not move and nothing was archived, which is exactly the "it says
+    it worked but the brain did not change" the owner saw. The admin cycle
+    records each step's outcome and exists so a stalled cycle is visible, so
+    the cause has to reach it. perform_dreaming isolates this phase, so raising
+    here no longer aborts a night.
+    """
     print("🧠 [Dream] A consolidar sombras do passado...")
-    conn = None
+    conn = sqlite3.connect(config.DB_PATH)
     try:
-        conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT id, timestamp, text FROM memories ORDER BY id DESC LIMIT 20")
         rows = cursor.fetchall()
-        if len(rows) < 5: return
+        if len(rows) < 5:
+            return False
 
         ids_to_purge = [r[0] for r in rows]
         memory_bundle = [{"ts": r[1], "content": r[2]} for r in reversed(rows)]
@@ -190,21 +204,26 @@ def _consolidate_memories():
         ans = _safe_ollama_chat(
             prompt, "És o Arquiteto de Memória do Phantasma. Sê melancólico e preciso."
         )
+        if not ans:
+            raise RuntimeError(
+                "nenhum host Ollama respondeu a tempo: sem resposta não há consolidação"
+            )
         merged = _extract_json(ans)
+        if not (merged and 'memoria_consolidada' in merged):
+            raise RuntimeError("a resposta do modelo não trouxe 'memoria_consolidada'")
 
-        if merged and 'memoria_consolidada' in merged:
-            archived = _archive_purged_memories(conn, rows)
-            marks = ",".join(["?"] * len(ids_to_purge))
-            cursor.execute(f"DELETE FROM memories WHERE id IN ({marks})", ids_to_purge)
-            mem = _as_memory(merged['memoria_consolidada'],
-                             tags=merged.get('tags'))
-            if mem:
-                save_to_rag(mem)
-            conn.commit()
-            print(f"🧠 [Dream] Consolidação terminada: {archived} memórias arquivadas em memories_purged.")
-    except Exception as e: print(f"❌ Erro Consolidação: {e}")
+        archived = _archive_purged_memories(conn, rows)
+        marks = ",".join(["?"] * len(ids_to_purge))
+        cursor.execute(f"DELETE FROM memories WHERE id IN ({marks})", ids_to_purge)
+        mem = _as_memory(merged['memoria_consolidada'],
+                         tags=merged.get('tags'))
+        if mem:
+            save_to_rag(mem)
+        conn.commit()
+        print(f"🧠 [Dream] Consolidação terminada: {archived} memórias arquivadas em memories_purged.")
+        return True
     finally:
-        if conn: conn.close()
+        conn.close()
 
 
 def _dedupe_memories():
@@ -419,30 +438,44 @@ def _research_gap(gap_type, gap_data):
     GMIF_DESIRED_LEVEL here and passed on explicitly: the previous version
     computed it in this function and then referenced it from
     _apply_research_to_graph, where it did not exist.
+
+    The templates are lambdas on purpose. As a dict of f-strings they were built
+    eagerly, so every gap type formatted its own prompt on every call -- and
+    `weak_edge` read `gap_data['label']`, a key that only `weak_edges` and
+    `causal_gaps` entries carry. `disconnected_pairs` entries hold source /
+    target / shared_words, and `missing_requirements` entries hold node /
+    node_key. So researching a disconnected pair raised
+    `KeyError: 'label'` before the `gap_type not in templates` guard was even
+    reached, and `_optimize_graph` died on the first gap of the cycle. On prod
+    that meant the whole GMIF research half never ran: `weak_edges` and
+    `causal_gaps` were empty and `disconnected_pairs` was the only non-empty
+    category, so the one thing that could have triggered research was the one
+    thing that crashed. The caller swallows the exception and records the step
+    as failed, which is why it read as a slow cycle rather than a broken one.
     """
     templates = {
-        'weak_edge': (
-            f"Gera uma query de pesquisa para entender a relação '{gap_data['label']}' "
-            f"entre '{gap_data['source']}' e '{gap_data['target']}'. Apenas a query, sem aspas."
+        'weak_edge': lambda g: (
+            f"Gera uma query de pesquisa para entender a relação '{g['label']}' "
+            f"entre '{g['source']}' e '{g['target']}'. Apenas a query, sem aspas."
         ),
-        'disconnected_pair': (
-            f"Gera uma query de pesquisa sobre a relação entre '{gap_data['source']}' e "
-            f"'{gap_data['target']}' (palavras comuns: {gap_data['shared_words']}). "
+        'disconnected_pair': lambda g: (
+            f"Gera uma query de pesquisa sobre a relação entre '{g['source']}' e "
+            f"'{g['target']}' (palavras comuns: {g['shared_words']}). "
             f"Apenas a query."
         ),
-        'missing_requirement': (
-            f"Gera uma query de pesquisa sobre o que '{gap_data['node']}' depende ou "
+        'missing_requirement': lambda g: (
+            f"Gera uma query de pesquisa sobre o que '{g['node']}' depende ou "
             f"requer para ser válido. Apenas a query."
         ),
-        'causal_gap': (
+        'causal_gap': lambda g: (
             f"Gera uma query para encontrar mecanismos causais que expliquem como "
-            f"'{gap_data['source']}' leva a '{gap_data['target']}'. Apenas a query."
+            f"'{g['source']}' leva a '{g['target']}'. Apenas a query."
         ),
     }
     if gap_type not in templates:
         return None
 
-    query = _safe_ollama_chat(templates[gap_type], "Especialista em Pesquisa Científica.")
+    query = _safe_ollama_chat(templates[gap_type](gap_data), "Especialista em Pesquisa Científica.")
     if not query:
         return None
 
@@ -634,13 +667,37 @@ def perform_dreaming(mode="auto"):
     # without losing a concept.
     _dedupe_memories()
 
-    _consolidate_memories()
+    # Each phase is isolated: on a night where the model is slow, a failed
+    # merge must not take the graph work or the research down with it, and vice
+    # versa. Before this, one exception in the merge aborted the whole night.
+    try:
+        _consolidate_memories()
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ [Dream] Consolidação falhou: {exc}")
 
     # The analysis/research half. materialize=False: the concepts were already
     # extracted above, and the filter has nothing new to index afterwards (the
     # consolidation's summary carries no tags by construction).
-    _optimize_graph(materialize=False)
+    try:
+        _optimize_graph(materialize=False)
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ [Dream] Etapa de grafo falhou: {exc}")
 
+    _research_half(mode)
+
+
+def _research_half(mode="auto"):
+    """The news/web phase alone, without the phases above it.
+
+    Split out of perform_dreaming because the admin sleep cycle runs each phase
+    as its own step so /admin/brain/sleep/status can name the one that stalled.
+    That cycle called perform_dreaming for its "dream" step, which re-ran
+    _reduce_to_concepts, _dedupe_memories, _consolidate_memories and
+    _optimize_graph -- so one manual press consolidated twice (up to 40 rows
+    removed, the second pass merging the summary the first had just written)
+    and dreamed the graph twice. The step's own comment described it as "the
+    dreaming half: news and web research", so this is what it meant.
+    """
     if mode == "news":
         _perform_news_dream()
     elif mode == "web":
