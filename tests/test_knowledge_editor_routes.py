@@ -125,3 +125,81 @@ def test_menu_no_longer_offers_persona_or_knowledge(client):
     nav = body.split("</nav>")[0]
     assert "/admin/persona" not in nav, "persona is back in the menu"
     assert "/admin/brain/knowledge" not in nav, "knowledge editor is back in the menu"
+
+
+def test_the_knowledge_page_is_not_the_env_editor(client):
+    """/admin/brain/knowledge used to render the Configuração (.env) page.
+
+    ADMIN_TEMPLATE -- the base every derived page is built on -- was a verbatim
+    copy of the .env editor: same <title>, same heading, the whole
+    CHAVE=VALOR textarea and the {{ env }} it needs. The knowledge editor was
+    ADMIN_TEMPLATE + its own markup, so the env form came first and the memory
+    editor was appended below it.
+
+    So the owner's own report -- opening /admin/brain/knowledge?mem_id=85 and
+    being shown "Configuração (.env)", "Edite as variáveis de ambiente" and a
+    textarea for CHAVE=VALOR -- was not a misclick or a bad id. The page they
+    were trying to reach had the wrong page on it. Answered 200 the whole time,
+    so nothing looked broken from the outside.
+
+    Asserted on the absence of the env form, because its presence is what made
+    the memory unreachable.
+    """
+    body = client.get("/admin/brain/knowledge?mem_id=1").get_data(as_text=True)
+
+    assert 'name="env"' not in body, (
+        "the knowledge page is rendering the .env editor: it inherits it from "
+        "ADMIN_TEMPLATE"
+    )
+    assert "variáveis de ambiente" not in body
+    assert "Configuração (.env)" not in body
+    # And it is still the memory editor it claims to be.
+    assert "Editar conhecimento" in body, body[:400]
+    assert 'name="text"' in body
+
+
+def test_opening_a_memory_by_id_shows_that_memory(client):
+    """The reason the owner used ?mem_id= in the first place.
+
+    A silent failure here is what made the env editor look like the feature:
+    the id was in the URL and the page answered 200 either way.
+    """
+    body = client.get("/admin/brain/knowledge?mem_id=1").get_data(as_text=True)
+    assert "o gato chama-se Bimby" in body, (
+        "mem_id=1 did not put that memory in the editor"
+    )
+
+
+def test_the_env_editor_is_still_its_own_page(client):
+    """Splitting the shell out must not cost /admin/env its editor.
+
+    The route is /admin/env, not /admin/config: /admin/config is the separate
+    categorized-settings page and has its own template.
+    """
+    body = client.get("/admin/env").get_data(as_text=True)
+    assert 'name="env"' in body, "the .env editor lost its textarea"
+    assert "Configuração (.env)" in body
+
+
+def test_no_admin_page_leaks_the_env_form_unless_it_is_the_env_editor(client):
+    """The bug was structural: a base template carrying another page's body.
+
+    ADMIN_TEMPLATE is used by two pages. Neither is the env editor, so neither
+    may contain its form, and both must still open and close one document.
+
+    Counted with a regex rather than `body.count("<html")`: every template here
+    carries the WCAG comment "lang em <html> e WCAG 3.1.1", so a naive count
+    sees two and reports a nesting bug that is not there.
+    """
+    import re
+
+    for path in ("/admin/brain/knowledge", "/admin/persona"):
+        body = client.get(path).get_data(as_text=True)
+        assert 'name="env"' not in body, f"{path} renders the .env editor"
+        # Strip HTML comments first: every template here carries the WCAG note
+        # "lang em <html> e WCAG 3.1.1", which is text, not a tag.
+        stripped = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+        assert len(re.findall(r"<html[ >]", stripped)) == 1, (
+            f"{path} nests or loses the document"
+        )
+        assert body.count("</html>") == 1, f"{path} never closes the document"

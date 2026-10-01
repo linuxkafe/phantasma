@@ -795,9 +795,42 @@ ADMIN_TEMPLATE = (
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 </head>
 <body>
+<!-- Only the document shell lives here. Each page brings its own title,
+     container, heading and flashes, exactly as CONFIG_TEMPLATE and the rest
+     always did -- the two pages built on this one already carried a
+     `container` and re-rendered `nav_menu`, so a shell that emitted them would
+     have doubled the nav and nested two containers. -->
+"""
+)
+
+# The .env editor used to BE this template. It was a verbatim copy of the
+# Configuração page -- same title, same heading, the whole textarea form and
+# the {{ env }} it needs -- and every page built on top of it inherited the lot,
+# with the page's own content appended after it.
+#
+# So /admin/brain/knowledge?mem_id=85 answered 200 and rendered the env editor
+# with the memory editor dumped underneath it: the owner arrived at a memory,
+# was shown "Configuração (.env)" and a textarea for CHAVE=VALOR, and never
+# saw the memory they clicked. Same for the persona/reactions page, whose own
+# comment said the env editor was the *alternative* it was avoiding.
+#
+# The name said "ADMIN_TEMPLATE" and it was used as a base, so it was always
+# meant to be the shell. It is now just the shell -- title, heading and flashes
+# belong to the page, as in CONFIG_TEMPLATE and the rest. The env editor keeps
+# its own template below and is still what config_manager renders.
+_ENV_EDITOR_TEMPLATE = (
+    ADMIN_TEMPLATE
+    + """
 <title>Admin – Configuração | pHantasma</title>
 <div class="container">
     {{ nav_menu | safe }}
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul class="flash-messages">
+          {% for m in messages %}<li>{{ m }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
     <div class="header">
         <h1>Configuração (.env)</h1>
         <div class="user-info">
@@ -2539,7 +2572,7 @@ def env_editor():
         _current_user_data()["role"] if _current_user_data() else "user",
     )
     return render_template_string(
-        ADMIN_TEMPLATE, user=_current_user(), env=env_text, nav_menu=nav_menu
+        _ENV_EDITOR_TEMPLATE, user=_current_user(), env=env_text, nav_menu=nav_menu
     )
 
 
@@ -2552,6 +2585,7 @@ def env_editor():
 _PERSONA_TEMPLATE = (
     ADMIN_TEMPLATE
     + """
+<title>Admin – Persona e reacções | pHantasma</title>
 <form method="post" class="container" style="max-width: 760px;">
   {{ nav_menu | safe }}
   <div class="header"><h1>Persona e reacções</h1></div>
@@ -2602,6 +2636,8 @@ _PERSONA_TEMPLATE = (
     </p>
   </section>
 </form>
+</body>
+</html>
 """
 )
 
@@ -2648,6 +2684,7 @@ def persona_editor():
 _MEMORY_EDIT_TEMPLATE = (
     ADMIN_TEMPLATE
     + """
+<title>Admin – Editar conhecimento | pHantasma</title>
 <div class="container" style="max-width: 1000px;">
   {{ nav_menu | safe }}
   <div class="header"><h1>Editar conhecimento</h1></div>
@@ -2751,6 +2788,8 @@ _MEMORY_EDIT_TEMPLATE = (
     <button type="submit" name="action" value="delete">Apagar</button>
   </form>
 </div>
+</body>
+</html>
 """
 )
 
