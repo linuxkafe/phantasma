@@ -3297,7 +3297,18 @@ def brain_sleep():
             if _dream.GMIF_DREAM_ENABLED:
                 _step("reduce_to_concepts", _dream._reduce_to_concepts)
             _step("dedupe_memories", _dream._dedupe_memories)
-            _step("consolidate_memories", _dream._consolidate_memories)
+            # Guarded like the two below, for the same reason: the graph dream
+            # and the research do not depend on the merge, so a model too slow
+            # to answer the consolidation prompt must not cost the cycle its
+            # other halves. Left unguarded it failed the whole cycle and
+            # gmif_dream/dream never ran -- which is how a 180s timeout in one
+            # step could hide a graph that still needed dreaming. The step is
+            # still recorded as failed, so nothing is hidden; it just no longer
+            # takes the rest down with it.
+            try:
+                _step("consolidate_memories", _dream._consolidate_memories)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Consolidation step failed: %s", exc)
             # A GMIF failure must not erase the classification work above, so
             # it is recorded and swallowed rather than aborting the cycle.
             try:

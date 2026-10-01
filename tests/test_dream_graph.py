@@ -522,6 +522,8 @@ def test_the_sleep_cycle_records_a_failed_merge_as_a_failed_step(db, monkeypatch
     monkeypatch.setattr(dream, "GMIF_DREAM_ENABLED", False)
     monkeypatch.setattr(dream, "_dedupe_memories", lambda: None)
     monkeypatch.setattr(dream, "_reduce_to_concepts", lambda: None)
+    monkeypatch.setattr(dream, "_optimize_graph", lambda **_: None)
+    monkeypatch.setattr(dream, "_research_half", lambda mode="auto": None)
     monkeypatch.setattr(
         dream,
         "_consolidate_memories",
@@ -540,3 +542,46 @@ def test_the_sleep_cycle_records_a_failed_merge_as_a_failed_step(db, monkeypatch
     step = state["steps"]["consolidate_memories"]
     assert step["ok"] is False, f"a failed merge was reported as ok: {state}"
     assert "Ollama" in step["error"], state
+
+
+def test_a_failed_merge_does_not_cost_the_cycle_its_graph_and_research(
+    db, monkeypatch, tmp_path
+):
+    """A model too slow to merge must not stop the graph from being dreamed.
+
+    The consolidation prompt is 20 memories of JSON, measured at ~118s on the
+    primary host, against a 90s per-host budget. So it times out, and when it
+    did the unguarded `_step` failed the whole cycle: gmif_dream and dream
+    never ran, and the graph kept the disconnected pairs that only the research
+    half can resolve. The step is still reported as failed -- nothing is
+    hidden -- it just no longer takes the other halves down with it.
+    """
+    calls = []
+
+    monkeypatch.setattr(dream, "GMIF_DREAM_ENABLED", True)
+    monkeypatch.setattr(dream, "_reduce_to_concepts", lambda: calls.append("reduce"))
+    monkeypatch.setattr(dream, "_dedupe_memories", lambda: calls.append("dedupe"))
+    monkeypatch.setattr(
+        dream,
+        "_consolidate_memories",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("nenhum host Ollama")),
+    )
+    monkeypatch.setattr(
+        dream, "_optimize_graph", lambda **_: calls.append("graph")
+    )
+    monkeypatch.setattr(dream, "_research_half", lambda mode="auto": calls.append("research"))
+
+    import src.brain.reconcile as reconcile_mod
+    monkeypatch.setattr(
+        reconcile_mod, "reconcile_refs", lambda path: {"pending": 0}
+    )
+
+    client = _sleep_client(monkeypatch, tmp_path)
+    assert client.post("/admin/brain/sleep").status_code == 202
+    state = _wait_for_sleep_cycle()
+
+    assert state["status"] == "done", state
+    assert state["steps"]["consolidate_memories"]["ok"] is False, state
+    assert "graph" in calls and "research" in calls, (
+        f"the merge failure took the other halves down with it: {calls}"
+    )
