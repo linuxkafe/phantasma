@@ -7,6 +7,9 @@ import socket
 import sys
 import threading
 import tempfile
+import logging
+
+logger = logging.getLogger("phantasma.tuya")
 
 try:
     import tinytuya
@@ -40,6 +43,31 @@ ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
 STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura", "quanto", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala", "luzes", "fichas"]
+
+# "quarto" and "sala" are in BASE_NOUNS, which made them a licence to control
+# anything in that room. The prompt and the nickname were compared for ANY
+# shared base noun, and the room word was shared by definition -- so "ligar o
+# candeeiro do quarto" matched `Sensor do Quarto`, and the owner switched a
+# THERMOMETER on when he asked for a lamp. The skill answered "Sensor do Quarto
+# ligado", which was true of what it touched and useless as an answer.
+#
+# What the branch was for: "liga a luz do quarto" -> a light in the Quarto.
+# So the noun the owner used has to be a DEVICE type, and it has to appear in
+# the nickname. A room word can qualify the room but never stand in for the
+# device.
+DEVICE_NOUNS = ["luz", "luzes", "lâmpada", "lampada", "candeeiro", "abajur",
+                "desumidificador", "exaustor", "ventoinha", "ventilador",
+                "tomada", "ficha", "forno", "carregador", "sensor", "aspirador"]
+
+
+def _matches_a_device_noun(prompt_lower, nickname_lower):
+    """Does this nickname's device type appear in what the owner asked for?
+
+    Returns False for anything that is not a device type, which is what stops a
+    room word from standing in for one.
+    """
+    return any(noun in prompt_lower and noun in nickname_lower
+               for noun in DEVICE_NOUNS)
 VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.5]
 
 def _get_tuya_triggers():
@@ -276,7 +304,7 @@ def handle(user_prompt_lower, user_prompt_full):
             if mentioned_loc and mentioned_loc in nick_l:
                 if is_sensor_query and "sensor" in nick_l:
                     targets.append((nick, conf)); break
-                elif any(noun in user_prompt_lower for noun in BASE_NOUNS) and any(noun in nick_l for noun in BASE_NOUNS):
+                elif _matches_a_device_noun(user_prompt_lower, nick_l):
                     targets.append((nick, conf)); break
 
     # 3. Lógica Genérica (Fallback): "Liga o exaustor" -> Liga TODOS os exaustores
@@ -286,6 +314,19 @@ def handle(user_prompt_lower, user_prompt_full):
                 for nick, conf in config.TUYA_DEVICES.items():
                     if noun in nick.lower(): targets.append((nick, conf))
                 if targets: break
+
+    # A thermometer is not something you switch. Both branches above can land
+    # on a sensor -- "sensor" is a device noun and a room full of sensors
+    # shares a room word -- and answering "Sensor do Quarto ligado" for a lamp
+    # request is worse than saying nothing: it looks like it worked.
+    if targets and action in ('on', 'off'):
+        switched = [t for t in targets if not _is_sensor(t[0])]
+        if not switched:
+            logger.warning(
+                "Refused to switch %s: it only measures", targets[0][0],
+            )
+            return f"O {targets[0][0]} mede, não se liga."
+        targets = switched
 
     if not targets: return None
 

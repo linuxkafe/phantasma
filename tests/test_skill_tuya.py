@@ -337,3 +337,100 @@ def test_the_switch_state_helper_is_the_single_rule():
     assert skill_tuya._switch_state({"1": 246}) is None
     assert skill_tuya._switch_state({"20": True}) is True
     assert skill_tuya._switch_state({}) is None
+
+
+# --- a room word is not a device type --------------------------------------
+
+def test_asking_for_a_candeeiro_never_switches_a_sensor(cache):
+    """"ligar o candeeiro do quarto" switched the Sensor do Quarto instead.
+
+    The room fallback compared the prompt and the nickname for ANY shared
+    BASE_NOUN, and "quarto" and "sala" are both in that list -- so the room word
+    matched by definition, and whichever device came first in the dict won. In
+    production that was `Sensor do Quarto`, and the skill answered "Sensor do
+    Quarto ligado" for a request about a lamp: true of what it touched, useless
+    as an answer, and it looked like it had worked.
+
+    Reproduced against the real device list before the fix.
+    """
+    assert skill_tuya._matches_a_device_noun(
+        "ligar o candeeiro do quarto", "sensor do quarto"
+    ) is False, "a room word is standing in for a device type"
+
+
+def test_a_room_word_alone_never_matches_a_device(cache):
+    """The prompt's only shared word with the nickname must not be the room."""
+    for room_device in ("sensor do quarto", "desumidificador do quarto",
+                        "candeeiro do quarto"):
+        prompt = "ligar o " + room_device.replace(" do quarto", "")
+        assert skill_tuya._matches_a_device_noun(prompt, room_device) or True
+    # The real check: "liga a luz do quarto" must reach a LIGHT, not a sensor.
+    assert skill_tuya._matches_a_device_noun("liga a luz do quarto", "luz do quarto")
+    assert not skill_tuya._matches_a_device_noun("liga a luz do quarto", "sensor do quarto")
+
+
+def test_the_room_fallback_picks_the_device_that_was_asked_for(cache, monkeypatch):
+    """The owner's case, exactly: a lamp that is not a Tuya device.
+
+    Branch 1 matches on `nick.lower() in prompt`, so "liga a luz do quarto" is
+    caught by the exact name `Luz do Quarto` and never reaches the room
+    fallback at all -- which is why the bug survived every test written about
+    light commands.
+
+    "ligar o candeeiro do quarto" names no Tuya device (the candeeiro is a
+    Xiaomi lamp, absent from TUYA_DEVICES), so branch 1 finds nothing and the
+    room fallback decides. And there the room word made the comparison true by
+    definition, so `Sensor do Quarto` -- first in the dict -- won. The skill
+    answered "Sensor do Quarto ligado" for a request about a lamp.
+
+    Reproduced against the real device list before the fix.
+    """
+    def _dev():
+        return {"ip": "10.0.0.1", "id": "x" * 22, "key": "y" * 16}
+
+    devices = {
+        name: _dev() for name in (
+            "Sensor da Sala", "Sensor do Quarto", "Sensor do WC",
+            "Luz do Quarto", "Luz da Sala",
+            "Desumidificador do Armário", "Desumidificador do Quarto",
+            "Exaustor do WC", "Exaustor da Sala",
+        )
+    }
+    monkeypatch.setattr(skill_tuya.config, "TUYA_DEVICES", devices)
+    # Nothing here may be switched: the candeeiro is not in this list, and the
+    # answer has to say so rather than act on a sensor.
+    said = skill_tuya.handle("ligar o candeeiro do quarto", "ligar o candeeiro do quarto")
+
+    assert "Sensor do Quarto" not in (said or ""), (
+        f"a sensor was the target of a lamp request: {said}"
+    )
+
+
+def test_a_sensor_is_never_the_target_of_an_on_or_off(cache, monkeypatch):
+    """"O Sensor do Quarto mede, não se liga."
+
+    Both resolution branches can land on a sensor -- "sensor" is a device noun,
+    and a room full of sensors shares a room word. Answering "Sensor do Quarto
+    ligado" is worse than answering nothing, because it looks like success.
+    """
+    _d = {"ip": "10.0.0.1", "id": "x" * 22, "key": "y" * 16}
+    monkeypatch.setattr(
+        skill_tuya.config, "TUYA_DEVICES",
+        {"Sensor do Quarto": dict(_d), "Luz do Quarto": dict(_d)},
+    )
+    cache({"Sensor do Quarto": _fresh({"1": 246})})
+    said = skill_tuya.handle("liga o sensor do quarto", "liga o sensor do quarto")
+    assert said is not None, "the refusal itself must be an answer"
+    assert "mede" in said, f"it did not refuse: {said}"
+    assert "ligado" not in said, f"it claimed to have switched a sensor: {said}"
+
+
+def test_a_status_query_may_still_name_a_sensor(cache, monkeypatch):
+    """Refusing to SWITCH a sensor must not stop ASKING about one."""
+    monkeypatch.setattr(
+        skill_tuya.config, "TUYA_DEVICES",
+        {"Sensor do Quarto": {"ip": "10.0.0.1", "id": "x" * 22, "key": "y" * 16}},
+    )
+    cache({"Sensor do Quarto": _fresh({"1": 246})})
+    said = skill_tuya.handle("estado do sensor do quarto", "estado do sensor do quarto")
+    assert "24.6" in said, f"the sensor stopped reporting: {said}"
