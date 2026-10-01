@@ -2808,6 +2808,15 @@ def knowledge_editor():
         op = request.form.get("op", "")
         actor = _current_user()
         conn = sqlite3.connect(BRAIN_DB_PATH)
+        # The audit rows below are read with dict(row), which only works on a
+        # sqlite3.Row. Without this the connection hands back plain tuples and
+        # every write in this branch died on
+        # `TypeError: cannot convert dictionary update sequence element #0` --
+        # so deleting a node, editing a memory and deleting a memory each
+        # answered 500, and the owner got Flask's error page instead of a
+        # result. The GET branch has always set this; only the POST branch
+        # opened its own connection without it.
+        conn.row_factory = sqlite3.Row
         try:
             if op == "delete_node":
                 nid = request.form.get("node_id", type=int)
@@ -2859,12 +2868,22 @@ def knowledge_editor():
                 if not row:
                     flash("Memoria nao encontrada.")
                 else:
+                    before = dict(row)
                     conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
+                    # Six columns, six values. This said
+                    # VALUES (datetime('now'), ?, 'memory.delete', ?, NULL) --
+                    # four values for six columns, with the op and the
+                    # before_json never filled. sqlite rejects it with
+                    # "5 values for 6 columns", and because the DELETE above had
+                    # already run in the same transaction, the memory was gone
+                    # and the audit absent: the change happened without a trace
+                    # of what it was. delete_node and save_memory have always
+                    # had the right shape; this one branch did not.
                     conn.execute(
                         "INSERT INTO graph_edit_audit "
                         "(at, actor, op, target, before_json, after_json) "
-                        "VALUES (datetime('now'), ?, 'memory.delete', ?, NULL)",
-                        (actor, f"memory:{mid}", json.dumps(dict(row), default=str)),
+                        "VALUES (datetime('now'), ?, 'memory.delete', ?, ?, NULL)",
+                        (actor, f"memory:{mid}", json.dumps(before, default=str)),
                     )
                     conn.commit()
                     flash(f"Memoria {mid} apagada.")

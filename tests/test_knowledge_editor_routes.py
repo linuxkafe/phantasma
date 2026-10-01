@@ -203,3 +203,56 @@ def test_no_admin_page_leaks_the_env_form_unless_it_is_the_env_editor(client):
             f"{path} nests or loses the document"
         )
         assert body.count("</html>") == 1, f"{path} never closes the document"
+
+
+def test_deleting_a_memory_does_not_500(client, brain):
+    """Apagar uma memória devolveva 500, não um resultado.
+
+    O ramo POST de knowledge_editor abre a sua própria ligação sem
+    row_factory, e os três registos de auditoria fazem dict(row) -- que só
+    funciona sobre um sqlite3.Row. Com uma tuple, `dict(row)` levanta
+    `TypeError: cannot convert dictionary update sequence element #0 to a
+    sequence`, e o dono recebia a página de erro do Flask em vez da memória
+    apagada. O ramo GET punha o row_factory; só o POST o esquCIA.
+
+    Reproduzido em produção: 500 em /admin/brain/knowledge ao apagar.
+    """
+    resp = client.post(
+        "/admin/brain/knowledge",
+        data={"op": "delete_memory", "mem_id": "1", "action": "delete"},
+        follow_redirects=True,
+    )
+    assert resp.status_code == 200, resp.status
+    assert "Traceback" not in resp.get_data(as_text=True)
+    assert "Internal Server Error" not in resp.get_data(as_text=True)
+
+    con = sqlite3.connect(brain)
+    left = con.execute("SELECT COUNT(*) FROM memories WHERE id = 1").fetchone()[0]
+    audited = con.execute(
+        "SELECT COUNT(*) FROM graph_edit_audit WHERE op = 'memory.delete'"
+    ).fetchone()[0]
+    con.close()
+    assert left == 0, "the memory was not deleted"
+    assert audited == 1, "the delete was not written to the audit trail"
+
+
+def test_editing_a_memory_does_not_500(client):
+    """O mesmo caminho: editar a memória também lia a linha para a auditoria."""
+    resp = client.post(
+        "/admin/brain/knowledge",
+        data={"op": "save_memory", "mem_id": "1", "text": "o gato chama-se Lola",
+              "action": "save"},
+        follow_redirects=True,
+    )
+    assert resp.status_code == 200, resp.status
+    assert "Internal Server Error" not in resp.get_data(as_text=True)
+
+
+def test_deleting_a_node_does_not_500(client):
+    resp = client.post(
+        "/admin/brain/knowledge",
+        data={"op": "delete_node", "node_id": "71"},
+        follow_redirects=True,
+    )
+    assert resp.status_code == 200, resp.status
+    assert "Internal Server Error" not in resp.get_data(as_text=True)
