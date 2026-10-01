@@ -147,6 +147,27 @@ class LLMConfig:
     context_size: int = 4096
     system_prompt: str = ""
     threads: int = 4
+    # Per-call budget for the sleep/dream cycle only.
+    #
+    # Separate from `timeout` (OLLAMA_TIMEOUT, 600) for the reason that value
+    # has: a conversation may legitimately take minutes, but the dream chains
+    # several of these calls and the owner is watching one button on
+    # /admin/brain. This is per HOST, not per cycle, so a dead host still falls
+    # through to the next one in bounded time.
+    #
+    # It was 90 and that was too small: the consolidation prompt is 20 memories
+    # as JSON, measured at 111.5s for a 14.5k-character bundle and ~118s for a
+    # realistic one. So the merge timed out on the primary, the fallback (a CPU
+    # qwen3:8b) could not answer inside 260s either, and consolidation never ran
+    # on prod at all -- silently, until the sleep cycle started reporting the
+    # failure instead of claiming success. 300 clears the measured worst case
+    # with room for a busier GPU or a larger memory set.
+    #
+    # This has to exist for the .env line of the same name to do anything: the
+    # dream read `getattr(config, "DREAM_OLLAMA_TIMEOUT", 90)`, and config
+    # never defined it, so the environment override was dead and the dataclass
+    # default was the only value in force -- the same trap as AUDIO_AUTO_DETECT.
+    dream_timeout: int = 300
 
 
 @dataclass
@@ -613,6 +634,9 @@ class Config:
             os.getenv("OLLAMA_CONNECT_TIMEOUT", str(cfg.llm.connect_timeout))
         )
         cfg.llm.context_size = int(os.getenv("OLLAMA_CONTEXT_SIZE", str(cfg.llm.context_size)))
+        cfg.llm.dream_timeout = int(
+            os.getenv("DREAM_OLLAMA_TIMEOUT", str(cfg.llm.dream_timeout))
+        )
         cfg.llm.threads = int(os.getenv("OLLAMA_THREADS", str(cfg.llm.threads)))
 
         # TTS
@@ -813,6 +837,7 @@ RECORD_SECONDS = 7
 OLLAMA_CONTEXT_SIZE = config.llm.context_size
 
 OLLAMA_THREADS = config.llm.threads
+DREAM_OLLAMA_TIMEOUT = config.llm.dream_timeout
 WHISPER_THREADS = 4
 
 SEARXNG_URL = config.searxng_url

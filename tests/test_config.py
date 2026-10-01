@@ -112,3 +112,53 @@ if __name__ == "__main__":
     import pytest
 
     pytest.main([__file__, "-v"])
+
+
+class TestDreamTimeout:
+    """The sleep/dream per-call LLM budget must be a live setting.
+
+    `DREAM_OLLAMA_TIMEOUT` sat in the production .env with a comment explaining
+    it, and config.py never declared it. `_safe_ollama_chat` read it with
+    `getattr(config, "DREAM_OLLAMA_TIMEOUT", 90)`, so the environment line was
+    dead and the hardcoded 90 was the only value in force -- the same trap as
+    AUDIO_AUTO_DETECT. Editing the .env changed nothing, silently.
+
+    It mattered because 90 is below what the consolidation actually needs: the
+    prompt is 20 memories as JSON, measured at 111.5s for a 14.5k-character
+    bundle. So the merge timed out, the CPU fallback could not answer inside
+    260s either, and consolidation never ran on prod -- invisibly, because the
+    function caught the timeout and reported success.
+    """
+
+    def test_the_dream_timeout_has_a_real_default(self):
+        # Not 90: that is the value that made consolidation impossible.
+        assert Config().llm.dream_timeout >= 180
+
+    def test_the_env_override_is_not_dead(self, monkeypatch):
+        """The assertion the dead variable failed: the .env must win."""
+        monkeypatch.setenv("DREAM_OLLAMA_TIMEOUT", "45")
+        assert Config.from_env().llm.dream_timeout == 45
+
+    def test_the_dream_actually_reads_the_setting(self, monkeypatch):
+        """What skill_dream resolves must track the setting, not a literal.
+
+        Asserted on the value the consumer sees, because the bug was not a wrong
+        number in config.py but a name config never exposed.
+        """
+        import config as config_mod
+        from skills import skill_dream as dream
+
+        assert hasattr(config_mod, "DREAM_OLLAMA_TIMEOUT"), (
+            "config does not expose DREAM_OLLAMA_TIMEOUT, so the .env line of "
+            "that name is dead and the dream falls back to a hardcoded default"
+        )
+        monkeypatch.setenv("DREAM_OLLAMA_TIMEOUT", "45")
+        import importlib
+
+        reloaded = importlib.reload(config_mod)
+        try:
+            assert getattr(reloaded, "DREAM_OLLAMA_TIMEOUT") == 45
+        finally:
+            monkeypatch.delenv("DREAM_OLLAMA_TIMEOUT")
+            importlib.reload(config_mod)
+            importlib.reload(dream)
