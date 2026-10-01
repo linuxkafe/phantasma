@@ -229,3 +229,100 @@ Verificado antes de forçar:
 
 Forçado com `scripts/deploy.sh --force-host`. A partir daqui os dois
 ficheiros voltam a ser byte-idênticos.
+
+---
+
+## Pendências em aberto depois da sessão de 2026-10-01
+
+Registo do que ficou por decidir ou por fazer depois de
+`2b81839`, `5a94b35`, `9651a0b`, `bcf3937`, `7a4fea4` e `573a523`.
+Nada disto está a falhar em produção neste momento; são três decisões e um
+pedido de âmbito. (Ticket AES: T057.)
+
+### 1. Edição simplificada de `.env`, talvez no grafo 3D
+
+**Pedido do dono:** "Variáveis devia permitir edição simplificada
+diretamente, se possível até diretamente no gráfico 3D."
+
+**Estado:** não iniciado. `/admin/env` continua a ser um único `<textarea>` com
+o ficheiro `.env` inteiro, uma variável por linha.
+
+**Porque é mais do que parece:**
+
+- Um `POST` reescreve **todas** as variáveis de `.env`, não a que se editou.
+  Portanto "edição simplificada" não é um textarea mais bonito: é escrita por
+  chave, com validação por variável, e um caminho que não reescreve o ficheiro
+  inteiro a cada guarda.
+- `.env` é onde vivem as credenciais (`PHANTASMA_COMMAND_TOKEN`, chaves de API,
+  Discord). `CLAUDE.md` diz que é "o único sítio onde vivem valores de host".
+  Trazê-lo para o grafo 3D punha gestão de segredos a um clique de uma
+  superfície de visualização.
+- A armadilha já vista duas vezes nesta sessão: uma variável de ambiente que o
+  código não lê. `DREAM_OLLAMA_TIMEOUT` estava no `.env` de produção e era
+  morta. Qualquer variável exposta aqui precisa de um teste que prove que
+  editar aquilo muda mesmo o comportamento.
+
+**Decisões que faltam:**
+
+1. Que variáveis são seguras de expor? (as de dispositivo e visualização
+   talvez; segredos talvez não)
+2. "No grafo 3D" significa um painel nessa página, ou editar um nó do grafo?
+3. Escrita por chave com validação, ou aceitar o risco do ficheiro inteiro?
+
+### 2. `/api/graph/resolve` devolve 401 sob o bypass de loopback
+
+**Estado:** conhecido, por corrigir, **não foi mexido** por ser uma decisão de
+segurança.
+
+O botão "Aplicar" faz `POST /api/graph/resolve`. Esse path está em
+`_TOKEN_PATHS` (`src/api/routes.py:428`), e o `before_request` chama
+`_command_authorized()`, que aceita o token de comando ou uma sessão de browser
+— **mas não** o bypass de loopback. O bypass só abre `/admin/*`.
+
+Medido em produção: com o bypass activo (como entram a suite e o
+`deploy.sh`), o "Aplicar" responde sempre `401 Authorization required`. Com
+login real funciona.
+
+O botão esteve partido duas vezes — primeiro pelo `data-ref-mode` errado
+(`2b81839`), agora pela auth. Corrigi o primeiro e deixei o segundo de fora de
+propósito: alargar o bypass a `/api/graph/*` é alargar o que qualquer processo
+local pode escrever, e `CLAUDE.md` proíbe mexer nos testes de segurança por
+conta própria.
+
+**Opções:** (a) nada — com login real já funciona, e o bypass é para a suite;
+(b) o bypass valida também `/api/graph/*`, mantendo o log de WARNING;
+(c) o browser envia o token de comando, o que resolve sem mexer na auth.
+
+### 3. O GMIF promovou fragmentos de conversa a relações
+
+**Estado:** observado depois do ciclo de 2026-10-01, por corrigir.
+
+`gmif_dream` passou a correr (já não morre em `KeyError: 'label'`) e aplicou 3
+arestas novas, M1 → M2, como `dream_gmif_research`. Duas ligam lixo:
+
+```
+Olá! O nome "Bimby" parece ser associado a gatos que têm nomes próprios... -> Ah, a chuva...
+Olá! O nome "Bimby" parece...                                            -> Bom, parece que há um mistério aqui...
+```
+
+São fragmentos de conversa do LLM promovidos a nós do grafo. O portão de
+evidência aceitou-os, o que quer dizer que o teste não é forte o suficiente
+para isto. E algumas queries de pesquisa são degeneradas — uma citação de
+memória e até um `SELECT * FROM tabela WHERE` foram enviados ao SearXNG.
+
+**Risco:** cada ciclo pode acrescentar mais destas — `MAX_RESEARCH_PER_CYCLE`
+é 3.
+
+**Por abrir:** a decisão é sobre o que conta como evidência. Um nó cujo label
+é uma frase de conversa não deve ser promovível, e isso é um filtro no
+`_apply_research_to_graph` ou um teste no que o classificador aceita.
+
+### Registo de validação da sessão
+
+| | |
+|---|---|
+| produção | 1281 passed, 14 skipped; `/api/health` 200; seis componentes saudáveis |
+| dev | 1278 passed (os 17 erros de hotword são pré-existentes, falta o modelo .onnx) |
+| lint | limpo |
+| backups da `brain.db` | `/tmp/opencode/predeploy/`, um por deploy |
+| `.env` | `/tmp/opencode/env.bak.20261001-150556` |
