@@ -976,3 +976,121 @@ def test_the_rooms_stack_downwards_and_do_not_wrap_into_columns(page):
         by_y.setdefault(r["y"], []).append(r["room"])
     overlapping = {y: names for y, names in by_y.items() if len(names) > 1}
     assert not overlapping, f"rooms sharing a y are in one wrapped column: {overlapping}"
+
+
+# --- the tiles share the row, so the longest name cannot own it ------------
+
+def _room_tiles(page, room):
+    return page.evaluate(
+        """(room) => {
+            const r = [...document.querySelectorAll('.device-room')]
+                .find(x => x.querySelector('.room-name').textContent.trim() === room);
+            if (!r) return [];
+            return [...r.querySelectorAll('.device-toggle')].map(t => {
+                const b = t.getBoundingClientRect();
+                const lab = t.querySelector('.device-label');
+                return {
+                    name: t.title, w: Math.round(b.width), h: Math.round(b.height),
+                    x: Math.round(b.x), y: Math.round(b.y),
+                    marquee: !!lab && lab.classList.contains('marquee'),
+                };
+            });
+        }""",
+        room,
+    )
+
+
+def test_the_quarto_room_is_one_row_of_three(page):
+    """It was two rows, and the candeeiro was cut off entirely.
+
+    Measured before, at 375px: "Luz do Quarto" 163px, "Candeeiro do Quarto"
+    204px, "Desumidificador do Quarto" a full 375px on its own line. Tiles were
+    sized by their content (`flex-grow: 1` with an auto basis), so the longest
+    name in the room decided the width for everyone else.
+
+    Now they share the row equally, which is what `flex: 1 1 0` does -- a zero
+    basis, so the free space is shared instead of each tile first claiming what
+    its own text needs.
+    """
+    tiles = _room_tiles(page, "Quarto")
+    assert len(tiles) == 3, tiles
+    ys = {t["y"] for t in tiles}
+    assert len(ys) == 1, f"the Quarto room wraps onto more than one row: {tiles}"
+    widths = [t["w"] for t in tiles]
+    assert max(widths) - min(widths) <= 2, f"tiles are not equal: {tiles}"
+    assert max(widths) < 200, f"one tile is taking the whole row: {tiles}"
+
+
+def test_a_long_name_marquees_instead_of_stealing_width(page):
+    """The marquee already existed and had nothing to do.
+
+    applyLabelMarquee measures overflow and only moves a name that does not fit
+    -- but a tile as wide as its own text can never overflow, so it never
+    fired. Equal-width tiles make the overflow real. Asserted here because the
+    marquee has had tests for its mechanics and none for the case that makes it
+    necessary.
+    """
+    tiles = _room_tiles(page, "Quarto")
+    long_names = [t for t in tiles if len(t["name"]) > 14]
+    assert long_names, "the fixture no longer has a long name to test"
+    for t in long_names:
+        assert t["marquee"], f"a name too wide for its tile is not moving: {t}"
+
+
+def test_the_whole_strip_fits_without_a_scrollbar(page):
+    """The owner's preference, and what the shorter tiles were for."""
+    scroll = page.evaluate(
+        """() => { const d = document.getElementById('devices');
+                  return {scrollH: d.scrollHeight, clientH: d.clientHeight,
+                          scrollW: d.scrollWidth, innerW: innerWidth}; }"""
+    )
+    assert scroll["scrollH"] <= scroll["clientH"], (
+        f"the device strip needs a vertical scrollbar: {scroll}"
+    )
+    assert scroll["scrollW"] <= scroll["innerW"], (
+        f"the device strip scrolls sideways: {scroll}"
+    )
+
+
+def test_a_single_tile_room_does_not_span_the_whole_row(page):
+    """"Exaustor do WC" got a 375px tile for a 13-character name.
+
+    One child with `flex-grow: 1` takes everything, which reads as a layout
+    mistake rather than as a room with one device in it.
+    """
+    tiles = _room_tiles(page, "WC")
+    assert len(tiles) == 1, tiles
+    assert tiles[0]["w"] <= 200, f"a lone tile took the whole row: {tiles}"
+
+
+def test_the_touch_target_stays_above_the_floor(page):
+    """The tiles got smaller; the target must not.
+
+    44px is what makes a control usable with a phone in one hand, and it is
+    measured on the whole tile, so the padding is what gives way -- not the
+    target.
+    """
+    small = [t for r in ("Geral", "WC", "Sala", "Quarto")
+             for t in _room_tiles(page, r) if t["h"] < 44]
+    assert not small, f"tiles below the 44px touch floor: {small}"
+
+
+def test_a_candeeiro_is_not_drawn_as_a_ceiling_light(page):
+    """They shared one path, so the two Quarto tiles were the same picture."""
+    paths = page.evaluate(
+        """() => {
+            const out = {};
+            document.querySelectorAll('.device-toggle').forEach(t => {
+                const svg = t.querySelector('.device-icon svg');
+                if (svg) out[t.title] = svg.innerHTML;
+            });
+            return out;
+        }"""
+    )
+    lamp = paths.get("Candeeiro do Quarto")
+    bulb = paths.get("Luz do Quarto")
+    assert lamp and bulb, sorted(paths)
+    assert lamp != bulb, (
+        "the candeeiro and the luz are still the same drawing, so two tiles in "
+        "the same room are indistinguishable at 20px"
+    )

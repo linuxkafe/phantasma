@@ -1879,6 +1879,19 @@ def handle_request():
                 }
                 .device-room { margin-right: 10px; margin-bottom: 0; padding-right: 10px; flex-shrink: 0; }
                 .device-toggle { min-width: 60px; min-height: 84px; height: auto; }
+                /* Smaller, on owner instruction, now that the tiles share the
+                   row equally instead of being as wide as their names.
+
+                   The touch target does NOT shrink below 44px -- that floor is
+                   what makes a control usable with a phone in one hand, and it
+                   is measured on the whole tile, so the padding and the gap
+                   are what give way. What came out of it: 84px -> 68px tall,
+                   which is the difference between three rows of Quarto and
+                   two, and lets the whole strip sit on one screen with no
+                   scrollbar. */
+                .device-toggle {
+                    min-height: 68px; padding: 6px 8px;
+                }
                 .device-icon { font-size: 1.2rem; }
                 .device-label, .room-header { font-size: 0.75rem; line-height: 1.15; }
                 #admin-links {
@@ -2120,6 +2133,30 @@ def handle_request():
                     .room-content {
                         display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start;
                     }
+                    /* Every tile gets the same share of the row, so the LONGEST
+                       name cannot decide the width for everyone else.
+
+                       Measured at 375px with the real device list, before:
+                       "Luz do Quarto" 163px, "Candeeiro do Quarto" 204px, and
+                       "Desumidificador do Quarto" a full 375px on its own line
+                       -- so the Quarto room was two rows for three tiles, and
+                       the long names were also why the marquee never engaged:
+                       a tile as wide as its own text cannot overflow.
+
+                       `flex: 1 1 0` is what equalises them -- a 0 basis, so
+                       the free space is shared rather than distributed after
+                       each tile has claimed what its content needs. It also
+                       makes the overflow real, which is what hands the work to
+                       applyLabelMarquee, which was already written for this and
+                       had nothing to do.
+                    */
+                    .room-content > .device-toggle { flex: 1 1 0; min-width: 0; }
+                    /* ...but a room with ONE tile must not hand it the whole
+                       row: `flex-grow: 1` on a lone child gave "Exaustor do WC"
+                       a 375px tile for a 13-character name, which reads as a
+                       mistake rather than as a room. The cap is generous
+                       enough that a two-tile room still splits the row evenly. */
+                    .room-content > .device-toggle:only-child { max-width: 190px; }
                         .room-header {
                         display: flex; align-items: center; gap: 6px;
                         margin: 12px 0 6px; color: #9a9a9a; font-size: 0.68rem;
@@ -2773,6 +2810,14 @@ def handle_request():
                the grayscale filter applies to it like to the tile. */
             const SVG = {
                 luz: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.3 1 2.1h5c0-.8.4-1.6 1-2.1A6 6 0 0 0 12 3Z"/>',
+                /* A table lamp, and not the ceiling bulb used for `luz`.
+                   They shared one path, so "Candeeiro do Quarto" was drawn
+                   exactly like "Luz do Quarto" and the owner could not tell the
+                   two tiles apart at 20px. This is the shape of the object: a
+                   tapered shade on a slim stem with a round base, so at a
+                   glance it reads as a lamp you switch on a table rather than a
+                   light in the ceiling. */
+                candeeiro: '<path d="M7.5 11.5h9L14.7 5H9.3L7.5 11.5Z"/><path d="M12 11.5V18"/><path d="M8.5 20.5h7"/>',
                 /* A robot vacuum, not a sun. The first version was a circle with
                    four radial lines, which is the universal sun/brightness
                    glyph -- so the one device that is genuinely round was drawn
@@ -2876,7 +2921,8 @@ def handle_request():
             function getDeviceIcon(name) {
                 const n = (name || '').toLowerCase();
                 if (n.includes('aspirador') || n.includes('robot') || n.includes('aspir')) return icon('aspirador');
-                if (n.includes('luz') || n.includes('candeeiro') || n.includes('lamp')) return icon('luz');
+                if (n.includes('candeeiro') || n.includes('lampe')) return icon('candeeiro');
+                if (n.includes('luz') || n.includes('lamp') || n.includes('luz')) return icon('luz');
                 if (n.includes('exaustor') || n.includes('ventoinha') || n.includes('ventilador')) return icon('exaustor');
                 if (n.includes('desumidificador') || n.includes('humidific')) return icon('desumidificador');
                 if (n.includes('gás') || n.includes('gas') || n.includes('fumo') || n.includes('dete')) return icon('gas');
