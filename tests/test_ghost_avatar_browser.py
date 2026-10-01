@@ -300,23 +300,107 @@ def test_the_silhouette_is_the_brand_ghosts_own_path(page):
     )
 
 
-def test_nothing_inside_the_shadow_root_animates(page):
-    """The system this follows lists animation as a non-negotiable to refuse.
-    A face that drifts is a regression, and it is invisible in a diff."""
-    offenders = page.evaluate(
+def _animating_nodes(page, expression):
+    """Every element inside the shadow root that CSS is animating right now."""
+    page.evaluate(
+        "(v) => { document.querySelector('ghost-avatar').setAttribute('expression', v); }",
+        expression,
+    )
+    return page.evaluate(
         """() => {
             const el = document.querySelector('ghost-avatar');
             const out = [];
             for (const n of el.shadowRoot.querySelectorAll('*')) {
                 const s = getComputedStyle(n);
                 if (s.animationName && s.animationName !== 'none') {
-                    out.push(n.className + ' -> ' + s.animationName);
+                    const label = n.className.baseVal || n.className || n.tagName;
+                    out.push(label + ' -> ' + s.animationName);
                 }
             }
             return out;
         }"""
     )
-    assert offenders == [], f"animated elements inside the avatar: {offenders}"
+
+
+def test_only_the_thinking_face_may_move(page):
+    """Reversed on owner instruction, 2026-10-01, and deliberately narrowed.
+
+    This used to assert that NOTHING inside the shadow root animates, borrowed
+    as a non-negotiable from another system. The owner asked for the avatar to
+    show that it is composing a reply, so motion is now allowed -- but only on
+    the `thinking` face, which only the typing row ever sets.
+
+    Every other expression is still frozen, and that is the part worth keeping:
+    the rule is no longer "no motion anywhere", it is "motion must name the
+    state that causes it". An animation on `.face`, on the host, or on any other
+    expression would run forever on every delivered message, and this fails.
+    """
+    for expression in ("normal", "wink", "happy", "surprised", "confused",
+                       "sleepy", "excited", "error", "loading"):
+        offenders = _animating_nodes(page, expression)
+        assert offenders == [], (
+            f"expression {expression!r} is animated: {offenders}"
+        )
+
+    assert _animating_nodes(page, "thinking"), (
+        "the thinking face does not animate: the avatar cannot show that it is "
+        "working, which is what the owner asked for"
+    )
+
+
+def test_the_thinking_motion_is_a_transform_and_not_geometry(page):
+    """A still screenshot must be indistinguishable from the frozen ghost.
+
+    Animating width/height/top would move the painted box, so the avatar would
+    breathe in screenshots, in print, and for anyone reading the DOM's
+    geometry. Transform keeps every box exactly where the frozen artwork put it.
+    """
+    page.evaluate(
+        "() => document.querySelector('ghost-avatar').setAttribute('expression', 'thinking')"
+    )
+    offenders = page.evaluate(
+        """() => {
+            const el = document.querySelector('ghost-avatar');
+            const props = new Set();
+            for (const sheet of el.shadowRoot.styleSheets) {
+                for (const rule of sheet.cssRules) {
+                    if (!rule.style || !rule.style.animationName ||
+                        rule.style.animationName === 'none') continue;
+                    for (const p of rule.style) {
+                        if (p.startsWith('--')) continue;
+                        // Any animation-* longhand is how the shorthand
+                        // expands; it says nothing about geometry.
+                        if (p.startsWith('animation')) continue;
+                        if (p === 'transform' || p === 'transform-box' ||
+                            p === 'transform-origin') continue;
+                        props.add(p);
+                    }
+                }
+            }
+            return [...props];
+        }"""
+    )
+    assert offenders == [], f"the thinking animation moves geometry: {offenders}"
+
+
+def test_reduced_motion_still_shows_a_thinking_face(page):
+    """The state stays legible without the movement.
+
+    With motion off the expression still changes, so the owner can still tell
+    the assistant is working -- it is the same avatar in the same row.
+    """
+    page.emulate_media(reduced_motion="reduce")
+    try:
+        assert _animating_nodes(page, "thinking") == [], (
+            "prefers-reduced-motion did not stop the thinking animation"
+        )
+        faces = _set_expression(page, "thinking")
+        painted = [f["name"] for f in faces if f["painted"]]
+        assert painted == ["thinking"], (
+            f"with reduced motion the thinking face is not painted: {painted}"
+        )
+    finally:
+        page.emulate_media(reduced_motion="no-preference")
 
 
 def test_page_css_cannot_reach_the_face(page):

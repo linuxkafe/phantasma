@@ -2444,9 +2444,17 @@ def handle_request():
                  default in place. A malformed attribute cannot blank the
                  avatar, and it cannot show two faces, because exactly one
                  rule pair can ever apply;
-               * no animation, no blinking, no idle motion. The only motion
-                 in the chat avatar is the float on the .ia-avatar wrapper
-                 that predates this component;
+               * no idle motion: an expression, once painted, holds still.
+                 THE ONE EXCEPTION, on owner instruction 2026-10-01: the
+                 `thinking` face breathes (brow lift + glint drift, 1.8s) while
+                 the assistant is composing a reply, so the avatar carries that
+                 state and not only the three dots. It is scoped to
+                 `[data-expression="thinking"]`, which only the typing row ever
+                 sets, so it cannot run on a delivered message; and it is a
+                 transform, so no geometry moves and a still screenshot is
+                 indistinguishable from the frozen ghost. Everything else about
+                 the artwork is still frozen, and `prefers-reduced-motion`
+                 turns this off too;
                * nine `--avatar-*` variables and no hardcoded colours, so
                  the ghost can be re-coloured without touching the markup;
                * legible at 22px (the size the chat uses). No visible text
@@ -2523,6 +2531,50 @@ def handle_request():
         :host([data-expression="excited"])   .face[data-f="excited"],
         :host([data-expression="error"])     .face[data-f="error"],
         :host([data-expression="loading"])   .face[data-f="loading"] { display: block; }
+        /* Motion, and only on the thinking face. See the contract note below:
+           the ten expressions are frozen artwork EXCEPT while the assistant is
+           actually composing a reply, which the owner asked to be visible in
+           the avatar rather than only in the dots.
+
+           Scoped to `[data-expression="thinking"]` on purpose. If the motion
+           lived on `.face` or on the host, it would animate every message in
+           the chat forever, and the test that used to forbid all motion would
+           be right to fail. Here it can only run while an expression named
+           thinking is showing -- which is only the typing row -- so it stops
+           the moment the row is removed.
+
+           Transforms only, never geometry: no width/height/top/left, so the
+           painted box and the silhouette stay exactly where they were. The
+           brow lifts by 0.35px, the glint travels 2px, both on a 1.8s ease
+           that starts and ends at rest, so a still screenshot looks like the
+           un-animated ghost. */
+        @keyframes ghostThinking {
+            0%, 100% { transform: translateY(0);    opacity: 1;   }
+            50%      { transform: translateY(-.35px); opacity: .78; }
+        }
+        @keyframes ghostGlint {
+            0%, 100% { transform: translateX(0);    opacity: .35; }
+            50%      { transform: translateX(2px);  opacity: .7;  }
+        }
+        :host([data-expression="thinking"]) .face[data-f="thinking"] {
+            animation: ghostThinking 1.8s ease-in-out infinite;
+            transform-box: fill-box;
+            transform-origin: center;
+        }
+        :host([data-expression="thinking"]) .ghost-glint {
+            animation: ghostGlint 1.8s ease-in-out infinite;
+            transform-box: fill-box;
+            transform-origin: center;
+        }
+        /* A page or OS that asks for less motion gets a thinking face that
+           thinks without moving. The expression still changes, so the state is
+           still legible without the animation. */
+        @media (prefers-reduced-motion: reduce) {
+            :host([data-expression="thinking"]) .face[data-f="thinking"],
+            :host([data-expression="thinking"]) .ghost-glint {
+                animation: none;
+            }
+        }
         </style>
         <svg viewBox="0 0 24 24" focusable="false">
             <circle class="ghost-halo" cx="12" cy="12" r="11.6"/>
