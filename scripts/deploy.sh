@@ -451,13 +451,49 @@ echo "verifying prod suite ($reason)..."
   exit 1
 }
 
+  # Read the timestamp BEFORE restarting, so the restart can be proven below.
+  _stamp_before=$(systemctl show phantasma -p ActiveEnterTimestamp --value 2>/dev/null || true)
+  _pid_before=$(systemctl show phantasma -p MainPID --value 2>/dev/null || true)
   echo "restarting phantasma.service..."
-  sudo -n service phantasma restart
-  # Probe the functional endpoint, not the listening socket. A cold start loads
-  # models and has been observed to exceed 150s, during which the socket is
-  # absent and the previous `ss`-based check reported a false failure on a
-  # service that came up fine moments later.
+  # `sudo` WITHOUT `-n`, deliberately.
   #
+  # It ran `sudo -n` here for years, which means "never prompt": if the agent's
+  # user has no passwordless sudo, sudo exits non-zero, the service is NOT
+  # restarted, and the script carries on to probe a process that is still
+  # running the previous code. The probe then passes, the script prints
+  # "deploy OK", and the change is on disk in production and nowhere else --
+  # which is exactly what happened on 2026-10-02 with the Discord `NameError`
+  # fix: files synced, "deploy OK", bot still silent, and `ActiveEnterTimestamp`
+  # proving the service had not restarted.
+  #
+  # Without `-n` the password prompt reaches the operator, who restarts the
+  # service and lets sudo's cache serve the runs the script does not need.
+  # PROMPT is the escape hatch for CI, where no human is present; it restores
+  # the old silent behaviour and says so.
+  if [ -n "${DEPLOY_SUDO:-}" ]; then
+    echo "  DEPLOY_SUDO set: using non-interactive sudo, restart may be skipped"
+    sudo -n service phantasma restart || echo "  WARN restart skipped (non-interactive)"
+  else
+    sudo service phantasma restart
+  fi
+  # PROVE the restart happened. Asking sudo to restart and then checking that
+  # the process is healthy is not the same as checking the process is NEW: a
+  # healthy service running the previous code answers /api/health with 200
+  # perfectly happily. So a failed restart passes every probe below and the
+  # script prints "deploy OK" over a service that never saw the change.
+  #
+  # That is not hypothetical. On 2026-10-02 a fix for a `NameError` that had
+  # silenced the Discord bot was synced to /opt/phantasma, the script reported
+  # success, and the bot stayed silent for the rest of the day -- because the
+  # service had been up since 22:51 and no restart had occurred. The tell was
+  # `systemctl show -p ActiveEnterTimestamp`.
+  ok=0
+  for _ in $(seq 1 60); do
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:5000/api/health 2>/dev/null)" = "200" ]; then
+      ok=1; break
+    fi
+    sleep 5
+  done
   # Probe /api/health, NOT "/". The voice UI's root page is behind a session and
   # answers 302 to /login for an unauthenticated caller -- correctly, that is
   # the product working. Demanding a 200 from it made this check unsatisfiable
@@ -477,6 +513,32 @@ echo "verifying prod suite ($reason)..."
     fi
     sleep 5
   done
+  # Third assertion, and the one that was missing: is this the process we
+  # restarted, or the one that was already running?
+  #
+  # A healthy OLD process passes the two probes above without noticing it runs
+  # yesterday's code, and the script then prints "deploy OK" over it.
+  _pid_after=$(systemctl show phantasma -p MainPID --value 2>/dev/null || true)
+  _stamp_after=$(systemctl show phantasma -p ActiveEnterTimestamp --value 2>/dev/null || true)
+  if [ -n "${DEPLOY_SUDO:-}" ]; then
+    # Non-interactive mode may legitimately skip the restart; say so loudly
+    # rather than claiming the running service has the new code.
+    echo "  WARN non-interactive mode: cannot prove the restart happened" >&2
+    echo "       MainPID $_pid_before -> $_pid_after" >&2
+  elif [ -n "$_pid_before" ] && [ "$_pid_before" = "$_pid_after" ]; then
+    echo >&2
+    echo "DEPLOY FAILED: the service was NOT restarted." >&2
+    echo "  MainPID $_pid_before -> $_pid_after (unchanged)" >&2
+    echo "  started: $_stamp_before -> $_stamp_after" >&2
+    echo "The new code is on disk in $PROD but the running process is still the" >&2
+    echo "old one. A healthy service passes every probe above while running code" >&2
+    echo "from before the deploy, so 'deploy OK' here would be a lie." >&2
+    echo "Restart it by hand: sudo service phantasma restart" >&2
+    exit 1
+  else
+    echo "  service restarted: MainPID $_pid_before -> $_pid_after"
+  fi
+
   # Second assertion: the protected root must redirect to the login, not serve
   # the device page to an anonymous caller. A 200 here would mean the session
   # gate had been lost, which is a worse failure than the service being down and
