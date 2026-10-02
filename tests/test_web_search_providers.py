@@ -242,12 +242,29 @@ def test_the_context_header_stops_offering_an_opt_out(tools_src=None):
     assert "fonte para esta resposta" in src
 
 
-@pytest.mark.parametrize("archive", ARCHIVES)
-def test_the_searxng_config_still_carries_wikipedia(archive):
+def test_the_searxng_config_still_carries_wikipedia():
     """Wikipedia continua a ser procurável — dentro do SearXNG, que é onde o
-    dono a queria. Este teste existe para que ninguém 'conserve a
-    funcionalidade' reintroduzindo a porta de serviço."""
-    cfg = _read(os.path.join(os.path.dirname(__file__), "..", "searxng-settings.yml"))
+    dono a queria. Existe para que ninguém "conserve a funcionalidade"
+    reintroduzindo a porta de serviço.
+
+    SKIPPED, not passed, where the file does not exist. This is the repo's
+    SearXNG config, mounted into the container; it is not deployed to
+    /opt/phantasma, so on prod's own suite the file is absent. Skipping with
+    this reason is honest -- asserting against a file that is not there would
+    raise, and pretending the claim held would be worse.
+
+    The prod equivalent is a container check, run by hand on 2026-10-02 and
+    recorded in aes/tickets/T063: `docker exec searxng grep -A3 'name:
+    wikipedia' /etc/searxng/settings.yml` -> `disabled: false`.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "searxng-settings.yml")
+    if not os.path.exists(path):
+        pytest.skip(
+            "searxng-settings.yml is the repo's container config and is not "
+            "deployed to /opt/phantasma; prod's copy lives inside the searxng "
+            "container at /etc/searxng/settings.yml"
+        )
+    cfg = _read(path)
     assert "engine: wikipedia" in cfg, (
         "wikipedia saiu do SearXNG: a busca perde o que o dono pediu para manter"
     )
