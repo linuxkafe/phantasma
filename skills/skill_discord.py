@@ -2,16 +2,12 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import datetime
 from typing import Optional
 
 import discord
 import httpx
 
 import config
-import config as config_module
-from src.brain.fly_brain import FlyBrain
-from src.brain.persistence import FlyBrainStore
 
 # --- Configuração da Skill ---
 # Esta skill não é ativada por voz local, serve apenas para carregar o daemon.
@@ -97,6 +93,8 @@ def _check_access(user_id, prompt_lower, self=None):
     # that keeps them away from the devices.
     matching = None
     resolver = getattr(getattr(self, "context", None), "resolve_skill", None)
+    if resolver is None:
+        resolver = _resolve_skill
     if resolver is not None:
         matching = resolver(prompt_lower)
     return discord_access.check(user_id, prompt_lower, matching)
@@ -138,6 +136,15 @@ async def on_ready():
     )
 
 
+# The resolver for the skill a request lands on. `on_message` is a module-level
+# event handler, so it has no `self` to read a context off -- a previous revision
+# passed `self` here and raised NameError on EVERY message. `discord.py` swallows
+# exceptions raised inside an event handler, so the bot received the message,
+# failed, and said nothing; from Discord that is indistinguishable from an
+# offline bot.
+_resolve_skill = None
+
+
 @client.event
 async def on_message(message):
     # Ignorar mensagens do próprio bot
@@ -160,7 +167,16 @@ async def on_message(message):
         return
 
     # --- VERIFICAÇÃO DE PERMISSÕES E QUOTAS ---
-    allowed, error_msg = _check_access(message.author.id, prompt.lower(), self)
+    # No `self`. This function is registered as a module-level `on_message`
+    # event, so its only parameter is `message` and there is no instance to name
+    # here. A previous revision passed `self` and raised NameError on EVERY
+    # message: discord.py swallows exceptions raised inside an event handler, so
+    # the bot received the message, failed silently, and said nothing -- which
+    # is indistinguishable from "the bot is offline" from the outside.
+    #
+    # So the skill reads the resolver off its own class object, which is where
+    # the loader put it. `skill` is bound at import by the adapter.
+    allowed, error_msg = _check_access(message.author.id, prompt.lower())
 
     if not allowed:
         # Se for um user standard bloqueado, avisamos. Se for desconhecido, ignoramos ou logamos.
@@ -329,7 +345,7 @@ def _run_discord_loop():
 
 def init_skill_daemon():
     """Inicia o bot do Discord em background quando o assistente arranca."""
-    global _fly_brain
+    global _fly_brain, _resolve_skill
     if not hasattr(config, "DISCORD_BOT_TOKEN"):
         return
 
@@ -340,6 +356,25 @@ def init_skill_daemon():
 
     _fly_brain = get_shared_fly_brain()
     print(f"[Discord Skill] FlyBrain inicializado: {_fly_brain is not None}")
+
+    # The skill resolver, for deciding which skill a request lands on BEFORE any
+    # of it is spent. `assistant.py` builds the shared `SkillContext` WITHOUT
+    # passing `resolve_skill`, so there is no instance for the event handler to
+    # read it off either; without this, every guest request arrives with
+    # `matching=None` and is refused as "could not verify what it touches".
+    #
+    # So the resolver is built here against the loader's own skill directory.
+    # A second SkillLoader is the concern that `_installed_skills` documents,
+    # and it applies here too -- but this loader is used to MATCH, never to
+    # execute, and it loads no daemons and holds no state.
+    try:
+        from skills.loader import SkillLoader
+
+        _resolver_loader = SkillLoader(skills_dir=config.SKILLS_DIR)
+        _resolve_skill = _resolver_loader.resolve_matching_skills
+        print("[Discord Skill] Resolver de skills ligado")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[Discord Skill] Resolver de skills NAO ligado: {exc}")
 
     print("[Discord Skill] A iniciar daemon do Discord...")
     t = threading.Thread(target=_run_discord_loop, daemon=True)
