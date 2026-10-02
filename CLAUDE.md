@@ -201,3 +201,25 @@ disagree on 273 files and `main` carries work `testing` has never seen
 improvements). Investigate with `git patch-id` before proposing a merge, and
 never pass `--allow-unrelated-histories` without the owner having seen the
 conflict count.
+
+## Reiniciar o serviço (sudo)
+
+```
+sudo service phantasma restart
+```
+
+**Sem `-n`.** Com `sudo -n` o prompt nunca aparece: se o utilizador não tiver
+sudo sem password, o comando sai não-zero, o serviço **não** reinicia, e nada
+diz que não reiniciou. Foi assim que o fix do `self` (bot Discord mudo, `c642d9b`)
+ficou em `/opt/phantasma` com "deploy OK" e o serviço a correr o código de antes
+— `ActiveEnterTimestamp` 22:51, uptime 1h, bot mudo o resto do dia.
+
+Verificar que reiniciou mesmo:
+
+```
+systemctl show phantasma -p MainPID -p ActiveEnterTimestamp
+```
+
+Um `MainPID` igual ao de antes significa que não reiniciou, por saudável que o
+`/api/health` responda. `deploy.sh` passou a exigir esta prova (falhando com
+`DEPLOY FAILED: the service was NOT restarted`) em `e63cd18`.
