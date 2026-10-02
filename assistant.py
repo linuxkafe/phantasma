@@ -987,6 +987,22 @@ class PhantasmaPipeline:
             )
         if (web or "").strip():
             parts.append(f"### PESQUISA WEB\n{web}\n")
+            # The branch that HAD context had no instruction to use it, and no
+            # rule against inventing -- those two lived only in the branches
+            # below, for when the search FAILED. Measured 2026-10-02 against the
+            # live Ollama: asked "conheces o Chefe Jamon?", with the real result
+            # in the SearXNG response, the model answered "sim, eu sei quem e"
+            # and invented a person out of a Czech ham e-shop. The prompt had a
+            # pile of text and a question and no instruction about either.
+            parts.append(
+                "### COMO RESPONDER COM A PESQUISA\n"
+                "A pesquisa acima e a fonte desta resposta. Baseia-te nela e\n"
+                "diz de onde veio. Se a pesquisa nao responder a pergunta, diz\n"
+                "isso numa frase -- 'a pesquisa nao fala disso' -- e NAO completes\n"
+                "com o que sabes de memoria nem com o que imaginas.\n"
+                "NAO inventes paginas, fontes, pessoas, datas ou dimensoes que\n"
+                "nao aparecam no bloco acima.\n"
+            )
         if web_empty and local:
             parts.append(
                 "### COMO RESPONDER\n"

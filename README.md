@@ -1,6 +1,6 @@
 # pHantasma
 
-Local-first, offline, modular voice assistant built in Python — private by design, running entirely on your own hardware without third-party cloud dependencies (except optional web search via self-hosted SearxNG).
+Local-first, offline, modular voice assistant built in Python — private by design, running entirely on your own hardware. The only thing that leaves the machine is an optional web search, and it goes through your own SearXNG — see [Where a search query can go](#where-a-search-query-can-go).
 
 ## Quickstart
 
@@ -662,9 +662,59 @@ See [`docs/ZIGBEE_INTEGRATION.md`](docs/ZIGBEE_INTEGRATION.md) for full guide.
 
 - **Zero cloud calls** for core operation
 - **All processing local**: hotword, STT, LLM, TTS
-- **Optional**: SearxNG web search (self-hosted)
+- **Optional**: web search, self-hosted. The app talks **only** to your SearXNG
 - **No telemetry**, no accounts, no API keys required
 - **Zigbee local**: No vendor cloud for device control
+
+### Where a search query can go
+
+One list, in `tools.py::PROVIDERS`, in order — the first that answers wins and
+says so in the log:
+
+| Provider | What it is | Configured where |
+|----------|-----------|------------------|
+| `searxng` | your metasearch, self-hosted | `searxng-settings.yml` |
+| `arquivo.pt` | Portuguese web archive, public JSON API | `tools.py` |
+| `archive.org` | Internet Archive, public JSON API | `tools.py` |
+
+SearXNG carries **Wikipedia as one of its engines** (`searxng-settings.yml`),
+along with bing, seznam, mojeek, qwant, yep, mwmbl and yacy. Choosing which of
+them may be queried is a decision you make in that one file.
+
+**What this does and does not promise.** No query is ever assembled from your
+memory text and sent straight to a third party by the application — there is no
+such code path any more. But a query does leave the house: SearXNG asks its
+engines, and the two archives answer directly. That is the trade for having a
+metasearch at all, and until T063 it was worse than it needed to be: the app
+held a **second, hard-coded door** to `pt.wikipedia.org`, taken silently
+whenever SearXNG returned nothing, with one `print` nobody read. That door is
+gone and the test that pins it is
+`tests/test_web_search_providers.py::test_tools_makes_no_wikipedia_request`.
+
+Measured on the live stack 2026-10-02: of 8 configured engines, **bing and
+seznam answer**; mojeek, qwant, yacy and yep do not.
+
+### What the assistant is told to do with a search
+
+With web context present, the prompt now carries an explicit
+`COMO RESPONDER COM A PESQUISA` block: the search is the source of the answer,
+say where it came from, and if it does not cover the question **say so in one
+sentence** instead of completing from memory. Do not invent pages, sources,
+people, dates or figures that are not in the block.
+
+Before (2026-10-02), that block existed only in the branches where the search
+had **failed**, and the context header said *"use this if relevant"* — which is
+permission to ignore it. Asked *"conheces o Chefe Jamon?"*, with the real result
+sitting in the SearXNG response, the model answered *"sim, eu conheço!"* and
+built a person out of a Czech ham e-shop. The same query now answers:
+
+> Não consegui encontrar informações sobre um "Chefe Jamon" específico. […] Não
+> há referência a um "Chefe Jamon".
+
+Note the honest limit: the correct result **was** in the SearXNG response,
+below the top 5, behind five irrelevant Czech e-shops. That is a relevance
+problem, not a hallucination one — ranking belongs to SearXNG. The prompt fix
+stops the confabulation; it does not raise the right answer.
 
 ## Branch Status
 
