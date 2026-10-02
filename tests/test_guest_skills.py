@@ -517,3 +517,39 @@ def test_ids_from_config_are_not_stringified():
         )
     finally:
         config.DISCORD_STANDARD_USERS = original
+
+
+def test_the_checkboxes_are_named_the_way_the_rule_compares():
+    """Cada checkbox tem de se chamar exactamente como o que a regra compara.
+
+    O valor gravado pela pagina e o nome com que a regra compara, e o nome da
+    pagina vinha de `name[5:]` -- `skill_` tem SEIS caracteres, portanto
+    `skill_calculator` dava "_calculator". Passou pela pagina em producao com 23
+    caixas, e o efeito e silencioso: marcar uma skill guardava um nome que nunca
+    casa, logo recusava tudo; e as duas skills que estavam permitidas apareciam
+    por marcar enquanto estavam a funcionar.
+
+    Um underscore inicial ao lado de uma checkbox ve-se pouco, e le-se como "a
+    lista esta vazia" em vez de "a lista esta errada".
+
+    Este teste existe porque o bug passou no deploy, na suite, e no "deploy OK".
+    O que o apanhou foi ler os valores que a pagina real emitia.
+    """
+    from src.api import admin
+
+    # The names the loader produces...
+    assert admin._skill_short_name("skill_calculator") == "calculator"
+    assert admin._skill_short_name("skill_bareos") == "bareos"
+    # ...and one that does not, which must be left alone rather than mangled.
+    assert admin._skill_short_name("calculator") == "calculator"
+
+    # And the round trip the page performs on the way in.
+    assert "calculator".removeprefix("skill_").strip() in "calculator"
+    assert "_calculator".removeprefix("skill_").strip() == "_calculator"
+
+    # So a ticked box cannot produce a name the rule will not match.
+    for name in ("calculator", "weather"):
+        short = admin._skill_short_name(f"skill_{name}")
+        assert short in da.allowed_guest_skills(), (
+            f"a caixa para {name} gravaria um nome que a regra nao reconhece"
+        )

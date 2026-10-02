@@ -23,7 +23,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import bcrypt
 from flask import (
@@ -658,6 +658,25 @@ def update_config(key: str, value: str, category: Optional[str] = None) -> bool:
 
 
 
+
+def _skill_short_name(name: Any) -> str:
+    """``skill_calculator`` -> ``calculator``, and nothing else touched.
+
+    ``removeprefix``, not a slice. ``name[5:]`` on ``"skill_calculator"`` is
+    ``"_calculator"`` -- ``skill_`` is six characters -- and that shipped to
+    production: the page rendered 23 checkboxes labelled ``_calculator``, storing
+    a name the rule never matches. So ticking a skill refused everything, and the
+    two skills that WERE allowed rendered unticked while working. A leading
+    underscore next to a checkbox is nearly invisible, and it reads as "the list
+    is empty" rather than "the list is wrong".
+
+    A name without the prefix is returned untouched, so a future skill that
+    does not follow the convention is not mangled into a name that matches
+    nothing.
+    """
+    return str(name).removeprefix("skill_")
+
+
 def _installed_skills() -> list[tuple[str, list[str]]]:
     """The skills this box actually loaded, as ``(short_name, triggers)``.
 
@@ -682,7 +701,7 @@ def _installed_skills() -> list[tuple[str, list[str]]]:
             name = getattr(skill, "NAME", None)
             if not name:
                 continue
-            short = name[5:] if str(name).startswith("skill_") else str(name)
+            short = _skill_short_name(name)
             triggers = [str(x) for x in (getattr(skill, "TRIGGERS", None) or [])]
             out.append((short, triggers[:4]))
         return sorted(out)
