@@ -1270,13 +1270,21 @@ CONFIG_TEMPLATE = (
           Abaixo, ate onde e que esses ids chegam.
         {% endif %}
       </p>
-      <table style="width:100%; border-collapse:collapse;">
-        <tbody>
-          <tr style="border-bottom:1px solid var(--border);">
-            <td style="padding:.35rem;">
-              <label>
-                {% if lang == 'en' %}Skills a guest may use{% else %}Skills que um convidado pode usar{% endif %}
-              </label>
+      {# NOT a table. The skills cell used to sit in a <td> next to the prose,
+         and `table-layout:auto` sized that cell by content: the prose column
+         took most of the page and the checkbox column collapsed to 236px. A
+         `repeat(auto-fill, minmax(200px,1fr))` grid inside 236px resolves to
+         ONE column, so 23 skills stacked into a 687px wall -- which is the
+         "column of checkboxes" that shipped twice. The CSS was present and
+         correct; the box it was given was 236px wide.
+
+         The grid can only spread across a column if the column is allowed to be
+         wide, so the picker gets `1fr` of a two-column flex row instead. #}
+      <div style="display:flex; gap:1.5rem; align-items:flex-start; flex-wrap:wrap;">
+        <div style="flex:0 1 22rem; min-width:16rem; padding:.35rem 0;">
+          <label>
+            {% if lang == 'en' %}Skills a guest may use{% else %}Skills que um convidado pode usar{% endif %}
+          </label>
               <div style="opacity:.72; font-size:.85rem;">
                 {% if lang == 'en' %}
                   Ticked = a guest may use it. Unticked = refused, even mid
@@ -1292,14 +1300,23 @@ CONFIG_TEMPLATE = (
                   limite diario de baixo.
                 {% endif %}
               </div>
-            </td>
-            <td style="padding:.35rem;">
+        </div>
+        <div style="flex:1 1 26rem; min-width:0; padding:.35rem 0;">
               {% if guest_skills_available %}
-                <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:.45rem;">
+                {# `1.4rem` boxes, not the browser's 13px default: 13px is
+                   present, valid and untappable with a thumb. The size is set
+                   here rather than relying on the stylesheet so the rendered
+                   rect -- which the layout test measures -- is what ships. #}
+                <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(13rem, 1fr)); gap:.5rem .75rem;">
                 {% for name, triggers in guest_skills %}
-                  <label style="display:flex; gap:.45rem; align-items:baseline; cursor:pointer;"
+                  <label style="display:flex; gap:.5rem; align-items:center; cursor:pointer;
+                                padding:.3rem .4rem; border-radius:var(--radius-sm);
+                                border:1px solid var(--border); min-height:44px;
+                                box-sizing:border-box;"
                          title="{%- if triggers -%}{{ triggers|join(', ') }}{%- else -%}(sem gatilhos){%- endif -%}">
                     <input type="checkbox" name="guest_skill" value="{{ name }}"
+                           style="width:1.25rem; height:1.25rem; margin:0; flex:0 0 auto;
+                                  cursor:pointer; accent-color:var(--accent);"
                            {% if name in guest_skills_allowed %}checked{% endif %}>
                     <span style="font-size:.9rem;">{{ name }}</span>
                   </label>
@@ -1318,10 +1335,12 @@ CONFIG_TEMPLATE = (
                   {% endif %}
                 </p>
               {% endif %}
-            </td>
-          </tr>
-          <tr style="border-bottom:1px solid var(--border);">
-            <td style="padding:.35rem;">
+        </div>
+      </div>
+
+      <div style="display:flex; gap:1.5rem; align-items:flex-start; flex-wrap:wrap;
+                  margin-top:1rem;">
+        <div style="flex:0 1 22rem; min-width:16rem; padding:.35rem 0;">
               <label for="guest_ids">
                 {% if lang == 'en' %}Guest Discord ids{% else %}IDs de Discord dos convidados{% endif %}
               </label>
@@ -1342,23 +1361,41 @@ CONFIG_TEMPLATE = (
                   convidados nao podem perguntar nada.
                 {% endif %}
               </div>
-            </td>
-            <td style="padding:.35rem;">
-              <input type="text" id="guest_ids" name="guest_ids"
-                     value="{{ guest_ids }}" style="width:100%; min-width:14rem;"
-                     placeholder="123456789012345678, 987654321098765432">
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:.35rem;">
-              <input type="number" id="guest_daily_limit" name="guest_daily_limit"
-                     min="0" max="200" step="1" value="{{ guest_daily_limit }}"
-                     style="width:7rem;">
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <button type="submit" name="action" value="save_guests" style="margin-top:.75rem;">
+        </div>
+        <div style="flex:1 1 26rem; min-width:0; padding:.35rem 0;">
+          <input type="text" id="guest_ids" name="guest_ids"
+                 value="{{ guest_ids }}" style="width:100%; min-width:14rem;
+                        box-sizing:border-box;"
+                 placeholder="123456789012345678, 987654321098765432">
+        </div>
+      </div>
+
+      <div style="display:flex; gap:1.5rem; align-items:flex-start; flex-wrap:wrap;
+                  margin-top:1rem;">
+        <div style="flex:0 1 22rem; min-width:16rem; padding:.35rem 0;">
+          <label for="guest_daily_limit">
+            {% if lang == 'en' %}Daily requests per guest{% else %}Pedidos por dia, por convidado{% endif %}
+          </label>
+          <div style="opacity:.72; font-size:.85rem;">
+            {% if lang == 'en' %}
+              Every accepted request counts, not only the ones that reach a
+              skill. 0 means no limit. The counter lives in memory, so a restart
+              clears it.
+            {% else %}
+              Conta-se cada pedido aceite, nao so os que chegam a uma skill.
+              0 = sem limite. O contador vive em memoria, por isso um reinicio
+              limpa-o.
+            {% endif %}
+          </div>
+        </div>
+        <div style="flex:1 1 26rem; min-width:0; padding:.35rem 0;">
+          <input type="number" id="guest_daily_limit" name="guest_daily_limit"
+                 min="0" max="200" step="1" value="{{ guest_daily_limit }}"
+                 style="width:7rem;">
+        </div>
+      </div>
+
+      <button type="submit" name="action" value="save_guests" style="margin-top:1rem;">
         {% if lang == 'en' %}Save guest access{% else %}Guardar acesso de convidados{% endif %}
       </button>
       <p style="opacity:.72; margin:.6rem 0 0; max-width:52rem;">
