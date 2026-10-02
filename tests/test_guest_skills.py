@@ -37,14 +37,46 @@ GUEST = "111222333444555666"
 
 @pytest.fixture(autouse=True)
 def guest_env(monkeypatch):
-    """A guest, a allowlist por omissão, e contadores limpos."""
+    """A guest, a allowlist por omissão, e contadores limpos.
+
+    The two policy values are set on `config` AND on the settings store, because
+    production reads the store first. Pinning only the attribute would leave the
+    tests exercising a fallback branch that production never takes -- and the
+    previous version of this file pinned only the attribute, which is how a test
+    suite can be green about a path that does not run on the host.
+    """
     monkeypatch.setattr(config, "DISCORD_ADMIN_USERS", [], raising=False)
     monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [GUEST], raising=False)
-    monkeypatch.setattr(config, "GUEST_SKILLS_ALLOWED", "weather,calculator", raising=False)
     monkeypatch.setattr(config, "DISCORD_DAILY_LLM_LIMIT", 3, raising=False)
+    _PINNED.clear()
+    _set_setting(monkeypatch, "GUEST_SKILLS_ALLOWED", "weather,calculator")
+    _set_setting(monkeypatch, "DISCORD_DAILY_LLM_LIMIT", "3")
     da.reset_quotas()
     yield
+    _PINNED.clear()
     da.reset_quotas()
+
+
+_PINNED: dict[str, str] = {}
+
+
+def _set_setting(monkeypatch, key: str, value: str) -> None:
+    """Make `settings_store.get_setting` return `value` for `key`, keeping the rest.
+
+    It accumulates into a module dict and re-pins on every call. The first
+    version closed over a single `key`, so pinning two keys in the fixture meant
+    the second call silently unpinned the first -- and the symptom arrived four
+    tests later as a quota that refused arithmetic. A helper that forgets what it
+    was told two lines ago is worse than no helper.
+    """
+    from src import settings_store
+
+    _PINNED[key] = value
+    monkeypatch.setattr(
+        settings_store,
+        "get_setting",
+        lambda k, default=None: _PINNED.get(k, default),
+    )
 
 
 # --- acesso ---------------------------------------------------------------
@@ -90,27 +122,6 @@ def test_the_prefixed_name_is_the_same_skill():
     assert "weather" in da.allowed_guest_skills()
     allowed, _ = da.check(GUEST, "que tempo faz", ["skill_weather"])
     assert allowed
-
-
-def test_allowlist_is_read_every_time_not_cached():
-    """Nao ha segunda copia da politica num global de modulo.
-
-    Nao por frescura -- uma mudanca em /admin/config so chega ao processo no
-    arranque seguinte, como qualquer valor desta pagina. Mas um global aqui seria
-    uma segunda copia da politica com a sua propria vida, e a pergunta "qual
-    delas esta em vigor" e a pergunta que vira uma mudanca de permissao numa
-    discussao.
-    """
-
-    config.GUEST_SKILLS_ALLOWED = "weather"
-    original = config.GUEST_SKILLS_ALLOWED
-    try:
-        assert not da.check(GUEST, "x", ["skill_calculator"])[0]
-        config.GUEST_SKILLS_ALLOWED = "weather,calculator"
-        assert original != config.GUEST_SKILLS_ALLOWED
-        assert da.check(GUEST, "x", ["skill_calculator"])[0]
-    finally:
-        config.GUEST_SKILLS_ALLOWED = original
 
 
 # --- a recusa de "nao sei" ------------------------------------------------
@@ -285,3 +296,83 @@ def test_arithmetic_reaches_only_the_calculator(loader, prompt):
     matched = loader.resolve_matching_skills(prompt.lower())
     outside = [m for m in matched if m not in ("skill_calculator",)]
     assert not outside, f"{prompt!r} colide com {outside}"
+
+
+# --- o contrato de onde a politica e lida ---------------------------------
+#
+# Duas vezes nesta sessao um `str.replace` cujo padrao ja nao existia falhou em
+# silencio: o ficheiro ficou por escrever, o teste continuava verde porque
+# exercitava o ramo de fallback, e o unico sintoma foi um `allowed_guest_skills`
+# a devolver `[]` quando `config.GUEST_SKILLS_ALLOWED` deixou de existir.
+#
+# Nada num teste de comportamento apanha isso. Estes tres apanham.
+
+
+def test_the_policy_is_not_read_from_config_py():
+    """`config.py` esta congelado pelo deploy e nao pode levar a politica.
+
+    `deploy.sh` deixa `config.py` fora de SYNC_DIRS e de TOP_LEVEL_SYNC e
+    obriga a que seja byte-identico nas duas arvores. Um setting novo la nunca
+    chegaria a producao pelo script -- e copia-lo a mao e o que o script existe
+    para impedir. Se este teste comecar a falhar, a resposta nao e adicionar o
+    campo ao config.py: e usar a loja.
+    """
+    # Nos dois sitios onde um setting novo aparece no config.py: o campo do
+    # dataclass e a exportacao de modulo. A primeira versao deste teste so
+    # olhava para o segundo -- e reintroduzir o campo passou, porque "campo" e
+    # "atributo" nao sao a mesma coisa e o teste so sabia de uma.
+    assert not hasattr(config, "GUEST_SKILLS_ALLOWED"), (
+        "GUEST_SKILLS_ALLOWED voltou a config.py. O deploy trata esse ficheiro "
+        "como congelado: a politica tem de ser lida de settings_store."
+    )
+    #
+    # So `guest*`. `discord_daily_llm_limit` fica de fora de proposito: esse
+    # campo ja existe no config.py de producao, e nao mexer num campo que a
+    # instalacao ja tem e o que mantem as arvores identicas. A loja e lida
+    # primeiro, portanto um owner que o defina em /admin/config ganha a esse
+    # valor; o `.env` continua a valer para quem nunca passou pela pagina.
+    #
+    # A primeira versao deste assert era larga demais e falhava com um campo
+    # pre-existente, que e a forma de um teste de arquitectura acabar odiado
+    # por coisas que nao e culpa dele.
+    leaked = [
+        name
+        for name in dir(getattr(config, "config", object()))
+        if "guest" in name.lower()
+    ]
+    assert not leaked, f"config.py voltou a declarar a politica: {leaked}"
+
+
+def test_the_allowlist_survives_a_store_that_says_nothing():
+    """Uma loja vazia tem de dar a default, nao uma lista vazia.
+
+    "Sem default" e "ninguem pode usar nada" produzem o mesmo valor e
+    comportamentos opostos. Sem a default, uma base de dados nova tirava o
+    clima e a calculadora a todos os convidados sem ninguem reparar.
+    """
+    from src import settings_store
+
+    original = settings_store.get_setting
+    settings_store.get_setting = lambda k, default=None: default
+    try:
+        assert "weather" in da.allowed_guest_skills()
+        assert da.check(GUEST, "que tempo faz", ["skill_weather"])[0]
+    finally:
+        settings_store.get_setting = original
+
+
+def test_a_limit_the_owner_never_set_keeps_the_configured_one():
+    """O `.env` ainda serve, so nao manda.
+
+    `DISCORD_DAILY_LLM_LIMIT` ja existia em `config.py` e pode estar no `.env` de
+    uma instalacao. Um valor posto a mao la nao pode ser apagado por uma loja
+    vazia -- senao mudar de instalacao passa a apagar um limite.
+    """
+    from src import settings_store
+
+    original = settings_store.get_setting
+    settings_store.get_setting = lambda k, default=None: default
+    try:
+        assert da._daily_limit() == 3
+    finally:
+        settings_store.get_setting = original

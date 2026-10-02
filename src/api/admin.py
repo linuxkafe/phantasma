@@ -40,6 +40,7 @@ from flask import (
 )
 
 import config
+from src.api.discord_access import DEFAULT_GUEST_SKILLS
 from src.pipeline import quiet
 from src.settings_store import (
     DEFAULT_REACTION_WEIGHTS,
@@ -1029,33 +1030,6 @@ CONFIG_CONTROLS: dict[str, dict] = {
     "DEBUG_MODE": dict(category="Security", type="bool", label="Modo de depuração",
                        help="Registos mais detalhados. Deve ficar desligado em produção."),
     "ALERT_EMAIL": dict(category="Security", type="text", label="Email para alertas"),
-    # --- Convidados do Discord (2026-10-02) ---------------------------------
-    #
-    # Um convidado nao entra: nao ha login, nem sessao, nem interface. Ele so
-    # existe no Discord, e a identidade e o `author.id` que o Discord poe na
-    # mensagem. O que estas duas caixas controlam e o alcance desse acesso.
-    #
-    # Allowlist, nao blocklist, por decisao do dono: o inventario real sao 24
-    # skills e nomear as perigosas e um trabalho que nunca acaba -- `dream`,
-    # `discord`, `feedback`, `ui` e `music` nasce permitidas numa blocklist, e
-    # qualquer skill nova tambem.
-    #
-    # O valor por omissao nao inclui nenhuma skill que mude a casa. `tuya`,
-    # `chacon` e `xiaomi` sao o que o dono disse que um convidado nao toca.
-    "GUEST_SKILLS_ALLOWED": dict(
-        category="Security", type="text",
-        label="Skills que um convidado pode usar",
-        help=("Separadas por virgula, sem o prefixo skill_ (ex.: weather,calculator). "
-              "Qualquer skill que um pedido do convidado toque e que nao esteja aqui "
-              "e recusada. Vazio = nenhum convite pode usar nada."),
-    ),
-    "DISCORD_DAILY_LLM_LIMIT": dict(
-        category="Security", type="number", min=0, max=200, step=1,
-        label="Pedidos por dia por convidado",
-        help=("Conta TODOS os pedidos de um convidado, incluindo os que uma skill "
-              "autorizada responde. A contagem vive em memoria: um reinicio perdoa "
-              "o dia. 0 = ilimitado."),
-    ),
 }
 
 CONFIG_CONTROL_CATEGORIES = {meta["category"] for meta in CONFIG_CONTROLS.values()}
@@ -1212,6 +1186,102 @@ CONFIG_TEMPLATE = (
       <button type="submit" name="action" value="save_quiet" style="margin-top:.75rem;">
         {% if lang == 'en' %}Save night mode{% else %}Guardar periodo noturno{% endif %}
       </button>
+    </div>
+
+    {# Convidados do Discord. Aqui e NAO em CONFIG_CONTROLS, e a raza e um
+       contrato, nao uma preferencia: CONFIG_CONTROLS e o registo dos controlos
+       cujo valor chega ao processo pela variable de ambiente, e o teste
+       test_whitelists_match_the_ui_registry garante que _OVERLAY_KEYS e esse
+       registo ao letra. _OVERLAY_KEYS vive no config.py, que o deploy.sh trata
+       como congelado -- nao e copiado, e e porteado byte-a-byte entre as arvores.
+
+       Um valor novo em config.py nunca chegaria a producao pelo script, e
+       copia-lo a mao e precisamente o que o script existe para impedir. Logo
+       esta politica nao pode depender do config.py -- e o sitio certo e o mesmo
+       que o periodo noturno usa: lido de app_settings, que e "a fonte de
+       verdade" como o proprio POST diz. E a diferenca de fundo: a politica de
+       quem pode tocar em que e do dono, nao um valor desta maquina. #}
+    <div style="margin-top:1.5rem; padding-top:1rem; border-top:1px solid var(--border);">
+      <h3 style="margin:.25rem 0 .6rem;">
+        {% if lang == 'en' %}Discord guests{% else %}Convidados do Discord{% endif %}
+      </h3>
+      <p style="opacity:.72; margin:.2rem 0 .8rem; max-width:52rem;">
+        {% if lang == 'en' %}
+          A guest has no login and no session: they exist only on Discord, and
+          their identity is the Discord user id on the message. An id that is not
+          on your list is ignored before anything else happens. Below is what
+          those ids may reach.
+        {% else %}
+          Um convidado nao tem login nem sessao: so existe no Discord, e a
+          identidade e o id de utilizador do Discord na mensagem. Um id que nao
+          esteja na tua lista e ignorado antes de acontecer seja o que for.
+          Abaixo, ate onde e que esses ids chegam.
+        {% endif %}
+      </p>
+      <table style="width:100%; border-collapse:collapse;">
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border);">
+            <td style="padding:.35rem;">
+              <label for="guest_skills_allowed">
+                {% if lang == 'en' %}Skills a guest may use{% else %}Skills que um convidado pode usar{% endif %}
+              </label>
+              <div style="opacity:.72; font-size:.85rem;">
+                {% if lang == 'en' %}
+                  Comma-separated, without the skill_ prefix (e.g. weather,calculator).
+                  Any skill a guest's request lands on that is not on this list is
+                  refused. Empty = a guest may use nothing. No device skill belongs
+                  here: tuya, chacon and xiaomi change the house.
+                {% else %}
+                  Separadas por virgula, sem o prefixo skill_ (ex.: weather,calculator).
+                  Qualquer skill que um pedido de um convidado toque e que nao
+                  esteja aqui e recusada. Vazio = nao pode usar nada. Nenhuma skill
+                  de dispositivos entra aqui: tuya, chacon e xiaomi mudam a casa.
+                {% endif %}
+              </div>
+            </td>
+            <td style="padding:.35rem;">
+              <input type="text" id="guest_skills_allowed" name="guest_skills_allowed"
+                     value="{{ guest_skills_allowed }}" style="width:100%; min-width:14rem;">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:.35rem;">
+              <label for="guest_daily_limit">
+                {% if lang == 'en' %}Requests per day, per guest{% else %}Pedidos por dia, por convidado{% endif %}
+              </label>
+              <div style="opacity:.72; font-size:.85rem;">
+                {% if lang == 'en' %}
+                  Counts every request, including the ones an allowed skill answers.
+                  Counted in memory: a restart forgives the day. 0 = unlimited.
+                {% else %}
+                  Conta todos os pedidos, incluindo os que uma skill autorizada
+                  responde. Contados em memoria: um reinicio perdoa o dia.
+                  0 = ilimitado.
+                {% endif %}
+              </div>
+            </td>
+            <td style="padding:.35rem;">
+              <input type="number" id="guest_daily_limit" name="guest_daily_limit"
+                     min="0" max="200" step="1" value="{{ guest_daily_limit }}"
+                     style="width:7rem;">
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <button type="submit" name="action" value="save_guests" style="margin-top:.75rem;">
+        {% if lang == 'en' %}Save guest access{% else %}Guardar acesso de convidados{% endif %}
+      </button>
+      <p style="opacity:.72; margin:.6rem 0 0; max-width:52rem;">
+        {% if lang == 'en' %}
+          The guest ids themselves stay in DISCORD_STANDARD_USERS in the .env.
+          That file holds machine values; who you let in is a decision, and it
+          belongs here rather than in a file only you can edit by hand.
+        {% else %}
+          Os proprios ids ficam em DISCORD_STANDARD_USERS, no .env. Esse ficheiro
+          guarda valores desta maquina; quem deixas entrar e uma decisao, e e tua,
+          nao um valor de host que viva num ficheiro que so tu abres.
+        {% endif %}
+      </p>
     </div>
 
     <button type="submit" name="config_submit">Atualizar Configurações</button>
@@ -3184,6 +3254,27 @@ def config_manager():
             quiet.set_schedule(schedule)
             flash("Periodo noturno guardado e activo.")
             return redirect(url_for("admin.config_manager"))
+        if request.form.get("action") == "save_guests":
+            raw = (request.form.get("guest_skills_allowed") or "").strip()
+            # Normalised to the short form on the way IN, so what the owner reads
+            # back is the same list the rule compares against. `weather` and
+            # `skill_weather` both work; only one of them is written down.
+            names = [
+                w for w in (
+                    (n.lower().removeprefix("skill_").strip()) for n in raw.split(",")
+                ) if w
+            ]
+            set_setting(
+                "GUEST_SKILLS_ALLOWED", ",".join(names), updated_by=_current_user()
+            )
+            try:
+                limit = max(0, int(str(request.form.get("guest_daily_limit", "")).strip()))
+            except ValueError:
+                flash("O limite diario tem de ser um numero.", "error")
+                return redirect(url_for("admin.config_manager"))
+            set_setting("DISCORD_DAILY_LLM_LIMIT", str(limit), updated_by=_current_user())
+            flash("Acesso de convidados guardado. Vale a partir da proxima mensagem.")
+            return redirect(url_for("admin.config_manager"))
         for key, meta in CONFIG_CONTROLS.items():
             field = f"config_{key}"
             if meta["type"] == "bool":
@@ -3202,6 +3293,15 @@ def config_manager():
 
     configs = get_configs_by_category()
     _sched = quiet.QuietSchedule.parse(get_setting("quiet_schedule", None))
+    _guest_skills = get_setting("GUEST_SKILLS_ALLOWED", None)
+    if _guest_skills is None or _guest_skills.strip() == "":
+        # The default is spelled out here because config.py cannot hold it: that
+        # file is frozen by the deploy contract. A rule's default belongs next to
+        # the rule, and this page is the only other place that may name it.
+        _guest_skills = DEFAULT_GUEST_SKILLS
+    _guest_limit = get_setting("DISCORD_DAILY_LLM_LIMIT", None)
+    if _guest_limit is None or _guest_limit.strip() == "":
+        _guest_limit = str(getattr(config, "DISCORD_DAILY_LLM_LIMIT", 3))
     _d = _sched.default.as_dict()
     quiet_ctx = {k: v.as_dict() for k, v in _sched.days.items()}
     categories = [
@@ -3222,6 +3322,8 @@ def config_manager():
         quiet=quiet_ctx,
         quiet_default=_d,
         categories=categories,
+        guest_skills_allowed=_guest_skills,
+        guest_daily_limit=_guest_limit,
         controls=CONFIG_CONTROLS,
         user=_current_user(),
         nav_menu=nav_menu,

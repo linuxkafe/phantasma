@@ -44,13 +44,32 @@ import config
 
 log = logging.getLogger(__name__)
 
+# The default allowlist, and it lives HERE rather than in config.py for a reason
+# that cost a deploy to learn.
+#
+# `config.py` is not part of the deployed product: deploy.sh deliberately leaves
+# it out of both SYNC_DIRS and TOP_LEVEL_SYNC, and hard-gates it as
+# byte-identical across the trees, because a host value in a dataclass default is
+# how the two copies forked for years. The consequence is that config.py is
+# FROZEN -- a new setting added there can never reach production by the script,
+# and copying it by hand is exactly what the script exists to prevent.
+#
+# So this rule reads what `/admin/config` already writes. The config page stores
+# each value twice and says which one counts: the config-table write is "the
+# display mirror", the `set_setting` write is "the source of truth" for the
+# running assistant. Reading `settings_store` is therefore not a workaround, it
+# is the pattern the page was already built on -- and it takes effect on the
+# next message instead of the next boot.
+#
+# Order: the admin page, then config/env if anyone ever sets one, then this.
+DEFAULT_GUEST_SKILLS = "weather,calculator"
+
 def allowed_guest_skills() -> list[str]:
     """The skill names a guest may run, from ``GUEST_SKILLS_ALLOWED``.
 
-    Read on every call, never cached into a module global. Not for freshness --
-    a change on ``/admin/config`` reaches the process the same way every other
-    setting on that page does, on the next start -- but because a module global
-    here would be a second copy of the policy with its own lifetime, and the
+    Read on every call, never cached into a module global -- both so an edit on
+    ``/admin/config`` takes effect on the very next message, and because a module
+    global here would be a second copy of the policy with its own lifetime. The
     question "which one is in force" is the question that turns a permission
     change into an argument.
 
@@ -60,7 +79,7 @@ def allowed_guest_skills() -> list[str]:
     Accepting the short form is friendlier than forcing the owner to learn the
     loader's internal naming.
     """
-    raw = getattr(config, "GUEST_SKILLS_ALLOWED", "") or ""
+    raw = _read_owner_setting("GUEST_SKILLS_ALLOWED", DEFAULT_GUEST_SKILLS)
     out = []
     for part in str(raw).split(","):
         name = part.strip().lower()
@@ -69,6 +88,27 @@ def allowed_guest_skills() -> list[str]:
         if name:
             out.append(name)
     return out
+
+
+def _read_owner_setting(key: str, default: str) -> str:
+    """What the owner set on ``/admin/config``, or ``default``.
+
+    The admin page first, because it is what the page writes and it applies
+    without a restart. ``config``/env second, for a value set by hand in ``.env``,
+    and only when the page has never been used for that key.
+    """
+    try:
+        from src.settings_store import get_setting
+
+        stored = get_setting(key, None)
+        if stored is not None and stored != "":
+            return str(stored)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: leitura de %s falhou: %s", key, exc)
+    from_env = getattr(config, key, None)
+    if from_env not in (None, ""):
+        return str(from_env)
+    return default
 
 
 def _normalise_skill(skill_name: Any) -> str:
@@ -81,6 +121,26 @@ def _normalise_skill(skill_name: Any) -> str:
 # the owner out of their own house for the rest of the day. It is a rate limit,
 # not an entitlement.
 _USER_QUOTAS: dict[Any, dict[str, Any]] = {}
+
+
+def _daily_limit() -> int:
+    """Requests per guest per day, as the owner set it.
+
+    ``0`` means unlimited. It is spelled out because "a limit of zero" reads like
+    a bug in a message and a config value, and an owner who sets 0 to mean
+    "unlimited" and gets "your limit of 0" has been told nothing.
+    """
+    raw = _read_owner_setting("DISCORD_DAILY_LLM_LIMIT", "")
+    if raw.strip() == "":
+        try:
+            return int(getattr(config, "DISCORD_DAILY_LLM_LIMIT", 3))
+        except (TypeError, ValueError):
+            return 3
+    try:
+        return max(0, int(str(raw).strip()))
+    except ValueError:
+        log.warning("discord: DISCORD_DAILY_LLM_LIMIT invalido: %r", raw)
+        return 3
 
 
 def _guest_tier(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
@@ -125,9 +185,11 @@ def _guest_tier(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
     if user_id not in _USER_QUOTAS or _USER_QUOTAS[user_id]["date"] != today:
         _USER_QUOTAS[user_id] = {"date": today, "count": 0}
 
-    limit = getattr(config, "DISCORD_DAILY_LLM_LIMIT", 3)
+    limit = _daily_limit()
     if _USER_QUOTAS[user_id]["count"] < limit:
         _USER_QUOTAS[user_id]["count"] += 1
+        return True, ""
+    if limit == 0:
         return True, ""
     return (
         False,
