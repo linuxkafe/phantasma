@@ -440,6 +440,27 @@ def create_app(pipeline=None) -> Flask:
     # /api/memory/* and everything under /admin are NOT here: they are the
     # owner's own writing and the admin surface, and they keep their own
     # session+admin gates.
+    #
+    # Prefix rules, because the exact-match set cannot express a path with a
+    # variable segment. `POST /api/devices/<name>/control` is the device-writing
+    # endpoint, and it was NOT in _TOKEN_PATHS -- so it reached its handler with
+    # no session and no token. Verified 2026-10-02, unauthenticated, on the
+    # isolated app:
+    #
+    #     /comando                     -> 401
+    #     /device_action               -> 401
+    #     /api/command                 -> 401
+    #     /api/devices/luz/control     -> 404 {"error":"Device not found"}
+    #
+    # The 404 is the handler RUNNING: "Device not found" is its answer for a name
+    # it does not know. With a real device name in the config it would have
+    # switched it. This is the endpoint the T068 guest role has to be kept out
+    # of, so it being the one hole is not a detail.
+    _TOKEN_PREFIXES = frozenset(
+        {
+            "/api/devices/",  # .../<name>/control writes; /api/devices reads
+        }
+    )
     @app.before_request
     def _authorize_api():
         # Preflight, for an allow-listed origin only. A browser asks before it
@@ -453,7 +474,10 @@ def create_app(pipeline=None) -> Flask:
             return ("", 204)
 
         path = request.path
-        if path in _TOKEN_PATHS and request.method in (
+        gated = path in _TOKEN_PATHS or any(
+            path.startswith(p) for p in _TOKEN_PREFIXES
+        )
+        if gated and request.method in (
             "GET",
             "POST",
             "PUT",

@@ -585,29 +585,45 @@ ferramenta certa — `_research_gap` e `_concept_from_reply` devem rejeitar
 labels que não são linguagem natural. E o gate **não** foi aplicado ao caminho
 `reconcile.py:116`, que é por onde esta consulta saiu.
 
-## [HIGH] [DISCOVERED 2026-10-02] Duas rotas que mudam a casa nao tem gate
+## [HIGH] [DISCOVERED 2026-10-02] `POST /api/devices/<name>/control` nao tinha gate — e eu reportei duas
 
-Verificado ao preparar o T068 (convidados que nao podem activar dispositivos):
+**Corrigido, e o primeiro relatório estava errado.** Escrevi que `/comando`,
+`/device_action` e `/api/devices/<name>/control` estavam todas sem gate. Verificado
+depois, contra a app isolada e sem credencial nenhuma:
 
-| rota | gate |
-|---|---|
-| `/comando` | sim — `routes.py:335` |
-| `/device_action` | **NAO** — `routes.py:587`, so `@app.route` |
-| `/api/devices/<name>/control` | **NAO** — `routes.py:1202`, idem |
+```
+/comando                  -> 401   gated
+/device_action            -> 401   gated
+/api/command              -> 401   gated
+/api/devices/luz/control  -> 404   {"error":"Device not found"}   <- NAO gated
+```
 
-Isto **e verdade hoje**, com ou sem convidados, e contraria a politica escrita em
-`src/api/ui_auth.py:29` — *"Reads stay open; actions do not"* — acoes exigem
-credencial.
+**Uma rota, não três.** `/device_action` está em `_TOKEN_PATHS` e foi sempre
+gated. Reportei-o como não-gated porque li os decoradores (`@app.route`) em vez
+de a gate — que é um `before_request` a comparar `request.path` com um conjunto.
 
-Um convidado deDiscord com uma sessao valida acede a estes dois paths. A razao
-pelo qual hoje nao consequence nao e uma gate: e o facto de nao haver papel de
-convidado, e de o bypass de loopback abrir `/admin/*` (ver T057, item 2).
+Causa real de a uma ter escapado: **`_TOKEN_PATHS` é comparação exacta, e um
+path com um segmento variável (`<name>`) não se escreve num conjunto exacto.**
+As outras três são paths fixos; esta não é, e por isso nunca entrou.
 
-**Por que e um item separado e nao parte do T068:** construir um sistema de
-permissoes em cima de uma gate de accoes com um buraco e construir em cima de
-areia — e o buraco e exactamente o que um convidado nao devia poder atravessar.
-A recommendacao e fechar isto primeiro, com um teste que prove que uma sessao
-sem token nao muda a casa, e so depois construir o T068 sobre a gate fechada.
+O 404 não era "não existe": é o handler a correr. "Device not found" é a resposta
+dele para um nome que não conhece — com um nome real no config, teria mudado o
+dispositivo.
+
+Corrido com um conjunto de prefixos (`_TOKEN_PREFIXES`) e um teste novo,
+`tests/test_house_gate.py`, parametrizado por **toda** a rota que toca a casa:
+acrescentar uma rota de acção nova sem a gate tem de partir um teste.
+
+**A lição, que é do registo e não do código:** reportei um achado de segurança a
+partir de leitura de markup. Bastava correr quatro pedidos sem credencial, como
+`tests/test_house_gate.py` faz, para saber exactamente qual era. Escrevi no
+docstring da review T058 que um teste de markup não distingue "presente" de
+"funciona", e reportei um bug de *presença* de gate por leitura de markup.
+
+Nota: com D4 do T068 decidido pelo dono — o convidado **pode** ler RAG e memórias
+— esta gate passa a ser a única separação entre um convidado e a casa. Deixou de
+ser uma melhoria e passou a ser pré-requisito.
+
 
 Nota relacionada: `routes.py:344` documenta que com `PHANTASMA_COMMAND_TOKEN`
 por definir o gate devolvia `True` — "EITHER credential is enough, and NEITHER
