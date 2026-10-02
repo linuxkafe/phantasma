@@ -1619,18 +1619,27 @@ body.brain-fullscreen > #corrigir { display:none; }
   flex:0 0 auto; display:flex; align-items:center; gap:var(--sp-2);
   padding:0 var(--sp-2) 0 0;
   background:var(--bg-color); border-bottom:1px solid var(--border); }
+/* One row, and the burger where every other page has it. It sat at x=4 here
+   and at x=1276 on /admin/config and /admin/users, measured: the nav was
+   shrunk to the button's width and the row started with it. CSS order moves it
+   to the end without touching `_build_nav_menu`, which 12 routes share and
+   whose `extra_in_bar` position is documented behaviour.
+   The markup keeps the nav first, which is also what the collapsed menu's
+   `right: 0` anchors against, so the dropdown still drops from the right. */
+.brain-topbar > .brain-tabs { order:1; flex:1 1 auto; min-width:0; }
+.brain-topbar > .sleep-bar  { order:2; flex:0 0 auto; }
+.brain-topbar > .nav-bar    { order:3; flex:0 0 auto; }
 /* The nav contributes the burger only -- its menu is a collapsed panel on every
    admin page. flex:0 0 auto keeps the bar at the button's width instead of
-   stretching across the row, which would push the tab list to the middle. */
+   stretching across the row. */
 .brain-topbar > .nav-bar {
-  flex:0 0 auto; background:transparent; border-bottom:0; padding:0 var(--sp-1); }
-/* The collapsed menu is `position:absolute; right:0` against .nav-bar. As a row
-   member the bar is only as wide as the burger, so the panel opened at x=-148
-   with two thirds of it off-screen -- caught by
-   test_the_burger_still_opens_the_menu_inside_the_viewport. Anchoring it to the
-   bar's left edge puts it under its own trigger. Below 901px the menu becomes a
-   full-screen overlay with its own geometry and this does not apply. */
-@media (min-width:901px) { .brain-topbar .nav-menu { left:0; right:auto; } }
+  background:transparent; border-bottom:0; padding:0 var(--sp-1); }
+/* The collapsed menu is `position:absolute; right:0` against .nav-bar, and it
+   is still correct now that the nav sits at the END of the row. T058 pinned it
+   to `left: 0` instead, when the nav was a 52px sliver at the far left and
+   `right: 0` pushed the panel to x=-148. With the nav on the right the default
+   anchors the panel correctly; the override opened it at x=1380..1580 in a
+   1440px window, i.e. off the right edge. Removed with the reason. */
 .brain-titlebar {
   font-weight:var(--fw-h2); font-size:var(--fs-h3); color:var(--text);
   white-space:nowrap; }

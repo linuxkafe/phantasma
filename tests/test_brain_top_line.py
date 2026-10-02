@@ -318,6 +318,55 @@ def test_the_3d_views_own_bar_is_not_covered(browser, brain_server, width, heigh
     )
 
 
+@pytest.mark.parametrize("page", ["/admin/brain", "/admin/config", "/admin/users"])
+def test_the_burger_is_on_the_right_on_every_admin_page(browser, brain_server, page):
+    """Reported 2026-10-02: on /admin/brain the hamburger was hard against the
+    left edge while on /admin/config, /admin/users and / it sat at the right.
+    Measured x=4 against x=1276 in a 1440px window.
+
+    Not a cosmetic rule. The toggle is the only control that reaches every admin
+    page, and a control that moves between pages is a control nobody builds
+    muscle memory for.
+
+    Measured before the fix: /admin/brain toggle at x=4, /admin/config at
+    x=1276. That is the comparison that fails without the change.
+
+    The upper bound is 130px, not 16: the other pages centre a 1200px container,
+    so their toggle legitimately sits ~120px in from the edge. /admin/brain is
+    full-bleed and lands at 12px. What has to match is the SIDE, not the
+    distance.
+    """
+    pg = browser.new_page(viewport={"width": 1440, "height": 900})
+    try:
+        pg.goto(f"{brain_server}{page}", wait_until="domcontentloaded")
+        pg.wait_for_selector(".nav-toggle")
+        pg.wait_for_timeout(400)
+        d = pg.evaluate(
+            """() => {
+                const t = document.querySelector('.nav-toggle');
+                const bar = document.querySelector('.nav-bar');
+                const tr = t.getBoundingClientRect(), br = bar.getBoundingClientRect();
+                return {screenLeft: Math.round(tr.left),
+                        screenRight: Math.round(window.innerWidth - tr.right),
+                        barW: Math.round(br.width)};
+            }"""
+        )
+    finally:
+        pg.close()
+    assert d["screenLeft"] > d["screenRight"], (
+        f"o hamburger em {page} esta a {d['screenLeft']}px da esquerda do ecra "
+        f"e a {d['screenRight']}px da direita: encostado a esquerda enquanto as "
+        f"outras paginas o poem a direita"
+    )
+    # Not "flush against the viewport": /admin/config and /admin/users put it at
+    # the right of the 1200px centred .page container, ~120px in from the edge.
+    # That is correct for them. What has to match is the SIDE.
+    assert d["screenRight"] <= 130, (
+        f"o hamburger em {page} esta a {d['screenRight']}px da borda, "
+        f"longe demais para ser a direita (barra de {d['barW']}px)"
+    )
+
+
 def test_the_three_bars_are_siblings_in_one_row(browser, brain_server):
     """The structural claim the whole thing rests on. If one of them is moved
     back inside .brain-hub or .brain-stage, the stage stops filling the hub and
