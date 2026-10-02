@@ -29,6 +29,12 @@ from typing import Any, Iterable, Optional, Sequence
 
 import config
 
+# Only the language check crosses into the view layer. `is_speech_label`
+# deliberately does NOT: the speech nodes already stored in memory_graph are
+# the data-repair ticket's business to remove or keep, and hiding them here
+# would also hide them from the only interface that can delete them.
+from src.brain.memory_graph import is_language_tag
+
 # Resolved through config so a dev checkout uses its own database. This used to
 # be hardcoded to /opt/phantasma/data/brain.db, so a dev process read -- and
 # could write -- the PRODUCTION database. In production the resolved path is
@@ -116,15 +122,53 @@ def parse_memory(text: str) -> dict[str, Any]:
             result["mermaid"] = diagram.strip()
             break
     if result["tags"]:
-        result["preview"] = result["tags"][0][:_MAX_LABEL]
+        result["preview"] = _informative_text(result)
     return result
 
 
-def _memory_label(parsed: dict[str, Any]) -> str:
-    if parsed["tags"]:
-        return f"#{parsed['tags'][0]}"[:_MAX_LABEL]
-    preview = parsed["preview"]
-    return (preview[:_MAX_LABEL] + "…") if len(preview) > _MAX_LABEL else (preview or "(vazio)")
+def _informative_text(parsed: dict[str, Any]) -> str:
+    """The most identifying text a memory has, for its preview.
+
+    Deliberately NOT the first tag (T060). Three memories tagged ``pt`` each
+    produced the label ``#pt`` and the same preview, so the 3D view showed three
+    indistinguishable nodes that identified nothing -- and ``preview`` is used
+    nowhere else in the codebase, so it was information thrown away for a
+    duplicate. A fact is about the memory; a tag is about the category, and the
+    category is already rendered next to the node.
+
+    Returns "" when the payload is JSON with no fact and no usable tag. It must
+    not fall back to ``preview`` there: for a parsed memory that is the raw
+    JSON head, and labelling a node ``{"tags": ["pt"], "facts": []}`` is worse
+    than the ``#pt`` it replaced.
+    """
+    for fact in parsed["facts"]:
+        if fact.strip():
+            return fact.strip()[:_MAX_LABEL]
+    for tag in parsed["tags"]:
+        if tag.strip() and not is_language_tag(tag):
+            return tag.strip()[:_MAX_LABEL]
+    if parsed["parsed"]:
+        return ""
+    return parsed["preview"]
+
+
+def _memory_label(parsed: dict[str, Any], mem_id: Any = None) -> str:
+    """A label that tells this memory apart from the others.
+
+    Used to be ``#{first tag}``, which is a category, not an identity: with
+    three memories tagged ``pt`` the explorer drew three nodes reading ``#pt``.
+    Production has no ``summary`` key -- the 33 stored payloads carry ``tags``
+    (31), ``facts`` (30), ``tags_pt``/``facts_en``/``tags(PT)``/
+    ``facts(EN S->P->O)`` (1 each) and ``mermaid`` (1) -- so the chain is fact,
+    then a tag that is not a language marker, then the plain text for a payload
+    that did not parse, and finally the id: a memory whose only content is
+    ``{"tags": ["pt"]}`` has nothing to be named after, and saying so by id is
+    honest where inventing a label is not.
+    """
+    text = _informative_text(parsed)
+    if not text:
+        return f"memória {mem_id}" if mem_id is not None else "(sem texto)"
+    return (text[:_MAX_LABEL] + "…") if len(text) > _MAX_LABEL else text
 
 
 class _ConceptRegistry:
@@ -250,7 +294,7 @@ def build_graph(
             {
                 "id": node_id,
                 "kind": "memory",
-                "label": _memory_label(parsed),
+                "label": _memory_label(parsed, mem_id),
                 "timestamp": timestamp,
                 "preview": parsed["preview"],
                 "tags": parsed["tags"],
@@ -262,6 +306,12 @@ def build_graph(
         )
 
         for tag in parsed["tags"]:
+            # A language marker is not a concept. `pt` and `Dev` were reaching
+            # the 3D view as `tag:pt` and `tag:dev` nodes with `tagged` links
+            # hanging off them: the payload describing itself, drawn as if it
+            # were something the brain knew (T060).
+            if is_language_tag(tag):
+                continue
             concept = concepts.get(tag)
             if "tag" not in concept["sources"]:
                 concept["sources"].append("tag")

@@ -49,7 +49,16 @@ def test_parse_memory_reads_tags_facts_mermaid():
     assert parsed["tags"] == ["Capitalismo Tardio", "Plataformas Digitais"]
     assert parsed["facts"] == ["depende de plataformas"]
     assert parsed["mermaid"].startswith("graph TD;")
-    assert parsed["preview"] == "Capitalismo Tardio"
+    # Re-specified in T060. This asserted `preview == "Capitalismo Tardio"`,
+    # i.e. that a memory's preview is its first tag. That is a category, not a
+    # preview, and it is why three memories tagged `pt` drew three nodes all
+    # reading `#pt` with three identical previews. The preview is now the most
+    # identifying text the payload has -- and the assertion is stronger than the
+    # one it replaces, because it now says what the preview must NOT be as well.
+    assert parsed["preview"] == "depende de plataformas", (
+        f"preview should be the fact, not the tag: {parsed['preview']!r}"
+    )
+    assert parsed["preview"] != parsed["tags"][0]
 
 
 def test_parse_memory_handles_key_variants():

@@ -467,6 +467,83 @@ _EDGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# THE GATE (T060). What is allowed to become a node.
+#
+# There was no gate. `upsert_node` accepts any non-empty string, so an
+# utterance the user said out loud -- "Olá! O nome \"Bimby\" parece ser
+# associado a gatos que têm nomes próprios..." -- became a concept, and the
+# assistant then answered from it. T057 found the GMIF admitting conversation
+# fragments through its own door; this is the second door, and cleaning the
+# stored rows without adding this would only postpone the next cycle.
+#
+# Three signals, all measured against production before being written down.
+# A fourth candidate -- "more than N words" -- was REJECTED during analysis
+# because it also rejects "brechas e fissuras na lógica das plataformas
+# digitais", which is a research finding, not speech. See
+# aes/tickets/T060-portao-promoteabilidade-grafo.md.
+#
+# Radius, measured on the live graph: 4 of 190 nodes and 5 of 197 distinct edge
+# endpoints. No false positive among the eight shortest surviving nodes
+# (Tag, casa, gato, milk, nome, Deus, Porto, Vegan).
+# ---------------------------------------------------------------------------
+
+# No bare "a"/"the": "A saúde pública" and "The Body" are concepts, and a bare
+# English article would reject both.
+_GREETING_RE = re.compile(
+    r"^(ol[aá]|ah|ei|opa|olha|bom|hey|hi|hello|ok|ent[aã]o|desculpa|"
+    r"obrigad[oa]|yep|well|so)\b",
+    re.IGNORECASE,
+)
+
+# Language and locale markers the tagger emits. These are not concepts: they
+# describe the payload, not the world. An explicit list, deliberately, rather
+# than "three characters or fewer", which would also swallow gato, casa, milk
+# and nome -- all of which are real concepts in this graph.
+LANGUAGE_TAGS = frozenset(
+    {"pt", "en", "br", "pt-pt", "ptbr", "pt-br", "en-gb", "en-us", "es", "fr", "de"}
+    # The dev/build markers the tagger also emits. Same category: metadata.
+    | {"dev", "aoe"}
+)
+
+# ``_EDGE_RE`` is not anchored to a line (T058/B6: it swallows the `graph TD;`
+# header), so the label arriving here can be ';\nolha, nao estou a vontade...' --
+# the speech with punctuation glued to its face. Stripping leading non-word
+# characters is defence in depth for that, not a fix for it: B6 is still owed,
+# and until the regex is anchored the edge KEY it produces is still
+# 'edge:;<junk>|<node>'.
+_LEADING_JUNK_RE = re.compile(r"^[^\wÀ-ſ]+")
+
+
+def is_speech_label(label: str) -> bool:
+    """True when ``label`` is an utterance rather than a concept.
+
+    Deliberately narrow, because the cost of a false positive is a real
+    concept the owner can no longer see in the graph. Three signals:
+
+    * trailing ellipsis -- how the LLM transcribed trailing speech
+    * ends in ``!`` or ``?``
+    * a greeting/interjection opener followed by more than one further word, so
+      "Bom dia" survives and "Olha, não estou muito à vontade hoje..." does not
+
+    "Ah, a chuva..." is rejected by the first rule even though it reads as a
+    plausible conclusion rather than speech. That is a judgement call and it is
+    one line: delete the ellipsis clause to reverse it.
+    """
+    text = _LEADING_JUNK_RE.sub("", (label or "").strip())
+    if not text:
+        return False
+    if "..." in text or "…" in text:
+        return True
+    if text.endswith(("!", "?")):
+        return True
+    return bool(_GREETING_RE.match(text)) and len(text.split()) > 2
+
+
+def is_language_tag(tag: str) -> bool:
+    """True when a tag describes the payload rather than the world."""
+    return (tag or "").strip().lower() in LANGUAGE_TAGS
+
 
 def index_memory(memory: dict) -> list[str]:
     """Index a skill_memory JSON payload (tags + mermaid) into the graph.
@@ -474,6 +551,12 @@ def index_memory(memory: dict) -> list[str]:
     Tags become topic nodes; mermaid ``A --> B`` relations become edges.
     The first tag becomes the current topic, closing the loop with FlyBrain
     orientation/reward handling.
+
+    Everything passes the gate in :func:`is_speech_label` and
+    :func:`is_language_tag` first (T060). Both doors -- tags and mermaid edges --
+    are gated, and so is the current-topic assignment: with the old code a
+    rejected tag could still become the brain's ambient topic, which is what
+    `apply_reward` credits on a 👍 that carries no text.
 
     Args:
         memory: parsed dict from skill_memory, e.g. {"tags": [...], "mermaid": "..."}.
@@ -493,14 +576,21 @@ def index_memory(memory: dict) -> list[str]:
     if isinstance(tags, str):
         tags = [tags]
     for tag in tags:
-        if isinstance(tag, str) and tag.strip():
-            keys.append(upsert_node(tag, affinity=novelty))
+        if not isinstance(tag, str) or not tag.strip():
+            continue
+        if is_language_tag(tag) or is_speech_label(tag):
+            continue
+        keys.append(upsert_node(tag, affinity=novelty))
 
     mermaid = memory.get("mermaid") or ""
     if isinstance(mermaid, str):
         for node_a, label_a, node_b, label_b in _EDGE_RE.findall(mermaid):
             src = label_a.strip() if label_a.strip() else node_a.strip()
             dst = label_b.strip() if label_b.strip() else node_b.strip()
+            if is_speech_label(src) or is_speech_label(dst):
+                continue
+            if is_language_tag(src) or is_language_tag(dst):
+                continue
             keys.append(upsert_edge(src, dst))
 
     if keys:
