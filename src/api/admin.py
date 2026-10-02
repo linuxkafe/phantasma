@@ -1029,6 +1029,33 @@ CONFIG_CONTROLS: dict[str, dict] = {
     "DEBUG_MODE": dict(category="Security", type="bool", label="Modo de depuração",
                        help="Registos mais detalhados. Deve ficar desligado em produção."),
     "ALERT_EMAIL": dict(category="Security", type="text", label="Email para alertas"),
+    # --- Convidados do Discord (2026-10-02) ---------------------------------
+    #
+    # Um convidado nao entra: nao ha login, nem sessao, nem interface. Ele so
+    # existe no Discord, e a identidade e o `author.id` que o Discord poe na
+    # mensagem. O que estas duas caixas controlam e o alcance desse acesso.
+    #
+    # Allowlist, nao blocklist, por decisao do dono: o inventario real sao 24
+    # skills e nomear as perigosas e um trabalho que nunca acaba -- `dream`,
+    # `discord`, `feedback`, `ui` e `music` nasce permitidas numa blocklist, e
+    # qualquer skill nova tambem.
+    #
+    # O valor por omissao nao inclui nenhuma skill que mude a casa. `tuya`,
+    # `chacon` e `xiaomi` sao o que o dono disse que um convidado nao toca.
+    "GUEST_SKILLS_ALLOWED": dict(
+        category="Security", type="text",
+        label="Skills que um convidado pode usar",
+        help=("Separadas por virgula, sem o prefixo skill_ (ex.: weather,calculator). "
+              "Qualquer skill que um pedido do convidado toque e que nao esteja aqui "
+              "e recusada. Vazio = nenhum convite pode usar nada."),
+    ),
+    "DISCORD_DAILY_LLM_LIMIT": dict(
+        category="Security", type="number", min=0, max=200, step=1,
+        label="Pedidos por dia por convidado",
+        help=("Conta TODOS os pedidos de um convidado, incluindo os que uma skill "
+              "autorizada responde. A contagem vive em memoria: um reinicio perdoa "
+              "o dia. 0 = ilimitado."),
+    ),
 }
 
 CONFIG_CONTROL_CATEGORIES = {meta["category"] for meta in CONFIG_CONTROLS.values()}

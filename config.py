@@ -262,6 +262,11 @@ _OVERLAY_KEYS = frozenset(
         # Security
         "DEBUG_MODE",
         "ALERT_EMAIL",
+        # Convidados do Discord. A allowlist e o limite diario vivem em
+        # /admin/config, e sem estar aqui o overlay nao os levaria ao processo --
+        # a pagina mostraria o valor, e ele nao governaria nada.
+        "GUEST_SKILLS_ALLOWED",
+        "DISCORD_DAILY_LLM_LIMIT",
     }
 )
 
@@ -376,6 +381,7 @@ class Config:
     discord_admin_users: list[int] = field(default_factory=list)
     discord_standard_users: list[int] = field(default_factory=list)
     discord_daily_llm_limit: int = 3
+    guest_skills_allowed: str = "weather,calculator"
     whisper_initial_prompt: str = ""
     phonetic_fixes: dict = field(default_factory=dict)
 
@@ -732,6 +738,9 @@ class Config:
         cfg.discord_daily_llm_limit = int(
             os.getenv("DISCORD_DAILY_LLM_LIMIT", str(cfg.discord_daily_llm_limit))
         )
+        cfg.guest_skills_allowed = os.getenv(
+            "GUEST_SKILLS_ALLOWED", cfg.guest_skills_allowed
+        )
 
         # Whisper prompt
         cfg.whisper_initial_prompt = os.getenv("WHISPER_INITIAL_PROMPT", cfg.whisper_initial_prompt)
@@ -875,6 +884,7 @@ DISCORD_BOT_TOKEN = config.discord_bot_token
 DISCORD_ADMIN_USERS = config.discord_admin_users
 DISCORD_STANDARD_USERS = config.discord_standard_users
 DISCORD_DAILY_LLM_LIMIT = config.discord_daily_llm_limit
+GUEST_SKILLS_ALLOWED = config.guest_skills_allowed
 WHISPER_INITIAL_PROMPT = config.whisper_initial_prompt
 PHONETIC_FIXES = config.phonetic_fixes
 SYSTEM_PROMPT = config.llm.system_prompt
@@ -953,6 +963,7 @@ __all__ = [
     "DISCORD_ADMIN_USERS",
     "DISCORD_STANDARD_USERS",
     "DISCORD_DAILY_LLM_LIMIT",
+    "GUEST_SKILLS_ALLOWED",
     "WHISPER_INITIAL_PROMPT",
     "PHONETIC_FIXES",
     "SYSTEM_PROMPT",

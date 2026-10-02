@@ -137,6 +137,8 @@ class SkillLoader:
         """
         self.skills_dir = Path(skills_dir)
         self.context = context or SkillContext()
+        # Skills ask "which skill is this?" without knowing about the loader.
+        self.context.resolve_skill = self.resolve_skill_name
         self.skills: List[Skill] = []
         self._loaded_modules: dict[str, Any] = {}
         # Project root is parent of skills_dir (for imports like src.brain)
@@ -241,6 +243,31 @@ class SkillLoader:
         except Exception as e:
             logger.error(f"Error importing {module_name}: {e}")
             return None
+
+    def resolve_matching_skills(self, text: str) -> List[str]:
+        """Every skill whose ``matches`` accepts ``text``, in execution order.
+
+        All of them, not the first. ``execute_skill`` walks the whole list and
+        takes the first one that returns something non-empty, so the skill that
+        ends up answering a request is only knowable in advance as "the first
+        one that matches and does not decline". Naming just the first match and
+        authorising on that is fail-open: "acende a luz da sala" matches
+        ``skill_chacon``, ``skill_tuya`` and ``skill_xiaomi``, so refusing a
+        guest on the first alone would hand them straight to the second.
+
+        Same predicates and same order as ``find_matching_skill``, so what a
+        caller is told may happen is what happens.
+        """
+        return [s.NAME for s in self.skills if s.matches(text)]
+
+    def resolve_skill_name(self, text: str) -> Optional[str]:
+        """The first skill that would handle ``text``, or ``None``.
+
+        Convenience for callers that only want a label. Anything making an
+        authorisation decision wants :meth:`resolve_matching_skills` instead.
+        """
+        matches = self.resolve_matching_skills(text)
+        return matches[0] if matches else None
 
     def find_matching_skill(self, text: str) -> Optional[Skill]:
         """Find the first skill that matches the input text.

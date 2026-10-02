@@ -44,29 +44,37 @@ import config
 
 log = logging.getLogger(__name__)
 
-# Skills a standard user may use without spending quota. Weather and the
-# calculator: questions about the house's own state, which is the whole point of
-# the bot, as opposed to asking the language model something.
-ALLOWED_SKILL_KEYWORDS = [
-    # Meteorologia
-    "tempo",
-    "clima",
-    "meteorologia",
-    "previsão",
-    "vai chover",
-    "qualidade do ar",
-    # Calculadora
-    "quanto é",
-    "calcula",
-    "a dividir",
-    "vezes",
-    "somado",
-    "subtraído",
-    "+",
-    "-",
-    "*",
-    "/",
-]
+def allowed_guest_skills() -> list[str]:
+    """The skill names a guest may run, from ``GUEST_SKILLS_ALLOWED``.
+
+    Read on every call, never cached into a module global. Not for freshness --
+    a change on ``/admin/config`` reaches the process the same way every other
+    setting on that page does, on the next start -- but because a module global
+    here would be a second copy of the policy with its own lifetime, and the
+    question "which one is in force" is the question that turns a permission
+    change into an argument.
+
+    Both ``weather`` and ``skill_weather`` are accepted. The loader names a
+    skill after its module, so the raw value is ``skill_weather`` -- which is
+    noise in a box the owner is meant to type into, and noise in a help string.
+    Accepting the short form is friendlier than forcing the owner to learn the
+    loader's internal naming.
+    """
+    raw = getattr(config, "GUEST_SKILLS_ALLOWED", "") or ""
+    out = []
+    for part in str(raw).split(","):
+        name = part.strip().lower()
+        if name.startswith("skill_"):
+            name = name[len("skill_"):]
+        if name:
+            out.append(name)
+    return out
+
+
+def _normalise_skill(skill_name: Any) -> str:
+    name = str(skill_name or "").strip().lower()
+    return name[len("skill_"):] if name.startswith("skill_") else name
+
 
 # Per-user daily counters: {user_id: {"date": "YYYY-MM-DD", "count": int}}.
 # In memory, and deliberately: a restart forgives the quota rather than locking
@@ -75,10 +83,43 @@ ALLOWED_SKILL_KEYWORDS = [
 _USER_QUOTAS: dict[Any, dict[str, Any]] = {}
 
 
-def _standard_quota(user_id, prompt_lower: str) -> tuple[bool, str]:
-    """The standard tier: some skills are free, the rest are rationed daily."""
-    if any(keyword in prompt_lower for keyword in ALLOWED_SKILL_KEYWORDS):
-        return True, ""
+def _guest_tier(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
+    """The guest tier: an allowlist of skills, and a daily budget for requests.
+
+    Two decisions, and the order is the whole point.
+
+    1. **Does the request land on a skill the guest may not run?** Then refuse.
+       ``matching`` is every skill that matched, not the first one, and the test
+       is "is any of them outside the list". Naming only the first match would
+       be fail-open in a way that is easy to miss: "acende a luz da sala" matches
+       ``skill_chacon``, ``skill_tuya`` and ``skill_xiaomi``, and ``execute_skill``
+       walks that list until one of them answers, so a guest refused only on the
+       first would still be handed to the second.
+    2. **Otherwise, charge the budget.** Every request costs one, including the
+       ones an allowlisted skill answers.
+
+    That second rule is the owner's call ("contabiliza tudo"), and it is also
+    what closes a hole that outlived the obvious one. An earlier version exempted
+    any prompt an allowlisted skill merely *matched*: "conta-me uma historia"
+    matches ``skill_calculator`` -- which returns ``None`` -- so the answer came
+    from the language model, for free, forever, for anyone who typed a hyphen.
+    Deciding on "matched" cannot tell "this skill answered" from "this skill
+    declined and the LLM picked it up", and the difference is the whole quota.
+
+    ``matching=None`` means the caller could not resolve skills at all, and is
+    REFUSED. Reading it as "no skill matched" would be fail-open on the check
+    that keeps guests away from the house, and a wiring fault must not be the
+    thing that opens it.
+    """
+    if matching is None:
+        log.error("discord: nao foi possivel resolver a skill; pedido recusado")
+        return False, "Não consegui verificar o que esse pedido ia tocar."
+
+    allowed = allowed_guest_skills()
+    outside = [n for n in matching if _normalise_skill(n) not in allowed]
+    if outside:
+        names = ", ".join(sorted({_normalise_skill(n) for n in outside}))
+        return False, f"Não tens acesso a {names}."
 
     today = datetime.now().strftime("%Y-%m-%d")
     if user_id not in _USER_QUOTAS or _USER_QUOTAS[user_id]["date"] != today:
@@ -90,12 +131,13 @@ def _standard_quota(user_id, prompt_lower: str) -> tuple[bool, str]:
         return True, ""
     return (
         False,
-        f"Atingiste o teu limite diário de {limit} perguntas ao cérebro do "
-        f"Phantasma (as ferramentas da casa continuam a funcionar).",
+        f"Atingiste o teu limite diário de {limit} pedidos. Fica para amanhã.",
     )
 
 
-def _from_environment(user_id, prompt_lower: str) -> tuple[bool, str] | None:
+def _from_environment(
+    user_id, prompt_lower: str, matching: Any
+) -> tuple[bool, str] | None:
     """The owner's own lists, or None when this id is not in them."""
     admins = getattr(config, "DISCORD_ADMIN_USERS", None)
     if admins and user_id in admins:
@@ -106,18 +148,33 @@ def _from_environment(user_id, prompt_lower: str) -> tuple[bool, str] | None:
         # would spend its quota asking about the weather -- which is the one
         # question the free tier exists for. A first version of this function
         # passed "" and quietly taxed every allowed question.
-        return _standard_quota(user_id, prompt_lower)
+        return _guest_tier(user_id, prompt_lower, matching)
     return None
 
 
-def check(user_id, prompt_lower: str) -> tuple[bool, str]:
-    """``(allowed, message)`` for a Discord user id and a lowercased prompt.
+def check(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
+    """``(allowed, message)`` for a Discord user id, a prompt and the skill it hits.
+
+    ``matching`` is the list of skills that *would* run, resolved before anything
+    is spent. An empty list means general conversation. ``None`` means the caller
+    could not resolve at all, and is refused -- see ``_guest_tier``.
+
+    It is a required argument, and deliberately. With a default, the callers
+    written before this rule existed kept working by passing nothing, and a
+    permission check whose failure mode is "you forgot an argument and nobody
+    noticed" is not a permission check.
+
+    ``prompt_lower`` survives as a parameter and is no longer read to decide
+    anything. The previous version exempted any prompt containing ``+``, ``-``,
+    ``*`` or ``/`` -- which meant "conta-me uma historia" was free forever and
+    "conta me uma historia" stopped after three. The text of a request says
+    nothing about whether it is cheap; which skill it lands on does.
 
     A Discord id is a snowflake and the column is text, so the comparison is
     made as text: an int that overflowed or a client that sent a string with
     padding must not be able to produce a match by accident.
     """
-    decided = _from_environment(user_id, prompt_lower)
+    decided = _from_environment(user_id, prompt_lower, matching)
     if decided is not None:
         return decided
 
@@ -135,7 +192,7 @@ def check(user_id, prompt_lower: str) -> tuple[bool, str]:
     if role == "admin":
         return True, ""
     if role:
-        return _standard_quota(user_id, prompt_lower)
+        return _guest_tier(user_id, prompt_lower, matching)
     return False, "Acesso negado."
 
 

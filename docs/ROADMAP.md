@@ -585,6 +585,57 @@ ferramenta certa — `_research_gap` e `_concept_from_reply` devem rejeitar
 labels que não são linguagem natural. E o gate **não** foi aplicado ao caminho
 `reconcile.py:116`, que é por onde esta consulta saiu.
 
+## [HIGH] [DISCOVERED 2026-10-02] A allowlist dos convidados nao existia; a quota era contornavel
+
+**A regra parecia uma allowlist e nao restringia nada.** `ALLOWED_SKILL_KEYWORDS`
+era uma lista de sub-cadeias do prompt que so decidia se o pedido gastava quota.
+Verificado:
+
+```
+convidado, acesso isolado:
+  PERMITE  'toca uma musica'
+  PERMITE  'inicia o sonho'
+  PERMITE  'acende aTv do quarto'
+  PERMITE  'abre as persianas'
+```
+
+`music`, `dream` e os dispositivos: todosreachable. Nao havia allowlist nenhuma --
+`skill_chacon`, `skill_tuya` e `skill_xiaomi` nunca foram postas numa lista.
+
+**E a quota nao era uma quota.** `+`, `-`, `*` e `/` estavam na lista, e isso casa
+com qualquer pedido que contenha o caractere:
+
+```
+'conta-me uma historia'   8 pedidos -> 8/8 passaram
+'conta me uma historia'   8 pedidos -> 3/8 passaram
+```
+
+Um hifen tornava o limite inexistente. A lista original era, afinal, uma copia a
+mao dos TRIGGERS do `skill_calculator` -- e por isso divergiu do que as skills
+fazem.
+
+**Corrido.** A decisao passa a ser tomada sobre **qual skill o pedido toca**,
+resolvida antes de gastar seja o que for (`resolve_matching_skills`), e a regra e
+"qualquer skill casada fora da allowlist recusa". Allowlist e nao blocklist, por
+decisao do dono. A quota passou a contar **tudo** -- inclusive o que uma skill
+autorizada responde -- porque e isso que fecha o buraco do hifen: `calculator`
+casa com "conta-me uma historia" e devolve `None`, ou seja, quem responde e o LLM,
+e uma isencao baseada em "casou" nao distingue "respondeu" de "recusou e o LLM
+apanhou".
+
+`tests/test_guest_skills.py`, 12 testes; 11 falham contra o codigo antigo.
+
+**Duas arestas que ficam abertas, por decisao do dono:**
+
+1. `matching=None` recusa. Um resolver nao ligado e uma falha de wiring, e
+   falha de wiring nao pode ser o que abre a porta.
+2. **"quanto e 2+2" e recusado.** Casa com TRES skills: `calculator`, `cloogy` e
+   `tuya` -- as duas ultimas porque ambas declaram o gatilho `"quanto"`, que e
+   substring de "quanto e". A regra e fail-closed, portanto recusa. O owner tem de
+   escolher: estreitar os gatilhos, decidir pela skill que responderia (exige
+   executar antes de autorizar), ou allowlistar e aceitar o que vem com ela.
+   Nenhuma e uma decisao de leitura de codigo.
+
 ## [HIGH] [DISCOVERED 2026-10-02] `POST /api/devices/<name>/control` nao tinha gate — e eu reportei duas
 
 **Corrigido, e o primeiro relatório estava errado.** Escrevi que `/comando`,

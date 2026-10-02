@@ -46,6 +46,15 @@ class SkillContext:
     llm: Any = None
     config: Any = None
     fly_brain: Any = None
+    # text -> the NAME of the skill that would handle it, or None for "no skill
+    # matched". Wired by the loader.
+    #
+    # It exists for one caller: `skill_discord` has to decide whether the person
+    # asking is allowed the skill their question lands on, and it cannot know
+    # that from the prompt alone. It also could not reach the loader, so without
+    # this the only alternative was guessing from substrings -- which is how a
+    # hyphen came to mean "unlimited questions to the language model".
+    resolve_skill: Any = None
 
 
 class Skill(ABC):

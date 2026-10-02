@@ -192,7 +192,17 @@ def _check(user_id, monkeypatch):
     monkeypatch.setattr(discord_access.config, "DISCORD_ADMIN_USERS", [], raising=False)
     monkeypatch.setattr(discord_access.config, "DISCORD_STANDARD_USERS", [], raising=False)
     discord_access.reset_quotas()
-    return discord_access.check(user_id, "liga a luz")
+    # The skills the prompt lands on, named explicitly, and one the guest tier
+    # allows. Passing nothing used to mean "no idea, allow it", which under the
+    # guest rule is a refusal -- and a refusal in a test about whether a claimed
+    # id is honoured tests the wrong thing entirely. Naming a DEVICE skill would
+    # have the same problem for the same reason: a guest is refused those on
+    # purpose, so the test would be asserting a refusal and calling it identity.
+    #
+    # The assertion below is unchanged. If the id failed to resolve, the message
+    # would be "Acesso negado" rather than a skill complaint, and it would still
+    # fail -- so this still tests identity, not access.
+    return discord_access.check(user_id, "liga a luz", ["skill_weather"])
 
 
 def test_the_bot_honours_a_claimed_id(app_and_client, monkeypatch):
@@ -220,14 +230,14 @@ def test_the_environment_lists_keep_precedence(app_and_client, monkeypatch):
     monkeypatch.setattr(discord_access.config, "DISCORD_ADMIN_USERS", [600600600],
                         raising=False)
     monkeypatch.setattr(discord_access.config, "DISCORD_STANDARD_USERS", [], raising=False)
-    allowed, _ = discord_access.check(600600600, "liga a luz")
+    allowed, _ = discord_access.check(600600600, "liga a luz", ["skill_weather"])
     assert allowed, "an id in DISCORD_ADMIN_USERS lost its access"
 
     # And a plain standard id from the environment, with no profile behind it.
     monkeypatch.setattr(discord_access.config, "DISCORD_ADMIN_USERS", [], raising=False)
     monkeypatch.setattr(discord_access.config, "DISCORD_STANDARD_USERS", [700700700],
                         raising=False)
-    allowed, _ = discord_access.check(700700700, "liga a luz")
+    allowed, _ = discord_access.check(700700700, "liga a luz", ["skill_weather"])
     assert allowed, "an id in DISCORD_STANDARD_USERS lost its access"
 
 

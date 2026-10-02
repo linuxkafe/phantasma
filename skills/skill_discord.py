@@ -57,7 +57,7 @@ _COMMAND_HEADERS = (
 
 
 
-def _check_access(user_id, prompt_lower):
+def _check_access(user_id, prompt_lower, self=None):
     """
     Retorna (AcessoPermitido: bool, MensagemErro: str)
 
@@ -87,7 +87,19 @@ def _check_access(user_id, prompt_lower):
     """
     from src.api import discord_access
 
-    return discord_access.check(user_id, prompt_lower)
+    # Resolve which skills this message lands on BEFORE anything is spent, and
+    # refuse on that. Deciding after the fact would mean the house has already
+    # acted by the time we noticed.
+    #
+    # `matching=None` on purpose: an unwired resolver must REFUSE, not read as
+    # "no skill matched". Otherwise a wiring fault quietly turns into "every
+    # guest request is just conversation", which is fail-open on the one check
+    # that keeps them away from the devices.
+    matching = None
+    resolver = getattr(getattr(self, "context", None), "resolve_skill", None)
+    if resolver is not None:
+        matching = resolver(prompt_lower)
+    return discord_access.check(user_id, prompt_lower, matching)
 
 
 async def _send_to_phantasma(prompt):
@@ -148,7 +160,7 @@ async def on_message(message):
         return
 
     # --- VERIFICAÇÃO DE PERMISSÕES E QUOTAS ---
-    allowed, error_msg = _check_access(message.author.id, prompt.lower())
+    allowed, error_msg = _check_access(message.author.id, prompt.lower(), self)
 
     if not allowed:
         # Se for um user standard bloqueado, avisamos. Se for desconhecido, ignoramos ou logamos.
