@@ -141,13 +141,21 @@ def _informative_text(parsed: dict[str, Any]) -> str:
     JSON head, and labelling a node ``{"tags": ["pt"], "facts": []}`` is worse
     than the ``#pt`` it replaced.
     """
+    # NOT truncated here. Truncating in both places made _memory_label's
+    # ellipsis branch unreachable, so a long fact was cut mid-word with no
+    # marker -- the worst of both. One place decides, and it is _memory_label.
     for fact in parsed["facts"]:
         if fact.strip():
-            return fact.strip()[:_MAX_LABEL]
+            return fact.strip()
     for tag in parsed["tags"]:
         if tag.strip() and not is_language_tag(tag):
-            return tag.strip()[:_MAX_LABEL]
+            return tag.strip()
     if parsed["parsed"]:
+        # "" on purpose, and pinned by a test. A memory whose only content is a
+        # language marker has no text to preview: the raw JSON head would put
+        # `{"tags": ["pt"], "facts": []}` in front of the owner, which is worse
+        # than showing nothing. The label still identifies it as "memória 21",
+        # and the explorer renders the tags separately. T061.
         return ""
     return parsed["preview"]
 

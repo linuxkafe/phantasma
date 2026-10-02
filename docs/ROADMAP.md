@@ -484,3 +484,48 @@ métrica e depois reportar o número — a forma exacta de produzir uma
 quantidade que parece evidência e não é. Criar `aes/graph/` com premissas
 extraídas por um LLM do código é a circularidade que a própria epistemics
 existe para evitar.
+
+## [HIGH] [DISCOVERED 2026-10-02] O portão do grafo só cobre dois dos três escritores
+
+Revisão T061 à mudança T060: **BLOCKER encontrado e corrigido**.
+`materialize_memories` filtrava só por comprimento e nunca chamava o portão, e
+é o escritor que produziu **179 dos 190 nós** de produção, chamado todas as
+noites por `skill_dream.py:698`.
+
+Reproduzido contra `641844d`: payload `["pt-BR", "Bom, parece que há um
+mistério aqui...", "Leite"]` escrevia 3 nós e 3 arestas pelo
+`materialize_memories`, com a fala e o marcador de idioma lá dentro. Corrigido.
+
+**Pendentes que a revisão deixou, por ordem:**
+
+1. **Nada regista o que o portão rejeitou.** Um conceito bom rejeitado é
+   indistinguível de um que nunca foi extraído. `logger.info`? estatística no
+   `/admin`? Decisão do dono.
+2. **`upsert_node`/`upsert_edge` continuam sem portão.** `skill_dream.py:816`
+   escreve por lá, e `_concept_from_reply` (`skill_dream.py:883`) é um segundo
+   portão divergente. Mover o portão para `upsert_node` é o passo certo e é de
+   maior âmbito do que o aprovado.
+3. **`apply_reward` ressuscita o nó apagado.** Faz `ON CONFLICT DO NOTHING`, ou
+   seja recria pela chave do tópico. Um 👍 sem texto traz `node:tag` de volta —
+   e é `node:tag` que é o tópico corrente em produção. Depende do ticket de
+   limpeza, e o AC desse ticket tem de incluir
+   `UPDATE topic_state SET current_key=NULL`.
+4. **A lista de idiomas é fechada e já tem um buraco.** `it`, `nl`, `portugues`
+   passam. Ou deriva de uma fonte única, ou passa a ser por campo do payload.
+   E `LANGUAGE_TAGS` não é do "tagger": não há tagger. O único prompt que dita
+   uma tag (`skill_memory.py:43`) dita `Tag`, e `Tag` foi acrescentado à lista.
+5. **Recall conhecido do portão, declarado num teste.** Uma fala sem reticências
+   e sem opener+vírgula passa. Endurecer a regra volta a comer conceitos, e o
+   custo de perder um conceito é maior. Decisão do dono se quiser o contrário.
+6. **Sem kill switch.** Reverter hoje é editar código + `deploy.sh`.
+   `settings_store.get_setting` é o mecanismo que já existe.
+7. **`_LEADING_JUNK_RE` limpa para a decisão e guarda o lixo** — é o defeito
+   B6 e a correcção é de lá.
+
+**E uma correcção ao meu próprio processo:** a medição de raio de blast do T060
+estava viciada. Medi falsos positivos sobre "os oito nós mais curtos que
+sobrevivem" (`Tag`, `casa`, `gato`), e nenhum começa por um opener nem tem
+reticências — a lista não continha nenhum membro da classe que a regra nova pode
+rejeitar, portanto não podia falhar, portanto não certificava nada. Três personas
+viram isso ao mesmo tempo. Uma verificação que não pode falhar não é uma
+verificação.

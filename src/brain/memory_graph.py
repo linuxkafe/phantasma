@@ -201,6 +201,18 @@ def materialize_memories(limit: int = 0, only_unparsed: bool = False) -> dict[st
                 for c in parsed["tags"]
                 if isinstance(c, str)
                 and MIN_CONCEPT_LEN <= len(c.strip()) <= MAX_CONCEPT_LEN
+                # The gate, applied here too (T061). The first version of this
+                # change gated ``index_memory`` only, and that was wrong in the
+                # way that matters: THIS is the writer that produced 179 of the
+                # 190 nodes in production (``gmif_classified_by =
+                # 'materialize_memories'``), and it runs every dream cycle from
+                # skill_dream.py:698. Verified before the fix: a payload of
+                # ["pt-BR", "Bom, parece que há um mistério aqui...", "Leite"]
+                # wrote three nodes and three edges -- the speech and the
+                # language marker included. The edges derive from `concepts`, so
+                # filtering the list gates both writers in one place.
+                and not is_language_tag(c)
+                and not is_speech_label(c)
             ]
             if not concepts:
                 report["skipped"] += 1
@@ -489,20 +501,32 @@ _EDGE_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 # No bare "a"/"the": "A saúde pública" and "The Body" are concepts, and a bare
-# English article would reject both.
+# English article would reject both. English openers are here because the
+# transcript is bilingual, but see is_speech_label for why an opener alone is
+# never enough.
 _GREETING_RE = re.compile(
     r"^(ol[aá]|ah|ei|opa|olha|bom|hey|hi|hello|ok|ent[aã]o|desculpa|"
-    r"obrigad[oa]|yep|well|so)\b",
+    r"obrigad[oa]|yep|well|so)\b\s*,",
     re.IGNORECASE,
 )
 
-# Language and locale markers the tagger emits. These are not concepts: they
-# describe the payload, not the world. An explicit list, deliberately, rather
-# than "three characters or fewer", which would also swallow gato, casa, milk
-# and nome -- all of which are real concepts in this graph.
+# Locale codes, plus the two markers that were actually observed in production.
+# The comment this replaced claimed "the tagger emits" these, and no such
+# tagger exists: `grep -rni '\baoe\b|pt-br' src/ skills/` finds no emitter, and
+# the only prompt that dictates a tag at all is `skills/skill_memory.py:43`,
+# which dictates `"Tag"` and nothing else. So this is an extrapolation from the
+# values found in the live data (`pt` x3, `Dev` x3 as memory tags; `pt` and
+# `Dev` as `tag:` nodes in the 3D payload), not an observed contract -- and
+# "Portuguese" or "portugues" would sail straight through. Recorded as owed
+# work in docs/ROADMAP.md rather than papered over here.
+#
+# `tag` is the one entry with direct evidence: it is the literal the prompt
+# emits, and `node:tag` is the current topic in production (`topic_state`,
+# 2026-09-30). It is prompt boilerplate, not a concept. One line to reverse.
 LANGUAGE_TAGS = frozenset(
-    {"pt", "en", "br", "pt-pt", "ptbr", "pt-br", "en-gb", "en-us", "es", "fr", "de"}
-    # The dev/build markers the tagger also emits. Same category: metadata.
+    {"tag"}
+    | {"pt", "en", "br", "pt-pt", "ptbr", "pt-br", "en-gb", "en-us",
+       "es", "fr", "de"}
     | {"dev", "aoe"}
 )
 
@@ -519,23 +543,35 @@ def is_speech_label(label: str) -> bool:
     """True when ``label`` is an utterance rather than a concept.
 
     Deliberately narrow, because the cost of a false positive is a real
-    concept the owner can no longer see in the graph. Three signals:
+    concept the owner can no longer see in the graph. **Two** signals, both
+    narrowed in T061 after the review found the third one was costing more
+    than it caught:
 
-    * trailing ellipsis -- how the LLM transcribed trailing speech
-    * ends in ``!`` or ``?``
-    * a greeting/interjection opener followed by more than one further word, so
-      "Bom dia" survives and "Olha, não estou muito à vontade hoje..." does not
+    * trailing ellipsis -- how the LLM transcribed trailing speech. This alone
+      catches four of the five speech labels in production.
+    * a greeting/interjection opener **followed by a comma** and more than one
+      further word. The comma is what separates "Olha, não sou uma pessoa que
+      se apresenta com sorrisos" from "Bom uso da água": both start with an
+      opener and both are three words.
 
-    "Ah, a chuva..." is rejected by the first rule even though it reads as a
-    plausible conclusion rather than speech. That is a judgement call and it is
-    one line: delete the ellipsis clause to reverse it.
+    REMOVED in T061, and the measurements that removed them:
+
+    * ``endswith(("!", "?"))`` -- zero true positives on the 190 production
+      labels, because every production utterance that ends in a mark of
+      exclamation also ends in an ellipsis. It rejected "A vida tem sentido?",
+      which is a legitimate research question.
+    * an opener without the comma requirement -- rejected "Bom uso da água",
+      "well being of society", "So it goes", "Hello Kitty Merchandise" and
+      "Ok Corral Vermelho".
+
+    "Ah, a chuva..." is rejected by the ellipsis clause even though it reads as
+    a plausible conclusion rather than speech. That is a judgement call and it
+    is one line: delete the ellipsis clause to reverse it.
     """
     text = _LEADING_JUNK_RE.sub("", (label or "").strip())
     if not text:
         return False
     if "..." in text or "…" in text:
-        return True
-    if text.endswith(("!", "?")):
         return True
     return bool(_GREETING_RE.match(text)) and len(text.split()) > 2
 
