@@ -584,3 +584,32 @@ SearXNG a perguntar por um artigo chamado `SELECT * FROM information_schema`.
 ferramenta certa — `_research_gap` e `_concept_from_reply` devem rejeitar
 labels que não são linguagem natural. E o gate **não** foi aplicado ao caminho
 `reconcile.py:116`, que é por onde esta consulta saiu.
+
+## [HIGH] [DISCOVERED 2026-10-02] Duas rotas que mudam a casa nao tem gate
+
+Verificado ao preparar o T068 (convidados que nao podem activar dispositivos):
+
+| rota | gate |
+|---|---|
+| `/comando` | sim — `routes.py:335` |
+| `/device_action` | **NAO** — `routes.py:587`, so `@app.route` |
+| `/api/devices/<name>/control` | **NAO** — `routes.py:1202`, idem |
+
+Isto **e verdade hoje**, com ou sem convidados, e contraria a politica escrita em
+`src/api/ui_auth.py:29` — *"Reads stay open; actions do not"* — acoes exigem
+credencial.
+
+Um convidado deDiscord com uma sessao valida acede a estes dois paths. A razao
+pelo qual hoje nao consequence nao e uma gate: e o facto de nao haver papel de
+convidado, e de o bypass de loopback abrir `/admin/*` (ver T057, item 2).
+
+**Por que e um item separado e nao parte do T068:** construir um sistema de
+permissoes em cima de uma gate de accoes com um buraco e construir em cima de
+areia — e o buraco e exactamente o que um convidado nao devia poder atravessar.
+A recommendacao e fechar isto primeiro, com um teste que prove que uma sessao
+sem token nao muda a casa, e so depois construir o T068 sobre a gate fechada.
+
+Nota relacionada: `routes.py:344` documenta que com `PHANTASMA_COMMAND_TOKEN`
+por definir o gate devolvia `True` — "EITHER credential is enough, and NEITHER
+is refused". Se essa frase ainda for verdade, o problema e maior e o teste
+primeiro tem de ser esse.
