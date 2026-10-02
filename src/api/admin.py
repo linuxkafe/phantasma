@@ -1295,16 +1295,16 @@ CONFIG_TEMPLATE = (
             </td>
             <td style="padding:.35rem;">
               {% if guest_skills_available %}
+                <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:.45rem;">
                 {% for name, triggers in guest_skills %}
-                  <label style="display:flex; gap:.45rem; align-items:baseline; padding:.18rem 0;">
+                  <label style="display:flex; gap:.45rem; align-items:baseline; cursor:pointer;"
+                         title="{%- if triggers -%}{{ triggers|join(', ') }}{%- else -%}(sem gatilhos){%- endif -%}">
                     <input type="checkbox" name="guest_skill" value="{{ name }}"
                            {% if name in guest_skills_allowed %}checked{% endif %}>
-                    <span>{{ name }}</span>
-                    <span style="opacity:.6; font-size:.8rem;">
-                      {%- if triggers -%}{{ triggers|join(', ') }}{%- else -%}(sem gatilhos){%- endif -%}
-                    </span>
+                    <span style="font-size:.9rem;">{{ name }}</span>
                   </label>
                 {% endfor %}
+                </div>
               {% else %}
                 <p style="opacity:.72; margin:0;">
                   {% if lang == 'en' %}
@@ -1312,9 +1312,9 @@ CONFIG_TEMPLATE = (
                     from. This page needs the running assistant; restarting the
                     service loads it.
                   {% else %}
-                    Nao ha pipeline carregado, portanto nao ha lista de skills
-                    para escolher. Esta pagina precisa do assistente a correr;
-                    reiniciar o servico carrega-o.
+                    Não há pipeline carregado, portanto não há lista de skills
+                    para escolher. Esta página precisa do assistente a correr;
+                    reiniciar o serviço carrega-o.
                   {% endif %}
                 </p>
               {% endif %}
