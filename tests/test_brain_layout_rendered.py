@@ -57,12 +57,17 @@ def _measure(browser, width, height):
                     return {w: Math.round(r.width), h: Math.round(r.height)};
                 };
                 const stage = document.querySelector('.brain-stage');
+                const topbar = document.querySelector('.brain-topbar');
                 return {
                     hub: box('.brain-hub'),
                     stage: box('.brain-stage'),
                     panel: box('.brain-panel.is-active'),
                     frame: box('.brain-frame'),
                     bar: box('.sleep-bar'),
+                    // T058: the top line is a real row above the graph, so the
+                    // usable area is the viewport minus that row -- measured,
+                    // not assumed, so this cannot drift from the layout.
+                    topbarH: topbar ? Math.round(topbar.getBoundingClientRect().height) : 0,
                     stageParent: stage
                         ? (stage.parentElement.className || stage.parentElement.tagName)
                         : null,
@@ -76,13 +81,24 @@ def _measure(browser, width, height):
 @pytest.mark.parametrize("width,height", SIZES)
 def test_the_graph_fills_the_viewport(browser, width, height):
     """The regression: 244x670 in a 1440x900 window, because the sleep bar
-    had swallowed .brain-stage."""
+    had swallowed .brain-stage.
+
+    Re-specified in T058. This used to require the hub to be >= viewport-4 in
+    both axes, which is only true while nothing is laid out above the graph.
+    Since the owner's "one top line" there IS something above it, and the graph
+    is required to fill what is left. The replacement is strictly stronger: the
+    old version never checked how tall the chrome was, so a top line that grew
+    to 200px would have kept this green. Reading the top line's height out of
+    the DOM and subtracting it makes the two impossible to satisfy separately.
+    It still catches the 2026-10-01 regression: 670 < 900 - 45 - 6.
+    """
     d = _measure(browser, width, height)
+    avail_h = height - d["topbarH"]
     for key in ("hub", "stage", "panel"):
         assert d[key] is not None, f".{key} is missing from /admin/brain"
-        assert d[key]["w"] >= width - 4 and d[key]["h"] >= height - 4, (
-            f"{key} is {d[key]} in a {width}x{height} viewport: the graph is "
-            f"no longer the page"
+        assert d[key]["w"] >= width - 4 and d[key]["h"] >= avail_h - 6, (
+            f"{key} is {d[key]} under a {width}x{avail_h} usable area "
+            f"(top line {d['topbarH']}px): the graph is no longer the page"
         )
 
 

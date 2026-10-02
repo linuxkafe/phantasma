@@ -532,24 +532,55 @@ pHantasma/
 
 The interface at `/` is responsive and serves as both desktop and mobile UI.
 
-### Screenshots
+### Screenshots — Admin / Cérebro (`/admin/brain`)
 
-| Desktop (≥900px) | Mobile (375×667) |
-|------------------|------------------|
-| ![Desktop UI](docs/screenshots/desktop.png) | ![Mobile UI](docs/screenshots/mobile.png) |
+All four brain subsystems on one screen, under **one top line**: the nav, the
+Grafo 3D / Tudo switch and the sleep counters share a single 44px row, and the
+3D graph takes everything below it. Measured at 375, 900, 1440 and 1916px wide
+(`tests/test_brain_top_line.py`).
 
-**Desktop features:**
+| Desktop (1440×900) | Mobile (375×667) |
+|-------------------|------------------|
+| ![Admin brain, desktop](docs/screenshots/admin-brain-desktop.png) | ![Admin brain, mobile](docs/screenshots/admin-brain-mobile.png) |
+
+![The 3D graph on its own](/memory/3d)](docs/screenshots/memory-3d.png)
+
+**Why "one top line" is a claim and not a preference:** until T058 the page
+stacked four translucent bars over a full-bleed graph and let `z-index` decide
+which one you could actually see. The sleep bar declared `top:12px` and still
+rendered *underneath* a 45px nav (`z50`) and a 52px tab row (`z60`) — 32 visible
+pixels out of 117, and `document.elementFromPoint` over the one number it
+carried returned the "Ecrã inteiro" link above it. A control can be visible,
+enabled, and belong to something else. It is one flex row in normal flow now, so
+nothing overlaps anything and there is no ordering left to lose.
+
+**Admin desktop features:**
+- One top line: burger · Cérebro · Grafo 3D / Tudo · Ecrã inteiro · counters
+- The graph is the page and never unmounts; the other views slide over it
+- "Tudo" carries unresolved refs, knowledge counters, recent memories, and the
+  Sleep & Dream button
+- Full-screen 3D at `/memory/3d`
+
+**Admin mobile features:**
+- Same single row; "Ecrã inteiro" is the one thing that gives way at ≤640px
+- Left controls collapse out of the way; all targets ≥44px
+
+**Voice UI features** (at `/`, still to be photographed):
 - Side-by-side: device tiles (left) + conversation (right)
-- Admin burger menu (top-right) with 6 links
 - Room-grouped tiles with SVG icons
 - Live weather widget
-
-**Mobile features:**
-- Full-width device strip (rooms stack, tiles wrap)
+- Full-width device strip on a phone (rooms stack, tiles wrap)
 - Bottom dock (pull up for conversation)
 - Top-right burger menu (thumb-reachable)
 - Two microphones (nav + composer), shared stream
-- Blind animation (clip-path) for panel open/close
+
+**Screenshots of `/` itself are still missing.** `/` refuses the loopback bypass
+by design (`skills/skill_ui.py:791` — that bypass grants ADMIN to any local
+process, and extending it to the light switches would let anything on the host
+turn the lights on), and `/login` needs a password plus a device code delivered
+by e-mail. Photographing it needs someone's credentials; working around the gate
+to produce a README picture would be the wrong trade. The full list of what is
+still outstanding is in [`docs/screenshots/README.md`](docs/screenshots/README.md).
 
 ### Mobile Layout Validation
 
@@ -563,6 +594,27 @@ Automated browser tests (`tests/test_mobile_*.py`, 33 tests) verify:
 - Device states loaded ≤1.5s after page load
 
 Run: `make test-mobile` (requires Chromium + Playwright)
+
+### Admin Layout Validation (T058)
+
+`tests/test_brain_top_line.py` (25 tests, own server — never `:5000`, which is
+production) measures the browser rather than the markup, at 375×667, 900×700,
+1440×900 and 1916×895:
+
+- The top line is one row at every size (`≤56px`), starting at `y=0`
+- No two of nav / tab row / sleep bar share a pixel
+- `elementFromPoint` over the Concepts card returns the card
+- The graph fills the viewport **minus** the measured top line, and the document
+  does not scroll
+- The 3D view's own `#topbar`, inside the iframe, is not covered
+- Nav, tabs and sleep bar are siblings of `.brain-topbar` — structural, so a
+  future move back into the stage fails by name, not by z-index duel
+- The burger still opens the menu inside the viewport
+
+`tests/test_brain_layout_rendered.py` and
+`tests/test_brain_hub_clickables.py` assert the same contract for the two
+relations that changed; both were re-specified rather than deleted, and the
+reason is in each docstring.
 
 ### Voice from Browser (Phone)
 

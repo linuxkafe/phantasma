@@ -326,3 +326,91 @@ memória e até um `SELECT * FROM tabela WHERE` foram enviados ao SearXNG.
 | lint | limpo |
 | backups da `brain.db` | `/tmp/opencode/predeploy/`, um por deploy |
 | `.env` | `/tmp/opencode/env.bak.20261001-150556` |
+
+---
+
+## [HIGH] [DISCOVERED 2026-10-02] O grafo 3D não renderiza num clone
+
+O `/admin/brain` embute `/memory/3d`, que carrega
+`public/vendor/three.module.js`, `public/vendor/OrbitControls.js`,
+`public/vendor/mermaid.min.js` e `public/static/mermaid_graph.mjs`.
+
+**Nenhum dos quatro está no git.** `git ls-files public` devolve só
+`explorer.mjs`. Todos os quatro existem em `/opt/phantasma/public/`, e só lá.
+
+**Efeito:** num clone limpo, `/memory/3d` fica em "a carregar o grafo..." para
+sempre e o canvas nunca aparece. Não dá 404 no `/admin/brain`, não dá erro de
+consola útil — o `importmap` resolve e o `mermaid_graph.mjs` é `type=module`,
+portanto a falha aparece só como um módulo em falta. A mesma classe de
+problema que o T057 registou com o `ADMIN_TEMPLATE`: **devolve 200 e não
+funciona.**
+
+**Decisão que falta:** `public/vendor/` é biblioteca de terceiros e deve ser
+ignorada com um `make fetch-assets` (ou um `.gitignore` + nota de instalação);
+`public/static/mermaid_graph.mjs` é código nosso e devia estar no git. Os dois
+não podem ser tratados da mesma maneira.
+
+**Nota:** esta descoberta foi feita porque T058 precisava de screenshots. Não
+foi corrigida — é um ficheiro que não escrevi e não revi.
+
+## [MEDIUM] [DISCOVERED 2026-10-02] `#corrigir` é markup morto em `/admin/brain`
+
+`<section id="corrigir">` está **fora** do `</main>` do `BRAIN_TEMPLATE`
+(`src/api/admin.py:1762`), e por isso é filho directo de `<body>`. Medido em
+produção a 1440×900: `y=985`, altura **12821px**, inteiramente fora do
+viewport, e `document.elementFromPoint` sobre os seus `<input>` devolve `null`.
+Isto é, inalcançável, em todos os tamanhos.
+
+Duplica o editor que existe de facto em `/admin/memory`. A barra de topo
+fullscreen escondia-o por acidente (`body{overflow:hidden}`); com a página em
+fluxo passaria a roubar ~549px de uma janela de 900px ao grafo, por isso o T058
+o esconde **de propósito** (`body.brain-fullscreen > #corrigir{display:none}`)
+em vez de o apagar.
+
+**Decisão que falta:** apagar, ou mover para dentro do `main` com um sítio onde
+seja alcançável. Apagar é a hipótese óbvia — mas há um link
+`<a href="#corrigir">` no mesmo template que também morre com ele, e isso é
+informação que o dono tem de ter antes de decidirmos.
+
+## [MEDIUM] [DISCOVERED 2026-10-02] `test_brain_layout_rendered.py` aponta para produção
+
+`BASE = os.environ.get("PHANTASMA_URL", "http://127.0.0.1:5000")` e `:5000` é
+`/opt/phantasma/assistant.py` — a cópia de produção, separada da árvore de
+desenvolvimento. Um teste de layout que corre contra o deploy de ontem passa
+com o código de hoje quebrado, e é exactamente o modo de falha que o comentário
+`OWNER_VIEWPORT` do `test_brain_hub_clickables.py` descreve ("passa em CI e falha
+no ecrã do dono").
+
+`tests/test_brain_top_line.py` resolve isto para o `/admin/brain`: levanta o seu
+próprio servidor efémero, como o `test_brain_hub_clickables.py`. O ficheiro
+antigo devia fazer o mesmo.
+
+### Registo de validação (T058, 2026-10-02)
+
+| | |
+|---|---|
+| suite completa (dev) | 1344 passed, 17 errors |
+| os 17 errors | `test_hotword.py`, `melspectrogram.onnx` em falta no pacote instalado — pré-existentes, os mesmos do T057 |
+| `tests/test_brain_top_line.py` | 25 passed; **23 falham contra o `HEAD` antigo** (falsificação verificada) |
+| falsificação | corrida com `admin.py` em `HEAD`: 23 failed, 2 passed |
+| lint | `ruff check` limpo |
+| screenshots | de um servidor de **dev** com BD isolado, nunca de `:5000` |
+
+## [MEDIUM] [DISCOVERED 2026-10-02] `/admin/flybrain` tem um erro de sintaxe no JS
+
+`FLYBRAIN_TEMPLATE` carrega um script inline que o browser recusa com
+`Invalid or unexpected token`. A página responde **200**, o HTML parece
+completo, e nada no teste suite o apanha porque nenhum teste abre esta página
+num browser.
+
+Verificado como **pré-existente**, não introduzido pelo T058: a mesma mensagem
+aparece em `:5000`, que corre o código de `HEAD` (`/admin/flybrain 200
+nav=1200px err=['Invalid or unexpected token']`).
+
+Mesma classe do que o T057 registou duas vezes: **devolve 200 e não funciona.**
+A lição de T058 aplica-se — só um browser sabe; um `assert "gestaoSleep" in
+body` passa e não prova nada.
+
+Onde: `src/api/admin.py`, `FLYBRAIN_TEMPLATE` (a partir da linha 2186). O
+selector `sleepStatusLine()` e `SLEEP_STEP_LABELS` vivem lá dentro, portanto
+o script está inteiro a não correr, e não é um token solto.

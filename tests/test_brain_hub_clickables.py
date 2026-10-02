@@ -192,23 +192,67 @@ def test_the_sleep_button_is_the_topmost_thing_where_it_is_drawn(open_everything
     )
 
 
-def test_the_drawer_sits_above_the_floating_sleep_bar(open_everything):
-    """The relation that broke, stated directly so a future edit to either
-    z-index fails here rather than in the owner's browser."""
-    page, _ = open_everything
-    z = page.evaluate(
-        """() => ({
-            drawer: parseInt(getComputedStyle(document.getElementById('brain-inspect')).zIndex, 10),
-            bar: parseInt(getComputedStyle(document.getElementById('sonhar')).zIndex, 10),
-            tabs: parseInt(getComputedStyle(document.querySelector('.brain-tabs')).zIndex, 10),
-        })"""
+def test_the_drawer_and_the_sleep_bar_do_not_share_a_pixel(brain_server):
+    """Re-specified in T058, and the reason is in the mechanism, not the result.
+
+    This used to read three z-index numbers and require drawer > bar and
+    drawer < tabs. That relation existed only because all three were painted
+    over the same corner of a full-bleed graph: the sleep bar floated at
+    `top:12px; right:12px` under a 45px nav (z50) and a 52px tab row (z60), so
+    which of them you could actually see was an argument between integers. The
+    owner asked for one top line, so the bar and the tabs moved into
+    `.brain-topbar` -- a sibling ABOVE the hub. The drawer cannot reach them and
+    they cannot reach the drawer, so there is no ordering left to assert.
+
+    What replaces it is stronger than a number: the two boxes are checked for
+    intersection, and the bar is checked for not being inside the stage at all.
+    Move the bar back into `.brain-stage` and this fails immediately with a
+    message naming the mistake, instead of a z-index duel being lost silently.
+
+    The click-level protection is the sibling test above: elementFromPoint over
+    the Sleep & Dream button must return the button, whatever is painted where.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        b = pw.chromium.launch(args=["--no-sandbox"])
+        page = b.new_page(viewport=OWNER_VIEWPORT)
+        try:
+            page.goto(f"{brain_server}/admin/brain", wait_until="domcontentloaded")
+            page.wait_for_selector("#brain-inspect-toggle")
+            page.click("#brain-inspect-toggle")
+            page.wait_for_selector("#brain-inspect.is-active")
+            d = page.evaluate(
+                """() => {
+                    const box = (s) => {
+                        const el = document.querySelector(s);
+                        if (!el) return null;
+                        const r = el.getBoundingClientRect();
+                        return {x: r.x, y: r.y, w: r.width, h: r.height};
+                    };
+                    const bar = document.getElementById('sonhar');
+                    return {
+                        drawer: box('#brain-inspect'),
+                        bar: box('#sonhar'),
+                        barInsideStage: !!bar.closest('.brain-stage'),
+                        barParent: bar.parentElement.className,
+                    };
+                }"""
+            )
+        finally:
+            b.close()
+
+    assert not d["barInsideStage"], (
+        "the sleep bar is inside .brain-stage again, so it is painted over the "
+        "drawer and the z-index argument starts all over"
     )
-    assert z["drawer"] > z["bar"], (
-        f"the drawer must paint above the floating bar or it steals its clicks: {z}"
+    assert d["barParent"] == "brain-topbar", (
+        f"the sleep bar's parent is {d['barParent']!r}, not .brain-topbar"
     )
-    assert z["drawer"] < z["tabs"], (
-        f"the drawer must stay below the subnav or the tabs stop taking clicks: {z}"
-    )
+    a, c = d["drawer"], d["bar"]
+    overlap = (a["x"] < c["x"] + c["w"] and c["x"] < a["x"] + a["w"]
+               and a["y"] < c["y"] + c["h"] and c["y"] < a["y"] + a["h"])
+    assert not overlap, f"the drawer and the sleep bar share pixels: {a} vs {c}"
 
 
 def test_clicking_sleep_dream_centre_starts_the_cycle(open_everything):

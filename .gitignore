@@ -90,3 +90,11 @@ models/tts/en_US-glados-medium.onnx
 
 # build artefact: pip install -e regenerates it, never version it
 pHantasma.egg-info/
+
+# Third-party JS for the 3D graph (three.js, OrbitControls, mermaid). Same
+# reasoning as the Piper voices above: downloaded artefacts, not source, and
+# ~1.4 MB. The graph does not render without them -- /admin/brain sits on
+# "a carregar o grafo..." forever on a fresh clone. They live in
+# /opt/phantasma/public/ in production and nowhere else in the repo; see
+# docs/ROADMAP.md for the missing install step.
+public/vendor/

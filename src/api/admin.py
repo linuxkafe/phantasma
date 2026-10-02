@@ -1340,7 +1340,6 @@ BRAIN_TEMPLATE = (
 <title>{% if lang == 'en' %}Brain{% else %}Cérebro{% endif %} | pHantasma</title>
 </head>
 <body class="brain-fullscreen">
-{{ nav_menu|safe }}
 <main class="page">
   <div class="page-head">
     <h1 class="page-title"><svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.15em"><path d="M9.5 4a2.5 2.5 0 0 0-2.5 2.5A2 2 0 0 0 5 8.5v2A2.5 2.5 0 0 0 7 13v2.5A2.5 2.5 0 0 0 9.5 18H11V4H9.5Z"/><path d="M14.5 4a2.5 2.5 0 0 1 2.5 2.5A2 2 0 0 1 19 8.5v2a2.5 2.5 0 0 1-2 2.5v2.5A2.5 2.5 0 0 1 14.5 18H13V4h1.5Z"/></svg> {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</h1>
@@ -1348,6 +1347,51 @@ BRAIN_TEMPLATE = (
   </div>
   {{ subnav|safe }}
 
+  <!-- ONE TOP LINE (T058). ----------------------------------------------------
+       The nav, the brain tabs and the sleep bar used to be three translucent
+       bars stacked over a full-bleed graph, each claiming its own z-index, and
+       the sleep bar lost the argument: it sat at top:12px under a 45px nav
+       (z50) and a 52px tab row (z60), so 32 of its 117 pixels were visible and
+       elementFromPoint over the one number it carries ("Conceitos") returned
+       the "Ecrã inteiro" link. One row, in normal flow, and the graph starts
+       below it. Nothing overlaps anything, so the drawer no longer needs a
+       z-index to win an argument it cannot lose, and the 45+52 magic numbers
+       its padding used to carry are gone with it. -->
+  <div class="brain-topbar">
+    {{ nav_menu|safe }}
+    <nav class="brain-tabs" role="tablist">
+      <span class="brain-titlebar">{% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</span>
+      <button type="button" class="brain-tab is-active" data-tab="graph" role="tab" aria-selected="true">
+        {% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}
+      </button>
+      <button type="button" class="brain-tab" id="brain-inspect-toggle"
+              aria-expanded="false" aria-controls="brain-inspect"
+              role="button">
+        {% if lang == 'en' %}Everything{% else %}Tudo{% endif %}
+        {% if stats.gmif_total_gaps or stats.unresolved_edges %}
+        <span class="badge">{{ stats.gmif_total_gaps + stats.unresolved_edges }}</span>
+        {% endif %}
+      </button>
+      <a class="brain-link brain-more" href="/memory/3d" target="_blank" rel="noopener">
+        {% if lang == 'en' %}Full screen{% else %}Ecrã inteiro{% endif %} ↗
+      </a>
+    </nav>
+
+    <div class="sleep-bar" id="sonhar">
+      <div class="sleep-summary">
+        <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>
+        <span class="muted">
+          {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
+          {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
+          {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
+        </span>
+      </div>
+      <span class="sleep-stat">
+        <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
+        <b>{{ stats.concepts or 0 }}</b>
+      </span>
+    </div>
+  </div>
 
   <!-- HUB ------------------------------------------------------------------
        The 3D graph is the stage and it owns the full height; RAG, FlyBrain,
@@ -1366,33 +1410,36 @@ BRAIN_TEMPLATE = (
       text-decoration: none; color: inherit; cursor: pointer;
     }
     .brain-item-link:hover .muted { color: var(--accent); }
-    .sleep-bar {
-        display: flex; align-items: center; gap: var(--sp-3);
-        margin: 0 0 var(--sp-4); padding: var(--sp-2) var(--sp-3);
-        background: color-mix(in srgb, var(--surface) 55%, transparent);
-        background: rgba(127,127,127,.14);
-        -webkit-backdrop-filter: blur(8px);
-        backdrop-filter: blur(8px);
-        border: 1px solid var(--border); border-radius: 8px;
-        position: sticky; top: 0; z-index: 5;
-    }
-    .sleep-bar strong { font-size: var(--fs-small); }
+    /* A child of .brain-topbar, not a floating card. display:flex is load-bearing:
+       without it the summary and the counter stack as two lines and the "one
+       top line" becomes two. */
+    .sleep-bar { display:flex; align-items:center; gap:var(--sp-2);
+                 flex:0 1 auto; min-width:0; }
+    .sleep-summary { display:flex; align-items:baseline; gap:var(--sp-2); min-width:0; }
+    .sleep-summary strong { font-size: var(--fs-small); white-space:nowrap; }
+    .sleep-summary .muted { font-size: var(--fs-small); overflow:hidden;
+                             text-overflow:ellipsis; white-space:nowrap; }
+    /* The Concepts counter. Inline and baseline-aligned rather than a .card.stat
+       on its own row: as a card it measured 99px tall (the .stat-value is
+       --fs-display), which is what turned one number into a 117px bar. This is
+       the same shape the 3D view already uses in its own #topbar. */
+    .sleep-stat { display:flex; align-items:baseline; gap:var(--sp-1);
+                  white-space:nowrap; padding-left:var(--sp-3);
+                  border-left:1px solid var(--border-strong); }
+    .sleep-stat b { color: var(--accent); font-variant-numeric:tabular-nums; }
     /* The graph stays mounted; the unified panel slides over it, so the
        relationship between what is on screen and what the counters say is
        never broken. */
     #brain-inspect {
         position: absolute;
         inset: 0;
-        /* Above the floating sleep bar (z-index 40), not 30. In fullscreen that
-           bar is `position: fixed; top/right: 12px`, so it floats over the
-           top-right corner of this drawer -- exactly where the drawer's own
-           "Dormir e Sonhar" button is. At 30 the button lost the click to the
-           bar: the drawer reported the button as visible and enabled while
-           elementFromPoint over its centre returned the bar, so a click did
-           nothing at all. The bar is informational only (its summary div is
-           display:none in fullscreen), and the drawer repeats the same stats,
-           so putting the drawer on top costs no information. Must stay below
-           .brain-tabs (60) or the subnav stops taking clicks. */
+        /* No z-index competition is left to lose. This used to be 50 with a
+           note that it had to beat the floating sleep bar's 40 and stay under
+           the tabs' 60, because all three were painted over the same corner of
+           the screen. The bar and the tabs now live in .brain-topbar, above
+           the hub and outside it, so the drawer cannot reach them and they
+           cannot reach the drawer. The 50 stays only so the drawer still wins
+           over the graph iframe, which is a real overlap. */
         z-index: 50;
         overflow-y: auto;
         background: color-mix(in srgb, var(--surface) 92%, transparent);
@@ -1406,59 +1453,7 @@ BRAIN_TEMPLATE = (
         font-size: 1rem; margin: 1.5rem 0 .5rem; color: var(--accent);
     }
     .brain-note { color: var(--muted); font-size: .875rem; margin: 0 0 .75rem; }
-    @media (prefers-reduced-transparency: reduce) {
-        .sleep-bar { background: var(--surface);
-                     -webkit-backdrop-filter: none; backdrop-filter: none; }
-    }
-    @media (max-width: 640px) {
-        .sleep-bar { flex-wrap: wrap; position: static; }
-    }
-    /* Fullscreen is fixed inset:0 with the stage absolutely positioned over
-       the whole hub, so a bar in normal flow would sit underneath the canvas.
-       In that mode the control floats over the graph instead. */
-    body.brain-fullscreen .sleep-bar {
-        position: fixed;
-        top: 12px;
-        right: 12px;
-        left: auto;
-        margin: 0;
-        max-width: min(28rem, calc(100vw - 24px));
-        z-index: 40;
-    }
-    body.brain-fullscreen .sleep-bar > div:first-child { display: none; }
     </style>
-    <nav class="brain-tabs" role="tablist">
-      <span class="brain-titlebar">🧠 {% if lang == 'en' %}Brain{% else %}Cérebro{% endif %}</span>
-      <button type="button" class="brain-tab is-active" data-tab="graph" role="tab" aria-selected="true">
-        {% if lang == 'en' %}3D graph{% else %}Grafo 3D{% endif %}
-      </button>
-      <button type="button" class="brain-tab" id="brain-inspect-toggle"
-              aria-expanded="false" aria-controls="brain-inspect"
-              role="button">
-        {% if lang == 'en' %}Everything{% else %}Tudo{% endif %}
-        {% if stats.gmif_total_gaps or stats.unresolved_edges %}
-        <span class="badge">{{ stats.gmif_total_gaps + stats.unresolved_edges }}</span>
-        {% endif %}
-      </button>
-      <a class="brain-link brain-more" href="/memory/3d" target="_blank" rel="noopener">
-        {% if lang == 'en' %}Full screen{% else %}Ecrã inteiro{% endif %} ↗
-      </a>
-    </nav>
-
-    <div class="sleep-bar" id="sonhar">
-    <div style="flex:1; min-width:200px;">
-      <strong>{% if lang == 'en' %}Sleep &amp; Dream{% else %}Dormir e Sonhar{% endif %}</strong>{% if stats.gmif_total_gaps > 0 or stats.unresolved_edges > 0 %} &mdash; {% if lang == 'en' %}pending issues{% else %}problemas pendentes{% endif %}{% endif %}</strong>
-      <span class="muted" style="margin-left:var(--sp-2); font-size:var(--fs-small);">
-        {% if stats.gmif_weak_edges > 0 %}{{ stats.gmif_weak_edges }} {% if lang == 'en' %}weak edges (M1/M2){% else %}arestas fracas (M1/M2){% endif %}{% endif %}
-        {% if stats.gmif_causal_gaps > 0 %}{% if stats.gmif_weak_edges > 0 %}, {% endif %}{{ stats.gmif_causal_gaps }} {% if lang == 'en' %}causal gaps{% else %}gaps causais{% endif %}{% endif %}
-        {% if stats.unresolved_edges > 0 %}{% if stats.gmif_weak_edges > 0 or stats.gmif_causal_gaps > 0 %}, {% endif %}{{ stats.unresolved_edges }} {% if lang == 'en' %}unresolved refs{% else %}refs por resolver{% endif %}{% endif %}
-      </span>
-    </div>
-    <div class="card stat">
-      <span class="stat-label">{% if lang == 'en' %}Concepts{% else %}Conceitos{% endif %}</span>
-      <span class="stat-value">{{ stats.concepts or 0 }}</span>
-    </div>
-  </div>
     <div class="brain-stage">
       <section class="brain-panel is-active" data-panel="graph" role="tabpanel">
         <iframe class="brain-frame" src="/memory/3d?embed=1"
@@ -1573,51 +1568,86 @@ BRAIN_TEMPLATE = (
      - The 3D graph is the page: mounted once, never unmounted, filling the
        whole stage. The other views are drawers that slide OVER it, so changing
        view costs nothing and the graph never refetches.
-     - .brain-stage is an absolutely positioned layer covering the whole hub, so
-       the submenu has to sit above it (z-index 6) or the iframe swallows every
-       click on the menu.
-     - The stage is `inset:0` inside a relatively positioned hub whose height
-       comes from the viewport, so the graph is always exactly as tall as the
-       space left over, whatever the drawer on top of it contains.
+     - .brain-stage is an absolutely positioned layer covering the whole hub,
+       which is why the drawer needs a z-index above it: the iframe is a real
+       overlap, unlike the top line, which is a sibling above the hub and never
+       overlaps anything.
+     - The stage is `inset:0` inside a relatively positioned hub, so the graph
+       is always exactly as tall as the space left over, whatever the drawer on
+       top of it contains.
    =========================================================================== */
 /* ===========================================================================
-   FULLSCREEN. Scoped to .brain-fullscreen (set on <body> of this page only),
-   so none of it leaks to the other admin pages.
-   The graph is the whole viewport: the hub is a fixed layer at inset:0, and
-   the page chrome (title, submenu) floats over the graph instead of pushing it
-   down. Before this the header took 120px of a 900px window and the graph also
-   produced a 110px document scroll -- on a laptop that is a graph in a panel.
+   ONE TOP LINE (T058). Scoped to .brain-fullscreen (set on <body> of this page
+   only), so none of it leaks to the other admin pages.
+
+   The body is a flex column with two children: the top line, which is
+   `flex:0 0 auto` and therefore exactly as tall as its content, and the hub,
+   which takes the rest. That is the whole contract -- the graph starts below
+   the chrome because the chrome is no longer painted on top of it.
+
+   Before this the page stacked FOUR translucent bars over a full-bleed fixed
+   hub and let z-index sort out who was visible: the nav (0-45, z50), the 3D
+   view's own #topbar inside the iframe (9-48, painted over by both of the
+   others), the tab row (45-97, z60) and the sleep bar (12-129, z40, i.e. under
+   all of them -- 32 of its 117 pixels visible and its one number clickable only
+   as the "Ecra inteiro" link). The bars were the geometry: every one of them
+   needed an offset or a z-index to win, and losing that argument produced a
+   silently broken control.
    =========================================================================== */
 html:has(body.brain-fullscreen), body.brain-fullscreen { overflow:hidden; height:100%; }
-body.brain-fullscreen .page { padding:0; margin:0; height:100dvh; max-width:none; }
-/* The title now lives in the floating bar; the static block would otherwise
-   reserve 83px of flow above the graph. */
+body.brain-fullscreen { display:flex; flex-direction:column; }
+body.brain-fullscreen .page {
+  padding:0; margin:0; max-width:none;
+  flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+/* The title is repeated in the top line's own titlebar; the static block would
+   otherwise reserve 83px of flow above the graph. */
 body.brain-fullscreen .page-head { display:none; }
-body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-height:0; }
+body.brain-fullscreen .brain-hub { position:relative; flex:1 1 auto; min-height:0; }
+/* DEAD MARKUP, hidden rather than removed (T058). <section id="corrigir">
+   escaped </main> some time ago and has been a direct child of <body> ever
+   since, rendered at the bottom of a document that the fullscreen layout
+   clipped. Measured on production at 1440x900: y=985, height 12821px, entirely
+   outside the viewport, and elementFromPoint over its inputs returned null --
+   unreachable, on every viewport. It duplicates the editor that really exists
+   on /admin/memory. The old layout hid it by accident (body{overflow:hidden});
+   now that the page is a real flex column it would take ~549px of a 900px
+   window away from the graph, so it is hidden on purpose instead. Deleting it
+   is a separate call for the owner -- see docs/ROADMAP.md, T058. */
+body.brain-fullscreen > #corrigir { display:none; }
+/* ---- the top line itself ---- */
+.brain-topbar {
+  flex:0 0 auto; display:flex; align-items:center; gap:var(--sp-2);
+  padding:0 var(--sp-2) 0 0;
+  background:var(--bg-color); border-bottom:1px solid var(--border); }
+/* The nav contributes the burger only -- its menu is a collapsed panel on every
+   admin page. flex:0 0 auto keeps the bar at the button's width instead of
+   stretching across the row, which would push the tab list to the middle. */
+.brain-topbar > .nav-bar {
+  flex:0 0 auto; background:transparent; border-bottom:0; padding:0 var(--sp-1); }
+/* The collapsed menu is `position:absolute; right:0` against .nav-bar. As a row
+   member the bar is only as wide as the burger, so the panel opened at x=-148
+   with two thirds of it off-screen -- caught by
+   test_the_burger_still_opens_the_menu_inside_the_viewport. Anchoring it to the
+   bar's left edge puts it under its own trigger. Below 901px the menu becomes a
+   full-screen overlay with its own geometry and this does not apply. */
+@media (min-width:901px) { .brain-topbar .nav-menu { left:0; right:auto; } }
 .brain-titlebar {
   font-weight:var(--fw-h2); font-size:var(--fs-h3); color:var(--text);
-  padding:0 var(--sp-2) 0 var(--sp-1); white-space:nowrap; }
+  white-space:nowrap; }
 .brain-tabs {
-  /* top:45px clears the admin nav-bar, which is 45px tall and z-index 50 --
-     leaving the menu at top:0 put the two bars on top of each other and every
-     click on the menu hit the nav instead. z-index 60 keeps the menu above it. */
-  position:absolute; top:45px; left:0; right:0; z-index:60;
   display:flex; flex-wrap:wrap; align-items:center; gap:var(--sp-2);
-  padding:var(--sp-2); border:1px solid var(--border); border-radius:var(--radius-md);
-  background:color-mix(in srgb, var(--surface,#161616) 90%, transparent);
-  backdrop-filter:blur(6px); }
+  min-width:0; flex:1 1 auto; }
 .brain-stage { position:absolute; inset:0; }
 .brain-panel {
   display:none; height:100%; min-height:0; overflow-y:auto; padding:var(--sp-3);
   background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); }
 .brain-panel[data-panel="graph"] { display:block !important; padding:0; overflow:hidden; }
-/* The submenu floats over the stage, so a drawer must leave room for it:
-   52px measured nav height + the panel's own gap, otherwise the first row of
-   content (the Sleep & Dream button, the panel titles) sits UNDER the menu and
-   cannot be clicked. */
-.brain-panel:not([data-panel="graph"]) {
-  /* 45 nav-bar + 52 menu + gap: the drawer's first row must clear BOTH bars. */
-  position:absolute; inset:0; z-index:5; padding-top:calc(45px + 52px + var(--sp-3)); }
+/* The drawer needs no top padding for the chrome any more: the top line is a
+   sibling ABOVE the hub, not a layer painted over it. This used to reserve
+   calc(45px + 52px + gap) -- two magic numbers measuring two bars that are no
+   longer there, and the reason a stale value would silently push the drawer's
+   first row under the menu. */
+.brain-panel:not([data-panel="graph"]) { position:absolute; inset:0; z-index:5; }
 .brain-panel:not([data-panel="graph"]).is-active { display:block; }
 .brain-tab {
   padding:6px 12px; font-size:var(--fs-small); font-family:inherit; cursor:pointer;
@@ -1642,8 +1672,25 @@ body.brain-fullscreen .brain-hub { position:fixed; inset:0; height:100dvh; min-h
 .brain-empty { margin:0; font-size:var(--fs-small); color:var(--muted); font-style:italic; }
 .brain-kv { display:flex; justify-content:space-between; gap:var(--sp-2); padding:6px 0; border-bottom:1px solid var(--border); }
 .brain-kv b { color:var(--text); font-variant-numeric:tabular-nums; }
-@media (max-width:1080px) { .brain-hub { height:calc(100dvh - 150px); } }
-@media (max-width:640px)  { .brain-tabs { gap:4px; } .brain-tab { padding:6px 9px; } .brain-more { margin-left:0; } }
+/* Narrow: the top line is still ONE line, so the tab row gives up its
+   right-aligned "Ecra inteiro" first and the sleep bar's prose summary goes --
+   the counters it carries are already in the drawer, and a two-line top line is
+   the thing T058 removed. */
+@media (max-width:900px) {
+  .brain-topbar { gap:var(--sp-1); padding-right:var(--sp-1); }
+  .sleep-summary { display:none; }
+  .sleep-stat { padding-left:var(--sp-2); }
+}
+@media (max-width:640px) {
+  .brain-tabs { gap:4px; }
+  .brain-tab { padding:6px 9px; }
+  /* "Ecra inteiro" is the first thing to go: it opens /memory/3d, which is the
+     same graph this page already shows full-bleed, and a link is reachable from
+     the burger on a phone. Measured, it is what pushed the top line to two rows
+     at 375px -- the exact thing T058 removed. */
+  .brain-more { display:none; }
+  .brain-titlebar { display:none; }
+}
 </style>
 <script>
 // Submenu for the brain hub. Panels are toggled by class, never removed, so the
