@@ -79,7 +79,9 @@ def allowed_guest_skills() -> list[str]:
     Accepting the short form is friendlier than forcing the owner to learn the
     loader's internal naming.
     """
-    raw = _read_owner_setting("GUEST_SKILLS_ALLOWED", DEFAULT_GUEST_SKILLS)
+    raw = _read_owner_setting(
+        "GUEST_SKILLS_ALLOWED", DEFAULT_GUEST_SKILLS, empty_is_a_value=True
+    )
     out = []
     for part in str(raw).split(","):
         name = part.strip().lower()
@@ -90,12 +92,15 @@ def allowed_guest_skills() -> list[str]:
     return out
 
 
-def _read_owner_setting(key: str, default: str) -> str:
-    """What the owner set on ``/admin/config``, or ``default``.
+def _read_store_setting(key: str, default: str = "") -> str:
+    """Only the admin page's value for ``key``, or ``default``.
 
-    The admin page first, because it is what the page writes and it applies
-    without a restart. ``config``/env second, for a value set by hand in ``.env``,
-    and only when the page has never been used for that key.
+    Split out because the id lists live in ``config`` as ``list[int]`` and the
+    reader above ends in ``str(value)``: ``str([111, 222])`` is ``"[111, 222]"``,
+    and splitting that on commas yields the ids ``"[111"`` and ``"222]"``. Two ids
+    that exist in nobody's account, in a list whose purpose is to name real ones.
+    So the id path reads the store here and reads ``config`` through ``_ids_in``,
+    and neither value ever passes through ``str()``.
     """
     try:
         from src.settings_store import get_setting
@@ -105,10 +110,80 @@ def _read_owner_setting(key: str, default: str) -> str:
             return str(stored)
     except Exception as exc:  # noqa: BLE001
         log.warning("discord: leitura de %s falhou: %s", key, exc)
+    return default
+
+
+def _read_owner_setting(key: str, default: str, empty_is_a_value: bool = False) -> str:
+    """What the owner set on ``/admin/config``, or ``default``.
+
+    The admin page first, because it is what the page writes and it applies
+    without a restart. ``config``/env second, for a value set by hand in ``.env``,
+    and only when the page has never been used for that key.
+
+    ``empty_is_a_value`` is the difference between "the owner emptied this" and
+    "the owner never touched this", and they are not the same. Unticking the last
+    guest skill posts no checkbox at all, so the form submits an empty list, and
+    an empty list is the owner saying "no". Treating that as unset gives every
+    guest the default allowlist at exactly the moment the owner took it away --
+    the sort of inversion that only shows up when somebody tries to close a door.
+
+    It is opt-in per key rather than the default because for the other keys an
+    empty string is indistinguishable from never being set, and guessing wrong
+    there is harmless.
+    """
+    try:
+        from src.settings_store import get_setting
+
+        stored = get_setting(key, None)
+        if stored is not None and (stored != "" or empty_is_a_value):
+            return str(stored)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discord: leitura de %s falhou: %s", key, exc)
     from_env = getattr(config, key, None)
     if from_env not in (None, ""):
+        # Strings and numbers only. The id lists are the ones `config.py` keeps
+        # as `list[int]`, and they never come through here -- `_owner_list` reads
+        # `config` via `_ids_in` and the page via `_read_store_setting`. Passing
+        # a list here is what produced the ids "[111" and "222]".
         return str(from_env)
     return default
+
+
+def _ids_in(raw: Any) -> set[str]:
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = str(raw or "").split(",")
+    return {p.strip() for p in parts if str(p).strip()}
+
+
+def _owner_list(key: str) -> set[str]:
+    """Every id the owner put on ``key``, from BOTH places.
+
+    Union, not first-wins, and the reason is a trap I walked into: the page was
+    going to shadow the ``.env``, which means the first time the owner saved it,
+    every id he had in ``.env`` and did not retype became disallowed at once --
+    with no message, because a refused guest is silent by design. An admin page
+    that locks people out as a side effect of using it is worse than one that
+    forgets.
+
+    Both lists are the owner's own decision and both outrank a profile field:
+    ``/perfil`` lets any signed-in account claim an id, and a claim must never
+    hand out a capability the owner did not grant, nor take one away.
+
+    Compared as text because the column is text and a Discord id is a snowflake:
+    an int that overflowed, or a form value that arrived padded, must not match by
+    accident -- and must not fail to match either.
+    """
+    return _ids_in(getattr(config, key, None)) | _ids_in(_read_store_setting(key))
+
+
+def _owner_guest_ids() -> set[str]:
+    return _owner_list("DISCORD_STANDARD_USERS")
+
+
+def _owner_admin_ids() -> set[str]:
+    return _owner_list("DISCORD_ADMIN_USERS")
 
 
 def _normalise_skill(skill_name: Any) -> str:
@@ -201,11 +276,10 @@ def _from_environment(
     user_id, prompt_lower: str, matching: Any
 ) -> tuple[bool, str] | None:
     """The owner's own lists, or None when this id is not in them."""
-    admins = getattr(config, "DISCORD_ADMIN_USERS", None)
-    if admins and user_id in admins:
+    as_text = str(user_id).strip()
+    if as_text in _owner_admin_ids():
         return True, ""
-    standard = getattr(config, "DISCORD_STANDARD_USERS", None)
-    if standard and user_id in standard:
+    if as_text in _owner_guest_ids():
         # The prompt goes through, or an id the owner put in DISCORD_STANDARD_USERS
         # would spend its quota asking about the weather -- which is the one
         # question the free tier exists for. A first version of this function

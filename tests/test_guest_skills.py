@@ -376,3 +376,144 @@ def test_a_limit_the_owner_never_set_keeps_the_configured_one():
         assert da._daily_limit() == 3
     finally:
         settings_store.get_setting = original
+
+
+# --- a pagina: ids e caixas -----------------------------------------------
+
+
+def test_unticking_every_box_turns_access_off(monkeypatch):
+    """A lista vazia e uma RESPOSTA do dono, nao um campo em falta.
+
+    So as caixas marcadas sao submetidas. Desmarcar a ultima produz uma lista
+    vazia, e lista vazia e o dono a dizer "nao pode usar nada". Se a leitura a
+    tratar como "nunca definido", o_owner recebe a allowlist por omissao no
+    instante exacto em que a tirou -- e a porta fecha-se abrindo.
+
+    E o inverso de um erro subtil: nenhum pedido e recusado, nada avisa, e a
+    unica evidencia e um convidado a perguntar o tempo numa casa onde o dono
+    acabou de fechar a porta.
+    """
+    from src import settings_store
+
+    monkeypatch.setattr(settings_store, "get_setting", lambda k, default=None: "")
+    assert da.allowed_guest_skills() == [], "uma lista vazia voltou a dar a default"
+    assert not da.check(GUEST, "que tempo faz", ["skill_weather"])[0]
+
+    monkeypatch.setattr(settings_store, "get_setting", lambda k, default=None: None)
+    assert "weather" in da.allowed_guest_skills(), "a default desapareceu"
+
+
+def test_guest_ids_come_from_the_admin_page(monkeypatch):
+    """Os ids sao do dono e vivem na pagina, nao num ficheiro so ele abre.
+
+    `config.py` esta congelado e o `.env` e um ficheiro que o dono abre a mao --
+    nenhuma das duas e um sitio para "quem deixo entrar". A lista que o dono
+    edita na pagina conta, e o `.env` continua a valer para quem nunca passou
+    por ela.
+    """
+    from src import settings_store
+
+    monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [111], raising=False)
+    monkeypatch.setattr(config, "DISCORD_ADMIN_USERS", [], raising=False)
+    values = {"DISCORD_STANDARD_USERS": "222,333"}
+    monkeypatch.setattr(
+        settings_store, "get_setting", lambda k, default=None: values.get(k, default)
+    )
+    assert "222" in da._owner_guest_ids()
+    # The two lists are a UNION. The page was going to shadow the `.env`, which
+    # means the first time the owner saved it every id he had in `.env` and did
+    # not retype became disallowed at once -- with no message, because a refused
+    # guest is silent by design. An admin page that locks people out as a side
+    # effect of being used is worse than one that forgets.
+    assert da.check(111, "bom dia", [])[0], "o .env deixou de valer ao guardar na pagina"
+    assert da.check(222, "bom dia", [])[0], "o id posto na pagina nao chegou"
+    # An id on neither list is refused before the quota is consulted.
+    assert not da.check(999, "bom dia", [])[0]
+
+
+def test_a_claimed_profile_id_cannot_outrank_the_owner_list(monkeypatch):
+    """`/perfil` deixa qualquer conta registada reclamar um id.
+
+    Um id nos Dispositivos e in the owner's list is allowed whatever a profile
+    says. A list is the owner's decision and a claim is not; the reverse -- a
+    claim handing out access -- would make the page a way in.
+    """
+    from src import settings_store
+
+    monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [], raising=False)
+    monkeypatch.setattr(config, "DISCORD_ADMIN_USERS", [], raising=False)
+    monkeypatch.setattr(
+        settings_store,
+        "get_setting",
+        lambda k, default=None: None if k.endswith("_ALLOWED") else "111",
+    )
+    assert da.check("111", "que tempo faz", ["skill_weather"])[0]
+
+
+# --- a pergunta que o dono fez --------------------------------------------
+
+
+def test_the_language_model_is_still_there_for_a_guest(monkeypatch):
+    """Resposta a "o LLM fica disponivel?". Sim, e ate ao limite.
+
+    Nenhuma skill casa com "conta-me uma historia", portanto o pedido passa, e
+    e o LLM que responde. E o que um convidado faz a maior parte do tempo, e a
+    restricao nao lhe tira a conversa -- corta-lhe as ferramentas.
+
+    O outro lado da moeda, que e o que vale saber: um pedido que case com uma
+    skill nao autorizada e recusado MESMO que a conversa seja inocente. "como esta
+    a luz da sala" e recusado, porque toca em `tuya`. A regra e "qualquer skill
+    tocada fora da lista recusa", e nao "o convite foi recusado" -- e por isso
+    vale a pena a allowlist ser feita com os gatilhos na mao, e nao so com o
+    nome das skills.
+    """
+    from src import settings_store
+
+    monkeypatch.setattr(settings_store, "get_setting", lambda k, default=None: {
+        "GUEST_SKILLS_ALLOWED": "weather,calculator",
+        "DISCORD_DAILY_LLM_LIMIT": "3",
+        "DISCORD_STANDARD_USERS": GUEST,
+    }.get(k, default))
+
+    # No skill matches: conversation, and it costs the budget.
+    da.reset_quotas()
+    allowed, _ = da.check(GUEST, "conta-me uma historia", [])
+    assert allowed, "o convidado perdeu a conversa"
+
+    # Four in a row, and the fifth is over the line.
+    for _ in range(3):
+        da.check(GUEST, "conta-me outra", [])
+    allowed, msg = da.check(GUEST, "conta-me mais uma", [])
+    assert not allowed and "limite" in msg
+
+    # And an innocent question that happens to touch a device skill is refused.
+    allowed, msg = da.check(GUEST, "como esta a luz da sala", ["skill_tuya"])
+    assert not allowed, "uma conversa inocente passou por cima da restricao"
+
+
+def test_ids_from_config_are_not_stringified():
+    """`config.py` guarda os ids como `list[int]`, e `str()` disso e lixo.
+
+    `str([111, 222])` -> `"[111, 222]"`, e partido por virgulas da os ids
+    `"[111"` e `"222]"`: dois ids que nao existem em conta nenhuma, numa lista
+    cuja funcao e nomear ids reais. O sintoma e o pior possivel -- nao ha
+    mensagem nenhuma, so ninguem e nunca autorizado, e a culpa parece ser da
+    pagina de convidados.
+
+    A suite nao apanhou isto; um probe de uma linha apanhou. Vale a pena dizer
+    que o teste acima nao o apanhou, porque e o que torna o probe parte do
+    trabalho e nao um extra.
+    """
+    from src.api import discord_access
+
+    original = getattr(config, "DISCORD_STANDARD_USERS", None)
+    config.DISCORD_STANDARD_USERS = [111, 222]
+    try:
+        assert discord_access._ids_in([111, 222]) == {"111", "222"}
+        ids = discord_access._owner_guest_ids()
+        assert "111" in ids and "222" in ids
+        assert not [i for i in ids if i.startswith("[") or i.endswith("]")], (
+            f"ids corrompidos na lista: {sorted(ids)}"
+        )
+    finally:
+        config.DISCORD_STANDARD_USERS = original

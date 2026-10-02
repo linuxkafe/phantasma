@@ -657,6 +657,39 @@ def update_config(key: str, value: str, category: Optional[str] = None) -> bool:
         conn.close()
 
 
+
+def _installed_skills() -> list[tuple[str, list[str]]]:
+    """The skills this box actually loaded, as ``(short_name, triggers)``.
+
+    Read from the running pipeline rather than by importing `SkillLoader` here.
+    Importing it would build a second loader, and importing the skills is not
+    free of consequences -- `skill_discord` constructs a live Discord client at
+    import, `skill_xiaomi` prints about a missing library, and `load_all` starts
+    nothing but does load 22 modules. A page that lists the menu should read the
+    menu, not rebuild it.
+
+    Returns ``[]`` when there is no pipeline, and the page then shows a message
+    rather than an empty box, because an empty skill list and "no skills
+    installed" look identical and only one of them is a bug.
+    """
+    try:
+        from flask import current_app
+
+        pipeline = getattr(current_app, "pipeline", None)
+        loader = getattr(pipeline, "_skill_loader", None)
+        out: list[tuple[str, list[str]]] = []
+        for skill in getattr(loader, "skills", None) or []:
+            name = getattr(skill, "NAME", None)
+            if not name:
+                continue
+            short = name[5:] if str(name).startswith("skill_") else str(name)
+            triggers = [str(x) for x in (getattr(skill, "TRIGGERS", None) or [])]
+            out.append((short, triggers[:4]))
+        return sorted(out)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def get_categories() -> list[dict]:
     conn = get_db_connection()
     try:
@@ -1222,44 +1255,82 @@ CONFIG_TEMPLATE = (
         <tbody>
           <tr style="border-bottom:1px solid var(--border);">
             <td style="padding:.35rem;">
-              <label for="guest_skills_allowed">
+              <label>
                 {% if lang == 'en' %}Skills a guest may use{% else %}Skills que um convidado pode usar{% endif %}
               </label>
               <div style="opacity:.72; font-size:.85rem;">
                 {% if lang == 'en' %}
-                  Comma-separated, without the skill_ prefix (e.g. weather,calculator).
-                  Any skill a guest's request lands on that is not on this list is
-                  refused. Empty = a guest may use nothing. No device skill belongs
-                  here: tuya, chacon and xiaomi change the house.
+                  Ticked = a guest may use it. Unticked = refused, even mid
+                  sentence: if a request lands on any skill not ticked here, it
+                  is refused. Requests that land on no skill at all are ordinary
+                  conversation and go to the language model, up to the daily
+                  count below.
                 {% else %}
-                  Separadas por virgula, sem o prefixo skill_ (ex.: weather,calculator).
-                  Qualquer skill que um pedido de um convidado toque e que nao
-                  esteja aqui e recusada. Vazio = nao pode usar nada. Nenhuma skill
-                  de dispositivos entra aqui: tuya, chacon e xiaomi mudam a casa.
+                  Marcado = o convidado pode usar. Desmarcado = recusado, mesmo a
+                  meio da frase: se um pedido tocar em qualquer skill que nao
+                  esteja marcada, e recusado. Pedidos que nao tocam em skill
+                  nenhuma sao conversa e vao ao modelo de linguagem, ate ao
+                  limite diario de baixo.
                 {% endif %}
               </div>
             </td>
             <td style="padding:.35rem;">
-              <input type="text" id="guest_skills_allowed" name="guest_skills_allowed"
-                     value="{{ guest_skills_allowed }}" style="width:100%; min-width:14rem;">
+              {% if guest_skills_available %}
+                {% for name, triggers in guest_skills %}
+                  <label style="display:flex; gap:.45rem; align-items:baseline; padding:.18rem 0;">
+                    <input type="checkbox" name="guest_skill" value="{{ name }}"
+                           {% if name in guest_skills_allowed %}checked{% endif %}>
+                    <span>{{ name }}</span>
+                    <span style="opacity:.6; font-size:.8rem;">
+                      {%- if triggers -%}{{ triggers|join(', ') }}{%- else -%}(sem gatilhos){%- endif -%}
+                    </span>
+                  </label>
+                {% endfor %}
+              {% else %}
+                <p style="opacity:.72; margin:0;">
+                  {% if lang == 'en' %}
+                    No pipeline is loaded, so there is no skill list to choose
+                    from. This page needs the running assistant; restarting the
+                    service loads it.
+                  {% else %}
+                    Nao ha pipeline carregado, portanto nao ha lista de skills
+                    para escolher. Esta pagina precisa do assistente a correr;
+                    reiniciar o servico carrega-o.
+                  {% endif %}
+                </p>
+              {% endif %}
             </td>
           </tr>
-          <tr>
+          <tr style="border-bottom:1px solid var(--border);">
             <td style="padding:.35rem;">
-              <label for="guest_daily_limit">
-                {% if lang == 'en' %}Requests per day, per guest{% else %}Pedidos por dia, por convidado{% endif %}
+              <label for="guest_ids">
+                {% if lang == 'en' %}Guest Discord ids{% else %}IDs de Discord dos convidados{% endif %}
               </label>
               <div style="opacity:.72; font-size:.85rem;">
                 {% if lang == 'en' %}
-                  Counts every request, including the ones an allowed skill answers.
-                  Counted in memory: a restart forgives the day. 0 = unlimited.
+                  Who may ask anything at all. An id not on this list is ignored
+                  before anything happens. Only the ids the Discord gateway puts
+                  on a message can reach this, and it signs that itself -- but
+                  anyone with your bot token can speak for any of these ids, so
+                  treat the token as the master key. Left empty, guests can ask
+                  nothing.
                 {% else %}
-                  Conta todos os pedidos, incluindo os que uma skill autorizada
-                  responde. Contados em memoria: um reinicio perdoa o dia.
-                  0 = ilimitado.
+                  Quem pode perguntar seja o que for. Um id que nao esteja nesta
+                  lista e ignorado antes de acontecer alguma coisa. So chegam aqui
+                  os ids que o Discord coloca na mensagem, e isso ele assina --
+                  mas quem tiver o token do bot pode falar em nome de qualquer um
+                  destes, portanto trata o token como a chave-mestra. Vazio, os
+                  convidados nao podem perguntar nada.
                 {% endif %}
               </div>
             </td>
+            <td style="padding:.35rem;">
+              <input type="text" id="guest_ids" name="guest_ids"
+                     value="{{ guest_ids }}" style="width:100%; min-width:14rem;"
+                     placeholder="123456789012345678, 987654321098765432">
+            </td>
+          </tr>
+          <tr>
             <td style="padding:.35rem;">
               <input type="number" id="guest_daily_limit" name="guest_daily_limit"
                      min="0" max="200" step="1" value="{{ guest_daily_limit }}"
@@ -3255,17 +3326,39 @@ def config_manager():
             flash("Periodo noturno guardado e activo.")
             return redirect(url_for("admin.config_manager"))
         if request.form.get("action") == "save_guests":
-            raw = (request.form.get("guest_skills_allowed") or "").strip()
-            # Normalised to the short form on the way IN, so what the owner reads
-            # back is the same list the rule compares against. `weather` and
-            # `skill_weather` both work; only one of them is written down.
-            names = [
-                w for w in (
-                    (n.lower().removeprefix("skill_").strip()) for n in raw.split(",")
-                ) if w
-            ]
+            # Only ticked boxes post, so an empty list is the OWNER'S ANSWER --
+            # "a guest may use nothing" -- and not a missing field. Storing it
+            # as "" is therefore a decision, and the reader below has to tell it
+            # apart from "never set", which is the other thing "" could mean.
+            # Getting that backwards hands every guest the default allowlist the
+            # moment the owner unticks the last box.
+            names = sorted(
+                {
+                    n.lower().removeprefix("skill_").strip()
+                    for n in request.form.getlist("guest_skill")
+                    if n.strip()
+                }
+            )
             set_setting(
                 "GUEST_SKILLS_ALLOWED", ",".join(names), updated_by=_current_user()
+            )
+            ids = sorted(
+                {
+                    i.strip()
+                    for i in (request.form.get("guest_ids") or "").split(",")
+                    if i.strip()
+                }
+            )
+            bad = [i for i in ids if not i.isdigit()]
+            if bad:
+                flash(
+                    f"Isto nao parece um id de Discord: {', '.join(bad)}. "
+                    "Devem ser so digitos.",
+                    "error",
+                )
+                return redirect(url_for("admin.config_manager"))
+            set_setting(
+                "DISCORD_STANDARD_USERS", ",".join(ids), updated_by=_current_user()
             )
             try:
                 limit = max(0, int(str(request.form.get("guest_daily_limit", "")).strip()))
@@ -3293,12 +3386,26 @@ def config_manager():
 
     configs = get_configs_by_category()
     _sched = quiet.QuietSchedule.parse(get_setting("quiet_schedule", None))
-    _guest_skills = get_setting("GUEST_SKILLS_ALLOWED", None)
-    if _guest_skills is None or _guest_skills.strip() == "":
+    # A row that exists but is EMPTY is a decision -- "a guest may use nothing" --
+    # and only a row that does not exist at all falls back to the default. The
+    # distinction is the whole point of the checkboxes: unticking the last one is
+    # a way of turning access off, and reading it as "unset" would hand the
+    # weather and the calculator straight back.
+    _guest_raw = get_setting("GUEST_SKILLS_ALLOWED", None)
+    if _guest_raw is None:
         # The default is spelled out here because config.py cannot hold it: that
         # file is frozen by the deploy contract. A rule's default belongs next to
         # the rule, and this page is the only other place that may name it.
         _guest_skills = DEFAULT_GUEST_SKILLS
+    else:
+        _guest_skills = ",".join(
+            w for w in (
+                p.strip().lower().removeprefix("skill_") for p in _guest_raw.split(",")
+            ) if w
+        )
+    _ids_raw = get_setting("DISCORD_STANDARD_USERS", None)
+    if _ids_raw is None:
+        _ids_raw = ",".join(str(x) for x in getattr(config, "DISCORD_STANDARD_USERS", []) or [])
     _guest_limit = get_setting("DISCORD_DAILY_LLM_LIMIT", None)
     if _guest_limit is None or _guest_limit.strip() == "":
         _guest_limit = str(getattr(config, "DISCORD_DAILY_LLM_LIMIT", 3))
@@ -3324,6 +3431,9 @@ def config_manager():
         categories=categories,
         guest_skills_allowed=_guest_skills,
         guest_daily_limit=_guest_limit,
+        guest_ids=_ids_raw,
+        guest_skills=_installed_skills(),
+        guest_skills_available=bool(_installed_skills()),
         controls=CONFIG_CONTROLS,
         user=_current_user(),
         nav_menu=nav_menu,
