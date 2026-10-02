@@ -57,7 +57,6 @@ SYNC_DIRS=(src tests skills prompts public)
 # Top-level files that ARE part of the product and must therefore be deployed.
 # assistant.py is the service entry point: not syncing it meant a change reached
 # production only by hand, which is how it silently diverged.
-  TOP_LEVEL_SYNC=(assistant.py)
 
   # pyproject.toml is not only packaging: it is the pytest configuration prod
   # runs the suite with. Without it in prod, `pytest tests/` found no
@@ -67,7 +66,20 @@ SYNC_DIRS=(src tests skills prompts public)
   # for a reason that had nothing to do with the change under test. The
   # dependency list in the same file is what the prod-venv import gate compares
   # against, so prod needs it for the gate to mean anything either.
-  TOP_LEVEL_SYNC=(assistant.py pyproject.toml)
+  # tools.py and data_utils.py are imported at runtime -- assistant.py:44 does
+  # `from tools import search_with_searxng`, and skills/skill_dream.py:19 the
+  # same -- and neither was synced. A change to either reached production only by
+  # hand, exactly the silent divergence the assistant.py line above was written
+  # to prevent. Found 2026-10-02 while removing the pt.wikipedia.org back door
+  # from tools.py: the prompt fix in assistant.py would have deployed and the
+  # privacy fix would not have, which is the worst of both -- a deploy that
+  # looks like it shipped the change.
+  #
+  # config.py and audio_utils.py stay out of this list DELIBERATELY. They are
+  # gated above for being byte-identical between the trees, because they carry
+  # host values that belong in .env; syncing them here would overwrite prod's
+  # copies instead of failing the gate.
+  TOP_LEVEL_SYNC=(assistant.py tools.py data_utils.py pyproject.toml)
 
 # SKILL_REVIEW was populated on 2026-09-27 with skill_tuya.py and
 # skill_weather.py: prod held behaviour dev lacked (a weather cache, and a
