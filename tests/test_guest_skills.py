@@ -194,27 +194,94 @@ def test_quota_is_per_guest():
 # --- o que este ficheiro NAO fixa, e porque -------------------------------
 
 
-def test_calculator_collides_with_cloogy_and_tuya():
-    """LIGADO. Conhece o problema; nao o resolve.
+@pytest.fixture(scope="module")
+def loader():
+    """The real loader, with the two meter skills given a device.
 
-    "quanto é 2+2" casa com TRÊS skills: calculator, cloogy e tuya. As duas
-    últimas porque ambas declaram o gatilho `"quanto"`, que é uma substring de
-    "quanto é". A regra é "qualquer skill casada fora da lista recusa", portanto
-    esta pergunta é recusada -- e o calculator, que está na allowlist por
-    omissão, é inacessível.
-
-    O owner tem de escolher: (a) estreitar os gatilhos `quanto` de cloogy e tuya,
-    o que muda o comportamento da assistente do dono; (b) decidir a regra pela
-    skill que responderia, o que exige executar antes de autorizar; ou (c)
-    allowlistar e aceitar o que vem com ela. Nenhuma delas é uma decisão de
-    leitura de código.
+    Not a fake: the whole point of these tests is which skills a Portuguese
+    sentence *matches*, and a fake trigger list would only prove that the fake
+    behaves as the fake was written to behave. `CLOOGY_DEVICES` / `TUYA_DEVICES`
+    are set because both `handle`s return None without a device, so without them
+    every meter question would look like it reaches nothing.
     """
     from skills.loader import SkillLoader
 
-    loader = SkillLoader("skills")
-    loader.load_all()
-    matched = loader.resolve_matching_skills("quanto é 2+2")
-    assert "skill_calculator" in matched
-    assert any(m not in ("skill_calculator",) for m in matched), (
-        f"a colisao deixou de acontecer: {matched}"
+    saved = (
+        getattr(config, "CLOOGY_DEVICES", None),
+        getattr(config, "TUYA_DEVICES", None),
     )
+    config.CLOOGY_DEVICES = {"forno": "a", "casa": "b"}
+    config.TUYA_DEVICES = {"luz": "x"}
+    try:
+        loader_ = SkillLoader("skills")
+        loader_.load_all()
+        yield loader_
+    finally:
+        config.CLOOGY_DEVICES, config.TUYA_DEVICES = saved
+
+
+# The owner chose (a): narrow the triggers that collided, rather than loosen the
+# rule. So the test is a pair, and both halves matter -- narrowing a trigger to
+# fix a collision is the easiest way in this codebase to break the voice.
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "quanto gastou o total",
+        "quanto gastou a casa",
+        "quanto consome o forno",
+        "quanto consumiu a casa",
+        "quanto esta no wc",
+        "quanto marca o sensor",
+        "leitura do forno",
+        "lista do cloogy",
+    ],
+)
+def test_the_owner_still_reaches_the_meters(loader, prompt):
+    """Nothing the owner says every day may stop reaching the meter skills.
+
+    `quanto` was removed from both skills. Before removing it, "quanto gastou o
+    total" matched ONLY on that word -- `total` was never a trigger, though the
+    handle has always treated it as an alias for the whole-house reading. So the
+    obvious one-word deletion would have sent a daily question to the language
+    model, which answers fluently and is wrong. That is the regression this
+    half of the pair exists to catch, and `quanto esta` is spelled without the
+    accent on purpose: `matches` does not fold accents and the text comes from
+    the STT.
+    """
+    matched = loader.resolve_matching_skills(prompt.lower())
+    assert {"skill_cloogy", "skill_tuya"} & set(matched), (
+        f"{prompt!r} deixou de chegar aos medidores: casou {matched}"
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "quanto é 2+2",
+        "quanto e 2+2",
+        "quanto é 10/2",
+        "calcula 3 vezes 4",
+        "quanto é o geral",
+        "quanto e a capital de França",
+        "2+2",
+    ],
+)
+def test_arithmetic_reaches_only_the_calculator(loader, prompt):
+    """A guest asking an arithmetic question must not be refused.
+
+    The guest rule is "any matched skill outside the allowlist refuses", and
+    `calculator` is on the list, so one stray `contains` match on a device skill
+    turned a sum into a refusal naming a light bulb. `cloogy` and `tuya` both
+    declared the bare trigger `quanto`; it is gone, replaced by verbs that
+    cannot appear in a sum.
+
+    `2+2` is here on purpose. That one matches on the operator `+`, which is
+    where the old `ALLOWED_SKILL_KEYWORDS` came from: it was a hand-kept copy of
+    the calculator's triggers, which is how a keyword list came to be mistaken
+    for an allowlist.
+    """
+    matched = loader.resolve_matching_skills(prompt.lower())
+    outside = [m for m in matched if m not in ("skill_calculator",)]
+    assert not outside, f"{prompt!r} colide com {outside}"

@@ -10,7 +10,24 @@ from pathlib import Path
 
 # --- Configuração ---
 TRIGGER_TYPE = "contains"
-BASE_TRIGGERS = ["cloogy", "kiome", "lista", "listar", "consumo", "gastar", "leitura", "quanto"]
+# "quanto" saiu daqui (2026-10-02). Era uma palavra-genero que colidia com o
+# calculator: "quanto e 2+2" casava aqui E no calculator, e como a regra de
+# convidados e "qualquer skill casada fora da allowlist recusa", uma conta
+# simples ficava recusada. Nao e um problema de como a skill responde -- e um
+# problema de a lista de Skills que o pedido "toca".
+#
+# Nao se apagou a intencao: entraram os VERBOS. Uma primeira versao pôs "total" e
+# "geral" -- que o handle ja tratava como alcunha da medicao geral (linha 323) --
+# e isso reintroduzia a mesma colisao por outra palavra, porque "em geral" e uma
+# frase comum e "quanto e o geral" continua a casar no calculator. Os verbos nao
+# tem ambiguidade: "quanto gastou o total" e "quanto consome o geral" continuam a
+# chegar aqui, e nenhuma frase de calculo os contem.
+#
+# Regressao aceita e declarada: "quanto e o geral" deixa de casar e passa ao LLM.
+# Nao ha gatilho que sirva os dois -- qualquer coisa que apanhe essa frase apanha
+# tambem a do calculator.
+BASE_TRIGGERS = ["cloogy", "kiome", "lista", "listar", "consumo", "gastar",
+                 "leitura", "gastou", "gasto", "consome", "consomiu"]
 # Resolved through config.CACHE_DIR instead of a literal /opt/phantasma path.
 # A host path in code cannot be overridden, so these caches had to be forked
 # per host. In production the resolved path is byte-identical to the old one.

@@ -40,7 +40,24 @@ VERBOSE_LOGGING = False
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
-STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível", "leitura", "quanto", "gastar", "consumo"]
+# "quanto" saiu daqui pela mesma raza que saiu do cloogy: colidia com o
+# calculator e tornava uma conta simples inacessivel a um convidado. Substituido
+# pelas formas que NAO podem aparecer numa conta -- "quanto e 2+2" contem
+# "quanto e", nunca "quanto esta".
+#
+# Ficam em STATUS_TRIGGERS, e nao em BASE_NOUNS, de proposito: daqui sao
+# leituras, e nada mais. Meter "wc" ou "cozinha" nos BASE_NOUNS faria o prompt
+# autorizar o controlo do que estiver nessa divisao -- que e exactamente a
+# licence que o comentario do BASE_NOUNS acrescenta.
+# As formas sem acento nao saoredundancia: `matches` faz `contains` palavra-a-palavra
+# sobre o texto tal e qual, e o texto vem do STT, que nao acenta. Verificado --
+# "como esta o wc" -> False, "como esta o wc" -> True. Ou seja, "como esta",
+# que ja estava aqui desde sempre, nunca disparou por voz. E um defeito mais largo
+# que este ficheiro; nao se corrige aqui. Mas um gatilho novo nao pode nascer
+# partido, senao nasce morto.
+STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível",
+                   "leitura", "quanto está", "quanto esta", "quanto marca",
+                   "quanto rende", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
 BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomada", "ficha", "quarto", "sala", "luzes", "fichas"]
 
