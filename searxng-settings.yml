@@ -72,6 +72,18 @@ search:
   # a search engine, not an autocomplete backend. Empty disables it honestly.
   autocomplete: ""
   default_lang: "pt"
+# Kept, after the honest correction: this block was written on a WRONG
+# diagnosis and then fixed. The 403 seen from inside the container came from
+# Python's default urllib User-Agent ("Python-urllib/3.13"), which Wikipedia
+# rejects. SearXNG's own UA does not need this: verified `searx/1.0.0` and
+# `SearXNG/1.0.0 <suffix>` both return HTTP 200 from pt.wikipedia.org. So the
+# suffix is not what fixed Wikipedia -- `display_type` under the wikipedia
+# engine below is. It stays because naming the client is the polite thing to do
+# against a public API that asks for it, and because it costs nothing.
+outgoing:
+  useragent_suffix: "pHantasma/1.0 (self-hosted SearXNG; +https://github.com/linuxkafe/phantasma)"
+  request_timeout: 4.0
+  max_request_timeout: 8.0
 engines:
   - name: bing
     engine: bing
@@ -100,6 +112,19 @@ engines:
     disabled: false
     use_http: true
     timeout: 4.0
+    # Measured 2026-10-02: this engine returned 0 results to the JSON API for
+    # EVERY query, and was NOT listed in unresponsive_engines -- it looked
+    # healthy and was dead. Cause: wikipedia.py:77 declares
+    # `display_type = ["infobox"]`, so a standard article is only ever emitted
+    # as an infobox, and the JSON serialiser does not put infobox entries in
+    # `results`. The app was calling format=json and seeing an empty list while
+    # the browser UI would have shown a panel.
+    #
+    # This is why tools.py held a second, hard-coded door to pt.wikipedia.org:
+    # the engine inside SearXNG was configured and had never worked. T063
+    # removed the door; without this line it would have removed Wikipedia from
+    # search entirely.
+    display_type: [list, infobox]
   - name: seznam
     engine: seznam
     shortcut: szn

@@ -529,3 +529,58 @@ reticências — a lista não continha nenhum membro da classe que a regra nova 
 rejeitar, portanto não podia falhar, portanto não certificava nada. Três personas
 viram isso ao mesmo tempo. Uma verificação que não pode falhar não é uma
 verificação.
+
+## [HIGH] [DISCOVERED 2026-10-02] O motor wikipedia do SearXNG estava morto e parecia saudável
+
+`searxng-settings.yml` tinha `wikipedia` como motor, `disabled: false`, desde
+sempre. **Devolvia zero resultados a todas as consultas** e **não aparecia em
+`unresponsive_engines`** — um motor morto que se apresenta como vivo.
+
+Causa: `wikipedia.py:77` declara `display_type = ["infobox"]`. Um artigo
+"standard" só é emitido como infobox, e o serializador JSON não coloca infboxes
+em `results`. A aplicação pede `format=json` via `tools._searxng` e via um bloco
+inteiro vazio — enquanto a interface web do SearXNG mostrava um painel e
+fazia parecer que funcionava.
+
+**Esta é a razão pela qual `tools.py` tinha uma segunda porta para a
+Wikipédia.** O motor estava configurado e nunca funcionou, e a porta era a única
+coisa que respondia. T063 removeu a porta; sem `display_type: [list, infobox]`
+isso teria removido a Wikipédia da pesquisa de todo.
+
+Corrigido e verificado em produção: `q=portugal` → `Portugal – Wikipédia`.
+
+### A pista errada, registada porque errar é o método
+
+O primeiro diagnóstico foi **User-Agent**. Do contentor, sem UA, a Wikipédia
+devolve 403. Escrevi o bloco `outgoing:` por causa disso — e estava errado:
+`searx/1.0.0` devolve 200 tal e qual. O 403 vinha do `Python-urllib` do meu
+próprio script de sondagem, não do SearXNG. O bloco ficou, com o motivo
+corrigido no comentário, mas a causa era o `display_type`.
+
+### E o que estava a acontecer no log, ao abrir isto
+
+Ao procurar a causa, o log do SearXNG mostrou o motor `wikipedia` a ser
+consultado com **payloads de injecção de SQL** como se fossem títulos de
+artigos:
+
+```
+https://pt.wikipedia.org/api/rest_v1/page/summary/SELECT%20%2A%20FROM%20(
+  SELECT 'Mecanismo de Concentração de Capital' AS mecanismo ... 
+  UNION SELECT ... FROM information_schema.tables ...)
+```
+
+Datas no log: **2026-09-28 e 2026-09-30**. Isto é o item 3 do T057, ainda por
+corrigir: o ciclo de sonho manda consultas degeneradas para o SearXNG. Não é
+um ataque externo — é o LLM local a gerar SQL a partir de conteúdo, e o
+SearXNG a obedecer e a tentar ir buscar um artigo com esse nome.
+
+**Risco real:** `information_schema.tables` é reconhecimento de base de dados.
+Não funcionou porque a Wikipédia rejeitou com 400, e não porque houvesse uma
+defesa. Se um dia um motor aceitasse a query, o pedido saía com Reconhecimento
+de esquema. E o custo é o mesmo mesmo sem ataque: cada chamada é uma ida ao
+SearXNG a perguntar por um artigo chamado `SELECT * FROM information_schema`.
+
+**Correcção pendente (T057 §3):** o gate de promoteabilidade do T060 é a
+ferramenta certa — `_research_gap` e `_concept_from_reply` devem rejeitar
+labels que não são linguagem natural. E o gate **não** foi aplicado ao caminho
+`reconcile.py:116`, que é por onde esta consulta saiu.
