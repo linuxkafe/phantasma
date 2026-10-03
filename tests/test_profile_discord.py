@@ -237,6 +237,18 @@ def test_the_environment_lists_keep_precedence(app_and_client, monkeypatch):
     monkeypatch.setattr(discord_access.config, "DISCORD_ADMIN_USERS", [], raising=False)
     monkeypatch.setattr(discord_access.config, "DISCORD_STANDARD_USERS", [700700700],
                         raising=False)
+    # The store is stubbed to "the owner never touched this key", because it is
+    # no longer equivalent. Since the revocation fix the ADMIN PAGE is
+    # authoritative for the id lists once the owner has used it, and only the
+    # `.env` applies otherwise -- so on a machine where the page has been saved,
+    # the `.env` list is genuinely not in force.
+    #
+    # This test passed in dev and failed in production for exactly that reason:
+    # `/opt/phantasma` has DISCORD_STANDARD_USERS in `app_settings`, written by
+    # the page, and the dev database does not. A test that assumed the two
+    # machines agree is a test that only runs on one of them.
+    monkeypatch.setattr(discord_access, "_owner_set",
+                        lambda key: (None, True))
     allowed, _ = discord_access.check(700700700, "liga a luz", ["skill_weather"])
     assert allowed, "an id in DISCORD_STANDARD_USERS lost its access"
 
