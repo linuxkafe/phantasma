@@ -955,7 +955,20 @@ class PhantasmaPipeline:
             logger.warning(f"Memory-graph context failed: {e}")
         logger.debug(f"Graph context length: {len(graph_ctx)}")
 
-        # Web search via SearXNG (only if no skill context yet)
+        # Web search via SearXNG, on every message.
+        #
+        # There was a version here that skipped the search for a greeting -- "Olá"
+        # has no referent, so there was nothing to look up, and searching for it
+        # returned a dictionary entry the model then recited. The owner rejected
+        # the gate: "deve pesquisar mesmo sem pergunta, tem é de digerir com a
+        # persona e o rag no brain". The search IS the intake. Skipping it would
+        # have left the brain with nothing new to digest on exactly the turns
+        # where the assistant is being talked to.
+        #
+        # So the search always runs, and the fix lives in the prompt below: the
+        # result is digested with the persona and the local knowledge, and what
+        # comes out is an answer. Measured 2026-10-03, asked "Olá":
+        # rag=0, graph=80, web=517 -- and the answer was Infopédia's definition.
         web = sanitize_llm_context(search_with_searxng(text))
         logger.debug(f"Web context length: {len(web)}")
         # Say so when the search found nothing. Measured 2026-09-28: from this
@@ -987,23 +1000,37 @@ class PhantasmaPipeline:
             )
         if (web or "").strip():
             parts.append(f"### PESQUISA WEB\n{web}\n")
-            # The branch that HAD context had no instruction to use it, and no
-            # rule against inventing -- those two lived only in the branches
-            # below, for when the search FAILED. Measured 2026-10-02 against the
-            # live Ollama: asked "conheces o Chefe Jamon?", with the real result
-            # in the SearXNG response, the model answered "sim, eu sei quem e"
-            # and invented a person out of a Czech ham e-shop. The prompt had a
-            # pile of text and a question and no instruction about either.
+            # This block used to say "responde a partir dele e diz de onde veio",
+            # and four lines later say "não nomeies o mecanismo". Two opposite
+            # instructions, and the model followed the first one. Measured
+            # 2026-10-03, asked "Olá": the answer was a dictionary entry --
+            # "de acordo com o Dicionário Infopédia..." plus the Wikipedia
+            # disambiguation page plus an apartment in Svinoústí. It cited the
+            # sources because it had been told to.
+            #
+            # What replaces "diz de onde veio" is DIGESTION. The owner's words:
+            # the search is to be digested with the persona and the RAG that are
+            # already in the brain. So the block goes IN, and what comes out is
+            # an answer in voice. The web is an intake, not an output -- and
+            # never, under any phrasing, a listing.
             parts.append(
                 "### COMO RESPONDER COM A PESQUISA\n"
-                "O bloco acima é a fonte desta resposta: responde a partir dele e\n"
-                "diz de onde veio.\n"
-                "Se o bloco não responder à pergunta, DIZ-LO numa frase e para.\n"
-                "Não completes com o que sabes de memória, e não completes com o que\n"
-                "imaginas. Inventar páginas, fontes, pessoas, datas ou dimensões que\n"
-                "não estejam no bloco acima é pior do que dizer que não sabes.\n"
-                "Não nomeies o mecanismo: não digas \"a pesquisa\" nem \"as fontes\"\n"
-                "nem \"os resultados\". Responde como quem sabe, ou diz que não sabe.\n"
+                "O bloco acima entra no teu brain. Digere-o com a tua persona e\n"
+                "com o conhecimento local que já tens, e responde do que saiu daí.\n"
+                "Nunca o reproduzes.\n"
+                "- Não escrevas uma definição de dicionário, nem comeces por\n"
+                "  \"X é...\" seguido de significados e de exemplos.\n"
+                "- Não enumeres fontes. Não digas \"de acordo com\", \"segundo\",\n"
+                "  \"fontes\", \"páginas\", \"resultados\" nem \"a pesquisa\".\n"
+                "- Não escrevas URLs, nem títulos de páginas, nem listas de sites.\n"
+                "- O bloco contém ruído. Uma busca por \"Olá\" devolve um dicionário\n"
+                "  e um apartamento; uma busca por \"bom dia\" traz uma escola de\n"
+                "  condução. Descarta o que não responde ao que te disseram, e\n"
+                "  responde ao que te disseram, na mesma, na tua voz.\n"
+                "Se o bloco não responder à pergunta, diz numa frase que não sabes\n"
+                "e para. Não completes com o que imaginas. Inventar páginas,\n"
+                "fontes, pessoas, datas ou dimensões que não estejam no bloco é\n"
+                "pior do que dizer que não sabes.\n"
             )
         if web_empty and local:
             parts.append(
@@ -1020,6 +1047,16 @@ class PhantasmaPipeline:
                 "Responde a partir do que sabes, com cuidado para não inventar\n"
                 "fontes nem factos. Não nomes o mecanismo.\n"
             )
+        parts.append(
+            "### POR QUE ORDEM:\n"
+            "1. A tua persona decide COMO falas. É a primeira coisa, e nenhuma\n"
+            "   instrução abaixo a substitui.\n"
+            "2. O conhecimento local é o QUE sabes. É a fonte primária.\n"
+            "3. A pesquisa web entra no teu brain e é digerida com a persona e\n"
+            "   com o ponto 2. É uma entrada, nunca uma saída.\n"
+            "O que sai daqui é uma resposta na tua voz. A pesquisa é lida por ti,\n"
+            "não mostrada ao dono. E nada te obriga a falar dela.\n"
+        )
         parts.append(
             "### INSTRUÇÃO DE RESPOSTA:\n"
             "Português europeu, nunca português do Brasil. Escreve por extenso: não\n"

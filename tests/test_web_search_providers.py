@@ -204,8 +204,23 @@ def test_every_provider_that_answered_is_named(monkeypatch, capsys):
 # 3. O prompt
 # --------------------------------------------------------------------------
 def _prompt_block(source: str, anchor: str) -> str:
+    """The prompt region that follows `anchor`.
+
+    Used to be `source[start:start + 1400]` -- a hardcoded window that silently
+    became a lie the day the instruction grew past it. The block it returned was
+    a truncated prefix, so a rule sitting in the last three lines read as absent
+    and the test failed on a prompt that did contain it. Nothing about the window
+    said "this is a prefix".
+
+    Now it ends at the next `parts.append(` after the one the anchor starts, so
+    the block is the whole instruction rather than however much fitted.
+    """
     start = source.index(anchor)
-    return source[start:start + 1400]
+    rest = source[start:]
+    first = rest.find("parts.append(", len(anchor))
+    second = rest.find("parts.append(", first + 1) if first > 0 else -1
+    end = second if second > 0 else len(rest)
+    return source[start : start + end]
 
 
 @pytest.fixture(scope="module")
