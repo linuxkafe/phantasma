@@ -768,20 +768,52 @@ class PhantasmaPipeline:
         # be many JSON documents, not one. Rendering the whole blob failed to
         # parse and fell through to the raw text -- the original sin. Render
         # each object on its own and keep prose lines as they are.
+        #
+        # Braces are counted OUTSIDE string literals. Counting them blindly
+        # infinite-looped on 9 of the 53 production memories: a `{` inside a
+        # string value pushed the depth up, `buf` never emptied, and the chunk
+        # handed back still started with `{` and still had more than one, so it
+        # re-entered here forever. Reproduced minimally:
+        #
+        #     _render_memory('{"tags": ["a {b} c"], "facts": ["d"]}')
+        #     RecursionError: maximum recursion depth exceeded
+        #
+        # Any migrated memory with a brace in a value did it, and the assistant
+        # was one RAG hit away from a crash on the conversation path.
         if raw.startswith("{") and raw.count("{") > 1:
             chunks, buf, depth = [], [], 0
+            in_string = escaped = False
             for ch in raw:
                 buf.append(ch)
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        chunks.append("".join(buf))
-                        buf = []
+                if escaped:
+                    escaped = False
+                elif ch == "\\" and in_string:
+                    escaped = True
+                elif ch == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            chunks.append("".join(buf))
+                            buf = []
             if buf and "".join(buf).strip():
                 chunks.append("".join(buf))
-            rendered = [PhantasmaPipeline._render_memory(c) for c in chunks]
+            # Progress guard: a chunk identical to the whole input means the
+            # brace count found no boundary (unbalanced brace outside a string).
+            # Handing it straight back would recurse on the same bytes forever,
+            # so it is dropped and the blob goes to the parser, which falls back
+            # to raw text. The CORRECT brace count above is what prevents the
+            # crash in the real data; this only covers malformed input the
+            # counter cannot split.
+            splittable = [c for c in chunks if c != raw]
+            rendered = [
+                PhantasmaPipeline._render_memory(c) for c in splittable
+            ]
+            if not splittable:
+                rendered = []
             rendered = [r for r in rendered if r]
             if len(rendered) > 1:
                 return "\n".join(f"- {r}" for r in rendered)

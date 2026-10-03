@@ -81,7 +81,65 @@ def graph_breakdown(conn: sqlite3.Connection) -> str:
         ).fetchall()
     except sqlite3.Error:
         return "unreadable"
-    return "  ".join(f"{kind}={n}" for kind, n in sorted(rows)) or "empty"
+    # row_factory is Row, and Row is not orderable -- sorted() on rows compares
+    # the objects, not the tuples. Index them.
+    pairs = sorted((r[0], r[1]) for r in rows)
+    return "  ".join(f"{kind}={n}" for kind, n in pairs) or "empty"
+
+
+# SQLite coerces a bare `WHERE column` to NUMERIC. Against a TEXT column every
+# non-numeric string becomes 0 and drops out of the sequence, so
+# `WHERE node_key` matches NOTHING -- measured: 3 keys present, 0 returned.
+# Truthiness in SQLite is not Python's truthiness.
+_SQL_NONEMPTY = "node_key IS NOT NULL AND node_key != ''"
+
+
+def _verify(d: sqlite3.Connection, s: sqlite3.Connection, src: Path) -> bool:
+    """Both invariants, read inside the still-open transaction.
+
+    Returns False rather than exiting, so the caller can roll back: a check
+    that returns 1 from here, after the commit, would leave the destination
+    changed and report failure at the same time.
+    """
+    src_texts = {r["text"] for r in s.execute("SELECT text FROM memories")}
+    dest_texts = {r["text"] for r in d.execute("SELECT text FROM memories")}
+    missing = src_texts - dest_texts
+    if missing:
+        print(
+            f"  FAILED: {len(missing)} memories from {src.name} are still missing",
+            file=sys.stderr,
+        )
+        for text in sorted(missing)[:5]:
+            print(f"    {text[:80]}", file=sys.stderr)
+        return False
+    print(f"  all {len(src_texts)} source memories are present in the destination")
+
+    # The header promised the script "refuses to run if the counts do not add
+    # up". It only ever checked memories. A graph node lost in the copy is just
+    # as invisible, so it gets checked too.
+    #
+    # Only the source keys. An earlier version unioned in dest_keys -- the set
+    # read BEFORE the write -- which asserted that 1566 keys this script never
+    # touched had to survive. It reported 1566 missing on a run that copied
+    # nothing into the graph, and printed missing keys belonging to BRAIN while
+    # blaming memory.db. The check was comparing the destination against a stale
+    # snapshot of itself.
+    src_keys_sql = "SELECT node_key FROM memory_graph WHERE " + _SQL_NONEMPTY
+    dest_keys_sql = "SELECT node_key FROM memory_graph WHERE " + _SQL_NONEMPTY
+    expected = {r["node_key"] for r in s.execute(src_keys_sql)}
+    after = {r["node_key"] for r in d.execute(dest_keys_sql)}
+    lost = expected - after
+    if lost:
+        print(
+            f"  FAILED: {len(lost)} graph node keys from {src.name} are missing",
+            file=sys.stderr,
+        )
+        for k in sorted(lost)[:5]:
+            print(f"    {k}", file=sys.stderr)
+        return False
+    print(f"  all {len(expected)} source graph node keys are present in "
+          f"the destination")
+    return True
 
 
 def main() -> int:
@@ -158,20 +216,40 @@ def main() -> int:
         for r in s.execute("SELECT * FROM memory_graph WHERE node_type='node'")
         if r["node_key"] not in dest_keys
     ]
-    # An edge has no key of its own -- node_key is only UNIQUE for nodes. Two
-    # edges are the same edge when label, source and target all agree.
+    # Edges ARE keyed by node_key -- it is UNIQUE for them too, which is why the
+    # insert below hit an IntegrityError and silently did nothing.
+    #
+    # They were matched on (label, source, target) instead, and that triple is
+    # not stable across the two stores. Measured on the one edge memory.db
+    # holds, which brain.db already has:
+    #
+    #   node_key  edge:capitalismo tardio|depende de plataformas digitais   (both)
+    #   label     Capitalismo Tardio -> Depende de Plataformas Digitais     (both)
+    #   target    'Depende de Plataformas Digitais'  memory.db, affinity 0.0
+    #              'Plataformas Digitais'            brain.db,  affinity 0.15
+    #
+    # So --check reported "1 graph edge to add" on every run, and the write
+    # then failed on the unique key. The plan said there was work to do; there
+    # was none; the existing edge is the better one.
+    #
+    # Reconciling by node_key makes the report honest. It does NOT merge the
+    # rows: brain.db's version wins, because its affinity is the larger and its
+    # target is the one the rest of the graph points at. Overwriting a
+    # production graph edge with a zero-affinity copy is not this script's
+    # decision.
     src_edges = list(s.execute("SELECT * FROM memory_graph WHERE node_type='edge'"))
-    existing_edges = {
-        (r["label"], (r["source"] or ""), (r["target"] or ""))
+    dest_edge_keys = {
+        r["node_key"]
         for r in d.execute(
-            "SELECT label, source, target FROM memory_graph WHERE node_type='edge'"
+            "SELECT node_key FROM memory_graph WHERE node_type='edge'"
         )
+        if r["node_key"]
     }
     new_edges: list[sqlite3.Row] = []
-    seen_edges: set[tuple] = set()
+    seen_edges: set[str] = set()
     for r in src_edges:
-        key = (r["label"], (r["source"] or ""), (r["target"] or ""))
-        if key in existing_edges or key in seen_edges:
+        key = r["node_key"]
+        if key in dest_edge_keys or key in seen_edges:
             continue
         seen_edges.add(key)
         new_edges.append(r)
@@ -203,9 +281,20 @@ def main() -> int:
         shutil.copy2(p, backup)
         print(f"  backup {backup}")
 
-    mem_cols = [r[1] for r in d.execute("PRAGMA table_info(memories)")]
+    # The primary key does NOT cross databases. It is the destination's own
+    # sequence and the source's ids mean nothing here. Copying `id` across is
+    # what produced "UNIQUE constraint failed: memories.id" in the test suite:
+    # source ids started at 1 and so did the destination's.
+    #
+    # Production did not hit it -- the two stores happened to have
+    # non-overlapping id ranges, which is luck of numbering, not design. A
+    # migration that survives by luck is not a migration, it is a coincidence
+    # waiting for a different data set.
+    mem_info = list(d.execute("PRAGMA table_info(memories)"))
+    mem_cols = [r[1] for r in mem_info]
     src_cols = [r[1] for r in s.execute("PRAGMA table_info(memories)")]
-    use = [c for c in mem_cols if c in src_cols]
+    mem_pk = {r[1] for r in mem_info if r[5]}  # r[5] is the pk flag
+    use = [c for c in mem_cols if c in src_cols and c not in mem_pk]
     mem_ph = ",".join("?" * len(use))
     mem_cols_s = ",".join(use)
 
@@ -246,9 +335,34 @@ def main() -> int:
                     [r[c] for c in g_use],
                 )
                 added_edges += 1
-            except sqlite3.Error:
-                pass
+            except sqlite3.IntegrityError:
+                # The unique key says it is already there. Said once, not
+                # swallowed: a bare `except sqlite3.Error: pass` is how "1 edge
+                # to add" became "inserted 0" with nothing in between.
+                print(
+                    f"  edge already present by node_key, kept brain's: "
+                    f"{r['node_key']!r}",
+                    file=sys.stderr,
+                )
+            except sqlite3.Error as exc:
+                # Anything else is a real failure and must not be a silent skip.
+                print(f"  FAILED to insert edge {r['node_key']!r}: {exc}",
+                      file=sys.stderr)
+                raise
         print(f"  inserted {added_edges} graph edges")
+
+        # Verify INSIDE the transaction, before committing.
+        #
+        # It used to run after d.commit(), which made the verification
+        # decorative: it could report FAILED on a destination that had already
+        # been changed, and return 1 while the rows stayed. Measured
+        # 2026-10-03 -- 25 memories committed, verification failed, exit 1, and
+        # the merge was half-applied with the backups as the only way back.
+        # A migration that fails must leave nothing behind.
+        if not _verify(d, s, src):
+            d.rollback()
+            print("\nrolled back -- the destination is unchanged", file=sys.stderr)
+            return 1
 
         d.commit()
     except Exception:
@@ -260,42 +374,6 @@ def main() -> int:
     print()
     print(f"  destination now: memories={counts(d, 'memories')}  "
           f"graph: {graph_breakdown(d)}")
-
-    src_texts = {r["text"] for r in s.execute("SELECT text FROM memories")}
-    dest_texts_after = {r["text"] for r in d.execute("SELECT text FROM memories")}
-    missing = src_texts - dest_texts_after
-    if missing:
-        print(
-            f"  FAILED: {len(missing)} memories from {src.name} are still missing",
-            file=sys.stderr,
-        )
-        for text in list(missing)[:5]:
-            print(f"    {text[:80]}", file=sys.stderr)
-        return 1
-    print(f"  all {len(src_texts)} source memories are present in the destination")
-
-    # The header promised the script "refuses to run if the counts do not add
-    # up". It only ever checked memories. A graph node lost in the copy is just
-    # as invisible, so it gets checked too.
-    expected_keys = {
-        r["node_key"]
-        for r in s.execute("SELECT node_key FROM memory_graph WHERE node_key")
-    } | dest_keys
-    keys_after = {
-        r["node_key"]
-        for r in d.execute("SELECT node_key FROM memory_graph WHERE node_key")
-    }
-    lost = expected_keys - keys_after
-    if lost:
-        print(
-            f"  FAILED: {len(lost)} graph node keys from {src.name} are missing",
-            file=sys.stderr,
-        )
-        for k in list(lost)[:5]:
-            print(f"    {k}", file=sys.stderr)
-        return 1
-    print(f"  all {len(expected_keys)} graph node keys are present "
-          f"({len(src_edges)} source edges accounted for)")
 
     d.close()
     s.close()
