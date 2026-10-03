@@ -23,17 +23,22 @@ ok()  { printf '  OK      %s\n' "$1"; }
 bad() { printf '  BROKEN  %s\n' "$1"; fails=$((fails+1)); }
 
 hdr "BLOCKER 1 -- the skill resolver is empty, so the allowlist is not enforced"
-out=$($PY -c "
+# Read PRODUCTION's copy, because that is what answers the guests. Checking the
+# dev tree here reported the fix as missing after it had already been deployed,
+# which is the same class of mistake in the other direction: a check that reports
+# on the wrong tree.
+out=$(cd "$PROD" && ./venv/bin/python -c "
 import config
 from skills.loader import SkillLoader
 l = SkillLoader(skills_dir=config.SKILLS_DIR)
+l.load_all()
 print(len(l.skills))
 " 2>/dev/null | tail -1)
 if [ "${out:-0}" -gt 0 ]; then
-  ok "SkillLoader($SKILLS_DIR).skills has $out entries without load_all()"
+  ok "production's resolver loaded $out skills"
 else
   bad "resolver is empty ($out skills) -> matching==[] -> guest passes the gate"
-  printf '          FIX: scripts/skill_discord.py must call load_all() on the loader\n'
+  printf '          FIX: skills/skill_discord.py init_skill_daemon must call load_all()\n'
 fi
 
 matched=$($PY -c "
@@ -49,14 +54,33 @@ else
   bad "'acende a luz da sala' matches nothing ($matched)"
 fi
 
-hdr "BLOCKER 2 -- the nightly image update has never run"
-if [ -f "$PROD/docker-compose.yml" ]; then
-  ok "$PROD/docker-compose.yml exists"
+if grep -q 'load_all()' "$PROD/skills/skill_discord.py" 2>/dev/null; then
+  ok "production's skill_discord calls load_all()"
 else
-  bad "$PROD/docker-compose.yml is missing -> update_containers.sh exits 2 every night"
-  n=$(grep -c "compose file not found" "$PROD/data/nightly-update.log" 2>/dev/null || echo 0)
-  printf '          %s recorded failure(s) in the log\n' "$n"
-  printf '          FIX: sync docker-compose.yml, or point the script at the real one\n'
+  bad "production's skill_discord does NOT call load_all() -- the resolver is empty there"
+fi
+
+hdr "BLOCKER 2 -- the nightly image update has never run"
+# NOT "does /opt/phantasma/docker-compose.yml exist". It should NOT: the running
+# containers' bind mounts resolve inside the dev tree, where the models are, and
+# deploying the compose file to $PROD would point those relative paths at an
+# empty directory and bring Ollama up with no models at all.
+#
+# What has to be true is that the script resolves the file the containers were
+# actually created from -- `docker inspect` names it -- so the run does not exit 2.
+compose_dir=$(docker inspect ollama --format \
+  '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null || true)
+if [ -z "$compose_dir" ]; then
+  bad "could not read the compose project working_dir from the running container"
+elif [ -f "$compose_dir/docker-compose.yml" ]; then
+  ok "compose resolves to $compose_dir (where the containers came from)"
+else
+  bad "compose dir $compose_dir has no docker-compose.yml"
+fi
+if grep -q 'PHANTASMA_COMPOSE_DIR' "$PROD/scripts/update_containers.sh" 2>/dev/null; then
+  ok "update_containers.sh resolves the compose dir instead of assuming \$ROOT"
+else
+  bad "update_containers.sh still assumes \$ROOT/docker-compose.yml -> exits 2 nightly"
 fi
 
 hdr "BLOCKER 3 -- the owner cannot revoke a guest through the page"
