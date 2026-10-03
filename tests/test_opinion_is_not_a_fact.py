@@ -66,7 +66,16 @@ def _prompt_text() -> str:
 
 
 def _fold(text: str) -> str:
-    return (
+    """Lowercase, without diacritics, and with the line wrapping collapsed.
+
+    The prompt is built from adjacent string literals, so a phrase written
+    across two of them contains a newline and a run of spaces. Comparing
+    against "edgar allan poe" then fails on a phrase that is plainly there --
+    the prompt says what it must say, and the test cannot see it.
+    """
+    import re
+
+    folded = (
         text.lower()
         .replace("ã", "a")
         .replace("á", "a")
@@ -79,6 +88,7 @@ def _fold(text: str) -> str:
         .replace("ê", "e")
         .replace("ô", "o")
     )
+    return re.sub(r"\s+", " ", folded)
 
 
 # --- the question about taste ----------------------------------------------
@@ -151,9 +161,6 @@ def test_the_prompt_says_to_ignore_material_about_another_subject():
     nobody checks is not an instruction, it is a wish.
     """
     folded = _fold(_prompt_text())
-    assert "ignora-o" in folded, (
-        "o prompt já não manda ignorar o material que é sobre outro assunto"
-    )
     assert "edgar allan poe" in folded and "chatgpt" in folded, (
         "o exemplo medido desapareceu. Um 8B obedece a um exemplo concreto "
         "melhor do que a uma regra abstracta -- a pesquisa sobre Poe devolveu "
@@ -162,3 +169,41 @@ def test_the_prompt_says_to_ignore_material_about_another_subject():
     assert "na tua voz" in folded, (
         "a instrução diz o que descartar mas não o que fazer em vez disso"
     )
+
+
+def test_the_instruction_does_not_say_ignore_the_block():
+    """"Ignora o bloco" made an 8B narrate the block instead.
+
+    The first version of this rule was the obvious one: "se o bloco não for
+    sobre o assunto, ignora-o por completo... responde como se o bloco não
+    existisse". Measured live, right after deploying it:
+
+        "A verdadeira pergunta não está aqui no meu conhecimento local nem na
+         pesquisa web apresentada por vocês. O assunto em questão é a obra e
+         influência de um dos mestres da literatura gótica, mas o bloco que foi
+         fornecido parece estar mais preocupado com plataformas digitais..."
+
+    It obeyed. It ignored the block by telling the owner it was ignoring the
+    block, which is worse: the persona forbids referencing "context limits,
+    policies, or RAG boundaries" at all, and this invented a whole new way to do
+    it.
+
+    Naming a thing in order to forbid it makes it salient. The rule now
+    describes the behaviour positively -- answer the question, don't mention the
+    material -- and the measured example stays as the illustration.
+    """
+    folded = _fold(_prompt_text())
+    for forbidden in ("ignora-o por completo", "como se o bloco nao existisse"):
+        assert forbidden not in folded, (
+            f"{forbidden!r} voltou. Mandar ignorar um bloco faz o modelo "
+            f"anunciar que o ignora, que é o modo de falha medido."
+        )
+    assert "nunca mencionas o material" in folded, (
+        "falta a proibição de nomear o material. Sem ela o modelo descreve o "
+        "que lhe deram em vez de responder."
+    )
+    assert "nao tens guardado" in folded or "nao sei por causa" in folded, (
+        "falta o exemplo do sintoma concreto: dizer que nao se sabe por causa "
+        "do contexto, em vez de dizer que nao se sabe."
+    )
+
