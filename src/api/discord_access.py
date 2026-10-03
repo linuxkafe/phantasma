@@ -282,28 +282,45 @@ def _guest_tier(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
     """
     if matching is None:
         log.error("discord: nao foi possivel resolver a skill; pedido recusado")
-        return False, "Não consegui verificar o que esse pedido ia tocar."
+        return False, "Não consegui verificar o que esse pedido ia tocar.", "unresolved"
 
     allowed = allowed_guest_skills()
     outside = [n for n in matching if _normalise_skill(n) not in allowed]
     if outside:
-        names = ", ".join(sorted({_normalise_skill(n) for n in outside}))
-        return False, f"Não tens acesso a {names}."
+        # The module short names are NOT in the guest-facing string. It used to be
+        # `f"Não tens acesso a {names}."`, which meant a guest asking about the
+        # temperature was told "Não tens acesso a tuya." and someone asking to turn
+        # on the living-room light was told "Não tens acesso a chacon, tuya,
+        # xiaomi." Those are read in a channel other people are in, they answer no
+        # question the guest asked, and they enumerate the hardware in the house --
+        # a tuya hub, a set of xiaomi plugs and a chacon wall switch, which is a
+        # map of somebody's home.
+        #
+        # The owner already knows what is allowed; the guest needs to know the
+        # request was declined. The names go to the log, where they are useful.
+        names = sorted({_normalise_skill(n) for n in outside})
+        log.info("convidado %s recusado: %s", user_id, ", ".join(names))
+        return False, "Não posso tratar desse pedido.", "not_allowed"
 
     today = datetime.now().strftime("%Y-%m-%d")
     if user_id not in _USER_QUOTAS or _USER_QUOTAS[user_id]["date"] != today:
         _USER_QUOTAS[user_id] = {"date": today, "count": 0}
 
     limit = _daily_limit()
-    if _USER_QUOTAS[user_id]["count"] < limit:
-        _USER_QUOTAS[user_id]["count"] += 1
-        return True, ""
     if limit == 0:
-        return True, ""
-    return (
-        False,
-        f"Atingiste o teu limite diário de {limit} pedidos. Fica para amanhã.",
-    )
+        # Unlimited. NOT counted here: `confirm_spend` is what counts, and this
+        # function no longer charges anything. Incrementing in both places made
+        # an unlimited day read 2, 4, 6, 8 across four requests -- caught by
+        # `test_unlimited_still_counts_the_day`, which is the only reason I am
+        # writing it down rather than trusting that one counter has one writer.
+        return True, "", None
+    if _USER_QUOTAS[user_id]["count"] >= limit:
+        return (
+            False,
+            f"Atingiste o teu limite diário de {limit} pedidos. Fica para amanhã.",
+            "quota",
+        )
+    return True, "", None
 
 
 def _from_environment(
@@ -312,7 +329,7 @@ def _from_environment(
     """The owner's own lists, or None when this id is not in them."""
     as_text = str(user_id).strip()
     if as_text in _owner_admin_ids():
-        return True, ""
+        return True, "", None
     if as_text in _owner_guest_ids():
         # The prompt goes through, or an id the owner put in DISCORD_STANDARD_USERS
         # would spend its quota asking about the weather -- which is the one
@@ -322,7 +339,7 @@ def _from_environment(
     return None
 
 
-def check(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
+def check(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str, str | None]:
     """``(allowed, message)`` for a Discord user id, a prompt and the skill it hits.
 
     ``matching`` is the list of skills that *would* run, resolved before anything
@@ -333,6 +350,21 @@ def check(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
     written before this rule existed kept working by passing nothing, and a
     permission check whose failure mode is "you forgot an argument and nobody
     noticed" is not a permission check.
+
+    Three values, not two. The third is a reason code -- ``None`` when allowed,
+    otherwise ``denied``, ``quota``, ``not_allowed`` or ``unresolved`` -- and it
+    exists because the caller used to decide whether to SPEAK by searching the
+    message for a word:
+
+        if "limite diário" in error_msg:
+            await message.channel.send(...)
+
+    which is a decision about whether the bot answers made by matching
+    user-facing prose. It enumerated the reasons correctly, by hand, on the day:
+    only the quota reply sounded. Fix the accent, translate the string, or add a
+    fifth reason, and the bot goes silent on it -- indistinguishable from being
+    offline, which is the failure this session already spent a day on. A guest
+    asking about the weather in a language whose word we mistyped gets nothing.
 
     ``prompt_lower`` survives as a parameter and is no longer read to decide
     anything. The previous version exempted any prompt containing ``+``, ``-``,
@@ -357,13 +389,42 @@ def check(user_id, prompt_lower: str, matching: Any) -> tuple[bool, str]:
         # other choice is a house that opens itself to whoever asks while the
         # database is unhappy.
         log.warning("discord: perfil indisponivel: %s", exc)
-        return False, "Acesso negado."
+        return False, "Acesso negado.", "denied", "denied"
 
     if role == "admin":
-        return True, ""
+        return True, "", None
     if role:
         return _guest_tier(user_id, prompt_lower, matching)
-    return False, "Acesso negado."
+    return False, "Acesso negado.", "denied"
+
+
+def confirm_spend(user_id) -> None:
+    """Charge one request, once the assistant has actually answered.
+
+    The count used to happen inside ``check()``, at the moment access was granted
+    and before the request left. So a guest whose request then failed -- a 300s
+    HTTP timeout to ``/comando``, an Ollama host that stopped answering -- was
+    charged for it. Three failures and the fourth refusal said "Atingiste o teu
+    limite diário de 3 pedidos", which is the assistant blaming the guest for
+    its own outage, and doing it silently.
+
+    With the fallback host timing out on this box that was the normal week, not an
+    edge case. The separation is also what makes the two limits independent: the
+    quota is a rate limit on what the guest consumed, and what they did not get
+    is not consumption.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    if user_id not in _USER_QUOTAS or _USER_QUOTAS[user_id]["date"] != today:
+        _USER_QUOTAS[user_id] = {"date": today, "count": 0}
+    _USER_QUOTAS[user_id]["count"] += 1
+
+
+def spent(user_id) -> int:
+    """What ``user_id`` has been charged today. For tests and for the log."""
+    entry = _USER_QUOTAS.get(user_id)
+    if not entry or entry["date"] != datetime.now().strftime("%Y-%m-%d"):
+        return 0
+    return int(entry["count"])
 
 
 def reset_quotas() -> None:

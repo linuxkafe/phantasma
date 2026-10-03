@@ -100,8 +100,17 @@ def _check_access(user_id, prompt_lower, self=None):
     return discord_access.check(user_id, prompt_lower, matching)
 
 
-async def _send_to_phantasma(prompt):
-    """Envia o texto para a API local e recebe a resposta"""
+async def _send_to_phantasma(prompt) -> tuple:
+    """Send the text to the local API. Returns ``(text, delivered)``.
+
+    The second element exists because the caller has to decide whether to charge
+    the guest, and that decision must not be made by matching user-facing prose.
+    The first version was ``str(response).startswith("Erro de comunicação
+    interna")``: one edit to the message, or one accent, silently starts charging
+    guests for the house's own outages. There are three failure shapes here --
+    connection error, 401 from the command gate, and a non-2xx -- and matching a
+    string catches only the ones somebody remembered to spell.
+    """
     async with httpx.AsyncClient(timeout=300) as http_client:
         try:
             payload = {"prompt": prompt}
@@ -109,7 +118,8 @@ async def _send_to_phantasma(prompt):
                 return (
                     "Não tenho credencial para falar com a casa. "
                     "Define PHANTASMA_COMMAND_TOKEN no ambiente do phantasma "
-                    "e reinicia o serviço."
+                    "e reinicia o serviço.",
+                    False,
                 )
             # Usa a API local para processar (garante que passa pelo route_and_respond)
             response = await http_client.post(
@@ -119,13 +129,14 @@ async def _send_to_phantasma(prompt):
                 return (
                     "A casa recusou o comando (401). O "
                     "PHANTASMA_COMMAND_TOKEN do Discord não corresponde ao do "
-                    "serviço."
+                    "serviço.",
+                    False,
                 )
             response.raise_for_status()
             data = response.json()
-            return data.get("response", "...")
+            return data.get("response", "..."), True
         except Exception as e:
-            return f"Erro de comunicação interna: {e}"
+            return f"Erro de comunicação interna: {e}", False
 
 
 @client.event
@@ -176,25 +187,46 @@ async def on_message(message):
     #
     # So the skill reads the resolver off its own class object, which is where
     # the loader put it. `skill` is bound at import by the adapter.
-    allowed, error_msg = _check_access(message.author.id, prompt.lower())
+    allowed, error_msg, reason = _check_access(message.author.id, prompt.lower())
 
     if not allowed:
-        # Se for um user standard bloqueado, avisamos. Se for desconhecido, ignoramos ou logamos.
-        if "limite diário" in error_msg:
+        # Whether to SPEAK is a decision about the reason code, not about the
+        # words. It used to be `if "limite diário" in error_msg`, which hand-
+        # enumerated the reasons that deserve an answer and silently treated
+        # every future one as silence. A guest whose refusal changed wording
+        # would have been ignored, with no log line, no error, and no way to tell
+        # that from an offline bot.
+        #
+        # The quota is the only refusal where saying nothing helps the guest: the
+        # next attempt has the same answer. Everything else -- an id not on the
+        # list, a skill not allowed, an unwired resolver -- is worth one line,
+        # because the alternative is a guest standing in the room concluding the
+        # bot is off.
+        if reason == "quota":
             await message.channel.send(f"🚫 {error_msg}")
+        else:
+            await message.channel.send(error_msg)
         # logger, not print: a refusal is the one event that must be visible
         # when someone asks "why did it not answer?", and `journalctl` is where
         # they will look. The print that used to be here left no trace.
         logger.info(
-            "Acesso negado para %s (%s): %s",
-            message.author.name, message.author.id, error_msg,
+            "Acesso negado a %s (%s): reason=%s: %s",
+            message.author.name, message.author.id, reason, error_msg,
         )
         return
 
     logger.info("Comando aceite de %s: %s", message.author.name, prompt)
 
     async with message.channel.typing():
-        response_text = await _send_to_phantasma(prompt)
+        response_text, delivered = await _send_to_phantasma(prompt)
+        # Charge only what was delivered. An unreachable house used to spend the
+        # guest's daily budget: three timeouts, then "Atingiste o teu limite
+        # diário de 3 pedidos", which is the assistant blaming the guest for its
+        # own outage.
+        if delivered:
+            from src.api import discord_access as _da
+
+            _da.confirm_spend(message.author.id)
 
         # Corta a resposta se exceder o limite do Discord (2000 chars)
         if len(response_text) > 2000:

@@ -82,8 +82,32 @@ def _set_setting(monkeypatch, key: str, value: str) -> None:
 # --- acesso ---------------------------------------------------------------
 
 
+def _spend(uid, times=1):
+    """Charge the guest, the way the Discord handler does after an answer.
+
+    The count moved out of `check()` and into `confirm_spend()`, because the old
+    placement charged a guest for the house's own outages: three timeouts to
+    `/comando` and then "Atingiste o teu limite diário de 3 pedidos". So a test
+    that wanted three permitted requests now has to say the three were served.
+    """
+    from src.api import discord_access as da
+
+    for _ in range(times):
+        da.confirm_spend(uid)
+
+
+def _can_serve(uid, prompt, matching):
+    """What the handler does: authorise, then charge if it answered."""
+    from src.api import discord_access as da
+
+    allowed, msg, reason = da.check(uid, prompt, matching)
+    if allowed:
+        _spend(uid)
+    return allowed, msg, reason
+
+
 def test_guest_may_reach_an_allowlisted_skill():
-    allowed, _ = da.check(GUEST, "que tempo faz", ["skill_weather"])
+    allowed, _, _reason = da.check(GUEST, "que tempo faz", ["skill_weather"])
     assert allowed
 
 
@@ -93,7 +117,7 @@ def test_guest_is_refused_a_device_skill():
     `skill_chacon` e `skill_tuya` sao as que mudam a casa. Nenhuma das duas pode
     estar na allowlist por omissao, e o valor por omissao nao as inclui.
     """
-    allowed, msg = da.check(GUEST, "acende a luz da sala", ["skill_chacon", "skill_tuya"])
+    allowed, msg, _reason = da.check(GUEST, "acende a luz da sala", ["skill_chacon", "skill_tuya"])
     assert not allowed
     assert "luz" not in msg.lower() or "acesso" in msg.lower()
 
@@ -106,10 +130,10 @@ def test_one_allowed_skill_does_not_vouch_for_another():
     pela segunda seria entregue à segunda. Qualquer skill fora da lista recusa,
     seja qual for a sua posição.
     """
-    allowed, _ = da.check(GUEST, "x", ["skill_weather", "skill_tuya"])
+    allowed, _, _reason = da.check(GUEST, "x", ["skill_weather", "skill_tuya"])
     assert not allowed
 
-    allowed, _ = da.check(GUEST, "x", ["skill_tuya", "skill_weather"])
+    allowed, _, _reason = da.check(GUEST, "x", ["skill_tuya", "skill_weather"])
     assert not allowed
 
 
@@ -120,7 +144,7 @@ def test_the_prefixed_name_is_the_same_skill():
     configurar a allowlist.
     """
     assert "weather" in da.allowed_guest_skills()
-    allowed, _ = da.check(GUEST, "que tempo faz", ["skill_weather"])
+    allowed, _, _reason = da.check(GUEST, "que tempo faz", ["skill_weather"])
     assert allowed
 
 
@@ -134,7 +158,7 @@ def test_unresolvable_request_is_refused_not_allowed():
     Uma falha de wiring passaria a ser o que abre a porta -- e a unica coisa que
     separa um convidado da casa e precisamente esta lista.
     """
-    allowed, _ = da.check(GUEST, "acende a luz", None)
+    allowed, _, _reason = da.check(GUEST, "acende a luz", None)
     assert not allowed
 
 
@@ -155,9 +179,9 @@ def test_everything_costs_the_budget():
     "respondeu" de "recusou e o LLM apanhou", e a diferenca e a quota inteira.
     """
     for i in range(3):
-        allowed, msg = da.check(GUEST, "que tempo faz", ["skill_weather"])
+        allowed, msg, _reason = _can_serve(GUEST, "que tempo faz", ["skill_weather"])
         assert allowed, f"pedido {i + 1} recusado cedo demais: {msg}"
-    allowed, msg = da.check(GUEST, "que tempo faz", ["skill_weather"])
+    allowed, msg, _reason = _can_serve(GUEST, "que tempo faz", ["skill_weather"])
     assert not allowed
     assert "3" in msg
 
@@ -176,7 +200,7 @@ def test_a_hyphen_is_not_a_free_pass():
         "conta-me *rapido*",
     ):
         da.reset_quotas()
-        passed = sum(da.check(GUEST, r, ["skill_calculator"])[0] for r in [request] * 8)
+        passed = sum(_can_serve(GUEST, r, ["skill_calculator"])[0] for r in [request] * 8)
         assert passed == 3, f"{request!r} passou {passed}/8 em vez de 3/8"
 
 
@@ -197,9 +221,9 @@ def test_quota_is_per_guest():
     other = "999888777666555444"
     config.DISCORD_STANDARD_USERS = [GUEST, other]
     for _ in range(3):
-        da.check(GUEST, "x", [])
-    assert not da.check(GUEST, "x", [])[0], "o contador do primeiro nao esgostou"
-    assert da.check(other, "x", [])[0], "o segundo convidado herdou a quota do primeiro"
+        _can_serve(GUEST, "x", [])   # authorise AND answer, three times
+    assert not _can_serve(GUEST, "x", [])[0], "o contador do primeiro nao esgostou"
+    assert _can_serve(other, "x", [])[0], "o segundo convidado herdou a quota do primeiro"
 
 
 # --- o que este ficheiro NAO fixa, e porque -------------------------------
@@ -490,17 +514,17 @@ def test_the_language_model_is_still_there_for_a_guest(monkeypatch):
 
     # No skill matches: conversation, and it costs the budget.
     da.reset_quotas()
-    allowed, _ = da.check(GUEST, "conta-me uma historia", [])
+    allowed, _, _reason = _can_serve(GUEST, "conta-me uma historia", [])
     assert allowed, "o convidado perdeu a conversa"
 
     # Four in a row, and the fifth is over the line.
     for _ in range(3):
-        da.check(GUEST, "conta-me outra", [])
-    allowed, msg = da.check(GUEST, "conta-me mais uma", [])
+        _can_serve(GUEST, "conta-me outra", [])
+    allowed, msg, _reason = _can_serve(GUEST, "conta-me mais uma", [])
     assert not allowed and "limite" in msg
 
     # And an innocent question that happens to touch a device skill is refused.
-    allowed, msg = da.check(GUEST, "como esta a luz da sala", ["skill_tuya"])
+    allowed, msg, _reason = da.check(GUEST, "como esta a luz da sala", ["skill_tuya"])
     assert not allowed, "uma conversa inocente passou por cima da restricao"
 
 
@@ -622,7 +646,7 @@ def test_clearing_the_page_revokes_an_id_that_is_also_in_the_env(monkeypatch):
         f"ficou {sorted(da._owner_guest_ids())}"
     )
     da.reset_quotas()
-    allowed, msg = da.check(111, "ola", [])
+    allowed, msg, _reason = da.check(111, "ola", [])
     assert allowed is False, f"o id revogado ainda passa: {msg}"
 
 
@@ -687,3 +711,106 @@ def test_the_allowlist_unticked_empty_is_still_not_the_default(monkeypatch):
         lambda k, d=None: ("" if k == "GUEST_SKILLS_ALLOWED" else d),
     )
     assert da.allowed_guest_skills() == []
+
+
+# ---------------------------------------------------------------------------
+# What the guest sees, and what gets charged. Found by the peer review.
+# ---------------------------------------------------------------------------
+
+
+def test_a_refusal_does_not_enumerate_the_household_hardware(monkeypatch):
+    """A guest is not told what is plugged into the walls.
+
+    Measured against production before the fix:
+
+        check(111, 'acende a luz da sala', 3 device skills)
+        -> (False, 'Não tens acesso a chacon, tuya, xiaomi.')
+
+    Read in a channel other people are in, it answers no question the guest asked
+    and it is a map of somebody's home: a tuya hub, xiaomi plugs, a chacon wall
+    switch. The names go to the log, where they are useful for whoever set the
+    allowlist; they do not go to the guest.
+    """
+    from src.api import discord_access as da
+
+    _owner_ok(monkeypatch)
+    da.reset_quotas()
+
+    prompt = "acende a luz da sala"
+    matching = ["skill_chacon", "skill_tuya", "skill_xiaomi"]
+    allowed, msg, reason = da.check(GUEST, prompt, matching)
+
+    assert allowed is False
+    assert reason == "not_allowed", reason
+    for vendor in ("chacon", "tuya", "xiaomi", "shelly", "ewelink", "tasmota"):
+        assert vendor not in msg.lower(), (
+            f"a recusa diz {msg!r} -- nomeia o hardware da casa"
+        )
+
+
+def test_a_delivered_request_is_charged(monkeypatch):
+    """The other half: the quota still works for what the guest actually got."""
+    from src.api import discord_access as da
+
+    _owner_ok(monkeypatch)
+    da.reset_quotas()
+
+    for _ in range(3):
+        allowed, _msg, _r = da.check(GUEST, "que tempo faz", ["skill_weather"])
+        assert allowed
+        da.confirm_spend(GUEST)
+
+    assert da.spent(GUEST) == 3
+    allowed, msg, reason = da.check(GUEST, "que tempo faz", ["skill_weather"])
+    assert not allowed and reason == "quota" and "3" in msg
+
+
+def test_unlimited_still_counts_the_day(monkeypatch):
+    """`limit == 0` means unlimited, and it used to skip the counter entirely.
+
+    So an owner who ran unlimited for a week and then set 3 got a fresh 3 that
+    day rather than 3 minus a week. Counting costs nothing and makes the number
+    mean what the page says it means.
+    """
+    from src import settings_store
+    from src.api import discord_access as da
+
+    # The store carries BOTH the allowlist and the limit here. `_owner_ok` stubs
+    # `_owner_set`, which is the id-list path; the policy keys go through
+    # `_read_owner_setting` and must stay on the store stub. Getting that
+    # backwards made the limit fall back to the `.env` value and this test denied
+    # the fourth request for the wrong reason.
+    monkeypatch.setattr(settings_store, "get_setting", _store({
+        "GUEST_SKILLS_ALLOWED": "weather,calculator",
+        "DISCORD_DAILY_LLM_LIMIT": "0",
+        "DISCORD_STANDARD_USERS": GUEST,
+    }))
+    _owner_ok(monkeypatch, keep_store=True)
+    da.reset_quotas()
+
+    for _ in range(4):
+        assert da.check(GUEST, "que tempo faz", ["skill_weather"])[0]
+        da.confirm_spend(GUEST)
+    assert da.spent(GUEST) == 4, "o dia ilimitado nao foi contado"
+
+def _owner_ok(monkeypatch, keep_store: bool = False):
+    """Put GUEST on the owner's list without depending on the real store.
+
+    `keep_store` leaves `settings_store.get_setting` alone, for a test that stubs
+    the POLICY keys there and only needs the id list resolved.
+    """
+    import config as config_mod
+
+    monkeypatch.setattr(config_mod, "DISCORD_STANDARD_USERS", [int(GUEST)],
+                        raising=False)
+    monkeypatch.setattr(config_mod, "DISCORD_ADMIN_USERS", [], raising=False)
+    if not keep_store:
+        monkeypatch.setattr("src.api.discord_access._owner_set",
+                            lambda key: (None, True))
+    return monkeypatch
+
+
+def _store(values):
+    """A `settings_store.get_setting` that answers from a dict."""
+
+    return lambda key, default=None: values.get(key, default)

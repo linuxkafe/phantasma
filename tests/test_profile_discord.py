@@ -210,12 +210,12 @@ def test_the_bot_honours_a_claimed_id(app_and_client, monkeypatch):
     from src.api import auth_store
 
     auth_store.set_discord_id("u@t.test", "300300300")
-    allowed, message = _check("300300300", monkeypatch)
+    allowed, message, _reason = _check("300300300", monkeypatch)
     assert allowed, f"a claimed id was refused by the bot: {message}"
 
 
 def test_the_bot_refuses_an_unclaimed_id(app_and_client, monkeypatch):
-    allowed, message = _check("400400400", monkeypatch)
+    allowed, message, _reason = _check("400400400", monkeypatch)
     assert not allowed
     assert message
 
@@ -230,7 +230,8 @@ def test_the_environment_lists_keep_precedence(app_and_client, monkeypatch):
     monkeypatch.setattr(discord_access.config, "DISCORD_ADMIN_USERS", [600600600],
                         raising=False)
     monkeypatch.setattr(discord_access.config, "DISCORD_STANDARD_USERS", [], raising=False)
-    allowed, _ = discord_access.check(600600600, "liga a luz", ["skill_weather"])
+    allowed, _msg, _reason = discord_access.check(
+        600600600, "liga a luz", ["skill_weather"])
     assert allowed, "an id in DISCORD_ADMIN_USERS lost its access"
 
     # And a plain standard id from the environment, with no profile behind it.
@@ -249,7 +250,8 @@ def test_the_environment_lists_keep_precedence(app_and_client, monkeypatch):
     # machines agree is a test that only runs on one of them.
     monkeypatch.setattr(discord_access, "_owner_set",
                         lambda key: (None, True))
-    allowed, _ = discord_access.check(700700700, "liga a luz", ["skill_weather"])
+    allowed, _msg, _reason = discord_access.check(
+        700700700, "liga a luz", ["skill_weather"])
     assert allowed, "an id in DISCORD_STANDARD_USERS lost its access"
 
 
@@ -269,6 +271,6 @@ def test_the_bot_refuses_rather_than_guesses_on_a_duplicate(app_and_client, monk
     conn.execute("UPDATE users SET discord_id = '800800800'")
     conn.commit()
     conn.close()
-    allowed, _ = _check("800800800", monkeypatch)
+    allowed, _msg, _reason = _check("800800800", monkeypatch)
     assert not allowed, "an id claimed by two accounts was allowed"
     assert _discord_id("w@t.test") == "800800800"

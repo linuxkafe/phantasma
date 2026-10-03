@@ -28,6 +28,7 @@ without importing `discord.py` and without a gateway.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -98,7 +99,6 @@ def test_the_handler_body_has_no_free_names():
     import inspect
 
     import skills.skill_discord as sd
-
     tree = ast.parse(inspect.getsource(sd.on_message))
 
     bound: set[str] = set()
@@ -156,7 +156,6 @@ def test_a_message_reaches_the_authorization_code_without_raising(monkeypatch):
     fix, this raised `NameError` and the caller swallowed it.
     """
     import skills.skill_discord as sd
-
     class FakeDM(sd.discord.DMChannel):
         """Just enough DMChannel for the handler and for `send`.
 
@@ -192,7 +191,7 @@ def test_a_message_reaches_the_authorization_code_without_raising(monkeypatch):
 
     async def _send(prompt):
         to_assistant.append(prompt)
-        return "sao as dez"
+        return "sao as dez", True
 
     monkeypatch.setattr(sd, "_send_to_phantasma", _send, raising=False)
 
@@ -222,11 +221,16 @@ def test_the_handler_does_not_raise_for_an_unknown_id(monkeypatch):
     import asyncio
 
     import skills.skill_discord as sd
+    spoken = []
 
     class FakeDM(sd.discord.DMChannel):
         def __init__(self):
             self.id = 1
             self._state = None
+
+        async def send(self, content=None, **kw):
+            spoken.append(content)
+            return None
 
     class FakeMessage:
         def __init__(self):
@@ -239,12 +243,20 @@ def test_the_handler_does_not_raise_for_an_unknown_id(monkeypatch):
 
     async def _send(prompt):  # must not be reached
         raise AssertionError("an unknown id must not reach the assistant")
+        return "", False
 
     monkeypatch.setattr(sd, "_send_to_phantasma", _send, raising=False)
 
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         sd.on_message(FakeMessage())
     )
+
+    # It SPOKE, and it did not reach the assistant. Both halves matter: the
+    # handler now answers every refusal with one line instead of matching prose,
+    # so "refusal" and "silence" are no longer the same outcome -- and a refusal
+    # that reaches the assistant would be the opposite failure.
+    assert spoken, "um id desconhecido ficou em silencio; o dono nao consegue distinguir"
+    assert len(spoken) == 1, f"uma unica linha, nao uma conversa: {spoken}"
 
 
 def test_the_resolver_the_handler_relies_on_is_not_empty():
@@ -315,7 +327,7 @@ def test_a_guest_device_request_is_refused_when_the_resolver_works(monkeypatch):
     )
 
     da.reset_quotas()
-    allowed, msg = da.check(GUEST, "acende a luz da sala", module_matched)
+    allowed, msg, _reason = da.check(GUEST, "acende a luz da sala", module_matched)
     assert allowed is False, (
         f"um convidado pediu um dispositivo e foi autorizado ({msg}). A "
         f"allowlist e a unica coisa entre o guest e a casa."
@@ -326,7 +338,8 @@ def test_a_guest_device_request_is_refused_when_the_resolver_works(monkeypatch):
     # an earlier call in this session did, and a 3-per-day quota is one request
     # away from looking like a permission bug.
     da.reset_quotas()
-    ok, why = da.check(GUEST, "que tempo faz", loader.resolve_matching_skills("que tempo faz"))
+    ok, why, _reason = da.check(
+        GUEST, "que tempo faz", loader.resolve_matching_skills("que tempo faz"))
     assert ok is True, "a skill allowlisted tem de passar; se falha, o teste passa por razao errada"
 
 
@@ -345,7 +358,6 @@ def _resolver_as_shipped(monkeypatch, with_load: bool = True):
     """
     import config
     import skills.skill_discord as sd
-
     monkeypatch.setattr(sd, "_fly_brain", None, raising=False)
     monkeypatch.setattr(sd, "get_shared_fly_brain", lambda: None, raising=False)
     monkeypatch.setattr(sd.threading, "Thread", _NoThread, raising=False)
@@ -399,3 +411,72 @@ def test_the_module_resolver_is_empty_without_load_all():
     """
     assert _module_resolver(with_load=True)("acende a luz da sala")
     assert _module_resolver(with_load=False)("acende a luz da sala") == []
+
+
+def test_a_failed_request_is_not_charged_to_the_guest(monkeypatch):
+    """The house being down must not spend the guest's day.
+
+    The count happened inside `check()`, at the moment access was granted and
+    before the request left. With the fallback host timing out, the guest's
+    visible sequence was three "Erro de comunicação interna" and then "🚫
+    Atingiste o teu limite diário de 3 pedidos" -- the assistant blaming the
+    guest for its own outage, with no way for the guest to tell the difference.
+    """
+    from src.api import discord_access as da
+    from tests.test_guest_skills import _owner_ok
+
+    _owner_ok(monkeypatch)
+    da.reset_quotas()
+
+    # Through the HANDLER, not `check()` alone. The first version of this test
+    # called `check()` three times and asserted `spent() == 0`, which passed
+    # both when the charging was removed and when it was never there to be
+    # removed -- falsifying it (putting the charge back in the handler) left it
+    # green, because the handler was not in the path.
+    import skills.skill_discord as sd
+    monkeypatch.setattr(sd, "_check_access",
+                        lambda uid, prompt: (True, "", None))
+    monkeypatch.setattr(sd, "discord_access", da, raising=False)
+
+    async def _undeliverable(prompt):
+        return "Erro de comunicação interna: timed out", False
+
+    monkeypatch.setattr(sd, "_send_to_phantasma", _undeliverable)
+    monkeypatch.setattr(sd, "_resolve_skill", lambda _t: [], raising=False)
+
+    class _NullTyping:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Chan(sd.discord.DMChannel):
+        def __init__(self):
+            self.id = 1
+            self._state = None
+
+        async def send(self, content=None, **kw):
+            return None
+
+        def typing(self):
+            return _NullTyping()
+
+    class _Msg:
+        def __init__(self):
+            self.channel = _Chan()
+            self.content = "conta-me uma historia"
+            self.mentions = []
+            self.author = type("A", (), {"id": GUEST, "name": "guest"})()
+
+    loop = asyncio.new_event_loop()
+    try:
+        for _ in range(3):
+            loop.run_until_complete(sd.on_message(_Msg()))
+    finally:
+        loop.close()
+
+    assert da.spent(GUEST) == 0, (
+        f"tres pedidos que a casa nao entregou cobraram {da.spent(GUEST)} ao "
+        f"convidado -- e o quarto seria recusado com 'atingiste o limite'"
+    )
