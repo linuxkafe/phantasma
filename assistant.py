@@ -743,6 +743,55 @@ class PhantasmaPipeline:
             )
         )
 
+    @classmethod
+    def _is_opinion(cls, text: str) -> bool:
+        """A question about taste, not about a fact.
+
+        Measured 2026-10-03, asked "o que achas do Edgar Allan Poe": the answer
+        was a third-person literary review -- "A sua obra e uma denuncia da
+        hipocrisia..." -- which is what you get when an 8B is asked a factual
+        question in a cold register instead of being asked what it thinks.
+
+        `_is_factual_lookup` already said False here, which was right, but False
+        did nothing on its own: `grounded` was True because the graph returned
+        "capitalismo tardio" for every question, so temperature stayed at 0.15
+        and the persona had no room to speak.
+
+        Matched on substring, not prefix: "e o que achas do X" and "concordas
+        com ele" are the same request as "o que achas".
+        """
+        t = (text or "").strip().lower()
+        if not t:
+            return False
+        t = "".join(
+            c
+            for c in unicodedata.normalize("NFD", t)
+            if unicodedata.category(c) != "Mn"
+        )
+        return any(
+            marker in t
+            for marker in (
+                "o que achas",
+                "o que pensas",
+                "qual achas",
+                "que achas",
+                "como ves",
+                "como vês",
+                "o que te parece",
+                "o que lhe parece",
+                "gostas de",
+                "gostas do",
+                "gostas da",
+                "gosto de",
+                "gosto do",
+                "concordas",
+                "a tua opiniao",
+                "na tua opiniao",
+                "a tua visao",
+                "o que sentes",
+            )
+        )
+
     @staticmethod
     def _render_memory(raw: str) -> str:
         """Turn a stored memory into something a reader can actually use.
@@ -1059,6 +1108,11 @@ class PhantasmaPipeline:
                 "  e um apartamento; uma busca por \"bom dia\" traz uma escola de\n"
                 "  condução. Descarta o que não responde ao que te disseram, e\n"
                 "  responde ao que te disseram, na mesma, na tua voz.\n"
+                "- Se o bloco não for sobre o assunto que te perguntaram, ignora-o\n"
+                "  por completo. Pediram-te sobre Edgar Allan Poe e a busca\n"
+                "  devolveu três páginas sobre o ChatGPT. Isso não é sobre Poe,\n"
+                "  logo não entra. Responde ao que te perguntaram como se o bloco\n"
+                "  não existisse.\n"
                 "Se o bloco não responder à pergunta, diz numa frase que não sabes\n"
                 "e para. Não completes com o que imaginas. Inventar páginas,\n"
                 "fontes, pessoas, datas ou dimensões que não estejam no bloco é\n"
@@ -1127,12 +1181,20 @@ class PhantasmaPipeline:
         # Ground the answer first, loosen it only when there is nothing to
         # ground it on. A factual lookup with context in hand is reported, not
         # performed.
+        #
+        # An opinion is never cold, whatever the context says. Measured
+        # 2026-10-03: "o que achas do Edgar Allan Poe" ran at temperature 0.15
+        # because `grounded` was true -- the graph returns "capitalismo tardio"
+        # for every question, so it almost always is -- and came back as a
+        # third-person literary review. Freezing a question about taste is what
+        # produces a review nobody asked for.
         grounded = bool((rag or "").strip() or (graph_ctx or "").strip())
         factual = self._is_factual_lookup(text)
-        temperature = 0.15 if (factual or grounded) else 0.6
+        opinion = self._is_opinion(text)
+        temperature = 0.15 if ((factual or grounded) and not opinion) else 0.6
         logger.info(
             f"LLM temperature {temperature} (factual={factual}, "
-            f"grounded={grounded}, rag={len(rag or '')}, "
+            f"opinion={opinion}, grounded={grounded}, rag={len(rag or '')}, "
             f"graph={len(graph_ctx or '')}, web={len(web or '')})"
         )
 
