@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# `python3` is NOT resolved to the venv. This runs from cron, where PATH is
+# whatever cron was given -- `/usr/bin/env python3` lands on `/usr/bin/python3`,
+# which has no `ollama` installed, and the `import` fails inside the check's
+# `try`, where it reported "inalcançavel: AttributeError" for every host. The
+# first version looked like a network problem on all three dependencies.
+#
+# So: use the venv interpreter explicitly when there is one.
+
 """Pull a newer digest for every installed model, on every reachable Ollama host.
 
 The owner asked for this unconditionally, and it runs unconditionally. What this
