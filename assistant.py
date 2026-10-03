@@ -1168,14 +1168,14 @@ class PhantasmaPipeline:
 
         if not primary_host:
             primary_host = getattr(config, "OLLAMA_HOST_PRIMARY", None)
-            primary_model = primary_model or getattr(config, "OLLAMA_MODEL_PRIMARY", "llama3.1:8b")
+            primary_model = primary_model or getattr(config, "OLLAMA_MODEL_PRIMARY", "gemma3:4b")
         if not fallback_host:
             fallback_host = getattr(config, "OLLAMA_HOST_FALLBACK", "http://localhost:11434")
             fallback_model = fallback_model or getattr(config, "OLLAMA_MODEL_FALLBACK", "llama3")
 
         inference_targets = []
         if primary_host:
-            inference_targets.append((primary_host, primary_model or "llama3.1:8b"))
+            inference_targets.append((primary_host, primary_model or "gemma3:4b"))
         if fallback_host and fallback_host != primary_host:
             inference_targets.append((fallback_host, fallback_model or "llama3"))
 

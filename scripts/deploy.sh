@@ -403,6 +403,73 @@ PY
     if [ "$DRY_RUN" -eq 1 ]; then exit 3; else exit 1; fi
   fi
 
+  # The model named in .env must exist on the host .env points at.
+  #
+  # Without this, a typo or an uninstalled model is invisible: Ollama answers
+  # 404 per request, the service starts, and `/api/health` reports every
+  # component healthy because it asks whether the HOST is up and not whether
+  # the model it names is there. The assistant then simply stops answering,
+  # and the log line is a 404 with no explanation. Same shape as the audio
+  # check above, and the same rule: verify the value that came from .env, at
+  # the point of deploying.
+  if (cd "$PROD" && ./venv/bin/python3 -) <<'PY' 2>&1
+import os
+import sys
+# config.load_dotenv() is called with no path, so it reads the .env of whatever
+# the CWD happens to be. The deploy runs from the dev repo, so `import config`
+# picked up prod's dataclass DEFAULTS and dev's .env -- and reported
+# llama3.1:8b and llava:7b while prod's .env was the one under test. A check
+# that reads a different file than the thing it verifies is worse than no check,
+# because it is confidently wrong.
+os.environ["DOTENV_PATH"] = os.path.join(os.getcwd(), ".env")
+try:
+    import config as c
+    import ollama
+except Exception as exc:
+    print(f"  could not read the model config: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+targets = [
+    ("primary", getattr(c, "OLLAMA_HOST_PRIMARY", None), getattr(c, "OLLAMA_MODEL_PRIMARY", None)),
+    ("fallback", getattr(c, "OLLAMA_HOST_FALLBACK", None), getattr(c, "OLLAMA_MODEL_FALLBACK", None)),
+    ("vision", getattr(c, "OLLAMA_HOST_PRIMARY", None), getattr(c, "OLLAMA_VISION_MODEL", None)),
+]
+bad = []
+for label, host, model in targets:
+    if not host or not model:
+        bad.append(f"{label}: host/model not set in .env")
+        continue
+    try:
+        client = ollama.Client(host=host, timeout=20)
+        names = {
+            (m.get("model") or m.get("name") or "")
+            for m in client.list().get("models", [])
+        }
+        # Ollama accepts "gemma3:4b" for a model stored as "gemma3:4b"; some
+        # builds list the untagged form too, so compare on the name before the
+        # first colon as well.
+        wanted = {model}
+        wanted.add(model.split(":")[0])
+        if not (names & wanted):
+            bad.append(f"{label}: {model!r} not on {host} (has: {sorted(names)})")
+        else:
+            print(f"  ok    {label} model {model}")
+    except Exception as exc:
+        bad.append(f"{label}: cannot reach {host}: {exc}")
+
+if bad:
+    print("  the configured model is not available:", file=sys.stderr)
+    for b in bad:
+        print(f"    {b}", file=sys.stderr)
+    sys.exit(1)
+PY
+  then
+    :
+  else
+    echo "  FAILED: model .env check (see above)" >&2
+    if [ "$DRY_RUN" -eq 1 ]; then exit 3; else exit 1; fi
+  fi
+
   if [ "$FORCE_HOST" -eq 1 ]; then
   for f in config.py audio_utils.py; do
     if cmp -s "$DEV/$f" "$PROD/$f"; then echo "  ok    $f"; continue; fi

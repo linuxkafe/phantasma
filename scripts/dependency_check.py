@@ -97,7 +97,7 @@ def _pairs(cfg):
             (
                 "primary",
                 getattr(cfg, "OLLAMA_HOST_PRIMARY", None),
-                getattr(cfg, "OLLAMA_MODEL_PRIMARY", "llama3.1:8b"),
+                getattr(cfg, "OLLAMA_MODEL_PRIMARY", "gemma3:4b"),
             )
         )
         out.append(
@@ -170,8 +170,6 @@ def check_searxng(url: str) -> dict:
     started = time.monotonic()
     try:
         sys.path.insert(0, ROOT)
-        from tools import search_with_searxng  # noqa: PLC0415
-
         # `search_with_searxng` prints progress to stdout ("A pesquisar na web:
         # ..."), which lands in the middle of the JSON document under `--json` and
         # makes it unparseable. `json.load` on the monitor's side raised
@@ -180,11 +178,15 @@ def check_searxng(url: str) -> dict:
         import contextlib
         import io
 
+        from tools import search_with_searxng  # noqa: PLC0415
+
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             out = search_with_searxng("teste de dependencias")
         res["ok"] = bool(out and str(out).strip())
-        res["detail"] = "respondeu com resultados" if res["ok"] else "vazio (pesquisa sem resultados)"
+        res["detail"] = (
+            "respondeu com resultados" if res["ok"] else "vazio (pesquisa sem resultados)"
+        )
     except Exception as exc:  # noqa: BLE001
         res["detail"] = f"{type(exc).__name__}: {str(exc)[:60]}"
     res["seconds"] = round(time.monotonic() - started, 2)

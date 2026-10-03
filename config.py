@@ -131,8 +131,8 @@ class LLMConfig:
 
     host: str = "http://10.0.0.128:11434"
     host_fallback: str = "http://localhost:11434"
-    model: str = "llama3.1:8b"
-    model_fallback: str = "qwen3:8b"
+    model: str = "gemma3:4b"
+    model_fallback: str = "gemma3:4b"
     timeout: int = 600
     # Connect timeout, separate from the read timeout above.
     #
@@ -369,7 +369,7 @@ class Config:
     tapo_user: str = ""
     tapo_pass: str = ""
     tapo_cameras: dict = field(default_factory=dict)
-    ollama_vision_model: str = "llava:7b"
+    ollama_vision_model: str = "gemma3:4b"
     iqair_key: str = ""
     home_coords: tuple = field(default_factory=lambda: (41.1737008, -8.5909798))
     discord_bot_token: str = ""
