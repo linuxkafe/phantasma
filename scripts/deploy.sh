@@ -469,7 +469,25 @@ else
   # still had the old code loaded. Verified: waitress/serve.py shipped and the
   # service kept answering with Server: Werkzeug.
   reason=""
-  newest=$(find "$PROD/src" "$PROD/skills" "$PROD/prompts" -type f -printf '%T@ %p\n' 2>/dev/null \
+  # The freshness scan MUST cover every path the service executes, and that set
+  # is TOP_LEVEL_SYNC plus the synced directories -- not a hand-copied subset of
+  # them.
+  #
+  # Measured 2026-10-03: a commit that changed ONLY assistant.py and tests/
+  # deployed, the prod suite failed on an unrelated Playwright flake, and the
+  # re-run refused to restart with "already in sync and service is newer than
+  # the code". The scan looked at src/ (10:40), skills/ and prompts/ only, and
+  # assistant.py -- overwritten at 11:34, and the service entry point -- was not
+  # in it. So prod sat on new files with the old module in memory, health 200,
+  # deploy exit 0. This is the third variant of this bug in this script: rsync
+  # aborting after transfer, then ActiveEnterTimestampMonotonic's microseconds,
+  # then a reference set that did not include the file that had changed.
+  #
+  # tests/ and scripts/ stay out on purpose: they are synced but not imported by
+  # the running service, so a change to them alone does not need a restart.
+  scan_paths=("$PROD/src" "$PROD/skills" "$PROD/prompts")
+  for f in "${TOP_LEVEL_SYNC[@]}"; do scan_paths+=("$PROD/$f"); done
+  newest=$(find "${scan_paths[@]}" -type f -printf '%T@ %p\n' 2>/dev/null \
            | sort -rn | head -1 | cut -d' ' -f2-)
   newest_mtime=0
   [ -n "$newest" ] && newest_mtime=$(stat -c %Y "$newest" 2>/dev/null || echo 0)
