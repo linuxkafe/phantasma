@@ -103,15 +103,23 @@ def test_the_deploy_script_refuses_a_model_that_is_not_installed():
     deploy = open(
         os.path.join(ROOT, "scripts", "deploy.sh"), encoding="utf-8"
     ).read()
-    assert "OLLAMA_MODEL_PRIMARY" in deploy and "client.list()" in deploy, (
-        "deploy.sh não verifica se o modelo que o .env pede existe no host. É a "
-        "forma de esta troca ser errada só se descobrir em conversa: o Ollama "
-        "responde 404 por pedido, o serviço arranca, e o /api/health continua a "
-        "dizer healthy porque pergunta se o HOST está de pé e não se o modelo "
-        "que nomeou existe."
+    assert "/api/tags" in deploy, (
+        "deploy.sh não pergunta ao host que modelos tem. É a forma de esta troca "
+        "ser errada só se descobrir em conversa: o Ollama responde 404 por "
+        "pedido, o serviço arranca, e o /api/health continua a dizer healthy "
+        "porque pergunta se o HOST está de pé e não se o modelo que nomeou "
+        "existe."
     )
-    assert "OLLAMA_VISION_MODEL" in deploy, (
-        "a verificação não cobre o modelo de visão, que é um terceiro nome e o "
-        "único cuja ausência não se nota logo: o assistente continua a ouvir."
+    for key in ("OLLAMA_MODEL_PRIMARY", "OLLAMA_MODEL_FALLBACK", "OLLAMA_VISION_MODEL"):
+        assert key in deploy, (
+            f"{key} não é verificado no deploy. O modelo de visão é o pior caso: "
+            f"a sua ausência não se nota logo, porque o assistente continua a "
+            f"ouvir e a responder."
+        )
+    assert 'cd "$PROD"' in deploy, (
+        "a verificação tem de correr a partir de $PROD. config.load_dotenv() é "
+        "chamado sem caminho e lê o .env do CWD, que durante o deploy é o repo "
+        "de dev -- então verificaria o ficheiro errado e reportaria os defaults "
+        "de prod com o .env de dev."
     )
 

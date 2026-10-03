@@ -226,6 +226,10 @@ PERSONA_MARKERS = [
 
 FIRST_PERSON = ["eu ", "acho", "gosto", "para mim", "meu", "minha"]
 
+# Models whose Ollama build emits a reasoning trace outside `message.content`.
+# Matched on the tag substring, so a future `qwen3:14b` is covered too.
+THINKING_MODELS = ("qwen3", "gpt-oss", "deepseek-r1", "magistral", "granite3.3")
+
 # "sua"/"seu" need a discriminator, not a substring.
 #
 # "a sua obra" is correct pt-PT. "Sua obra" -- the same word, without the
@@ -447,16 +451,39 @@ def run_model(host: str, model: str, prompts: dict[str, list[dict[str, str]]],
     import ollama
 
     client = ollama.Client(host=host, timeout=timeout)
+    thinking_fallback: list[str] = []
     answers = []
     for item in PROMPTS:
         messages = prompts.get(item["id"]) or []
         t0 = time.time()
         try:
-            resp = client.chat(
-                model=model,
-                messages=messages,
-                options={"temperature": 0.6, "num_predict": 400},
-            )
+            # `think=False` is not cosmetic. qwen3 and the other reasoning
+            # models emit a reasoning trace that lands outside
+            # `message.content` and is billed against `num_predict` -- so with
+            # 400 to spend, the visible answer came back EMPTY for all six
+            # prompts and qwen3:4b scored 28.0 for saying nothing at all.
+            #
+            # That was the instrument lying about the candidate, and the second
+            # time this harness did it (the first was ranking a model that
+            # refused everything as the winner). A candidate is not eliminated
+            # on a broken measurement.
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "options": {"temperature": 0.6, "num_predict": 400},
+            }
+            if any(tag in model for tag in THINKING_MODELS):
+                kwargs["think"] = False
+            try:
+                resp = client.chat(**kwargs)
+            except TypeError:
+                # An SDK without the `think` kwarg. Give the trace room instead,
+                # so the visible answer is not squeezed out by it -- but say so,
+                # because this fallback can understate the model.
+                kwargs.pop("think", None)
+                kwargs["options"]["num_predict"] = 1600
+                thinking_fallback.append(model)
+                resp = client.chat(**kwargs)
             text = resp["message"]["content"]
             toks = resp.get("eval_count", 0)
             dur = (resp.get("eval_duration", 0) or 1) / 1e9
@@ -481,6 +508,10 @@ def run_model(host: str, model: str, prompts: dict[str, list[dict[str, str]]],
     out = verdict(answers)
     out["model"] = model
     out["variant"] = label
+    # Surfaced rather than swallowed: this fallback gives the reasoning trace
+    # room instead of turning it off, so the visible answer may be shorter than
+    # the model wanted. A reader comparing two runs needs to know.
+    out["thinking_fallback"] = bool(thinking_fallback)
     out["host"] = host
     out["answers"] = answers
     out["n_answers"] = out.pop("n_answers")

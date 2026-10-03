@@ -405,68 +405,91 @@ PY
 
   # The model named in .env must exist on the host .env points at.
   #
-  # Without this, a typo or an uninstalled model is invisible: Ollama answers
+  # Without this, a typo or an uninstalled model is invisible. Ollama answers
   # 404 per request, the service starts, and `/api/health` reports every
   # component healthy because it asks whether the HOST is up and not whether
-  # the model it names is there. The assistant then simply stops answering,
-  # and the log line is a 404 with no explanation. Same shape as the audio
-  # check above, and the same rule: verify the value that came from .env, at
-  # the point of deploying.
-  if (cd "$PROD" && ./venv/bin/python3 -) <<'PY' 2>&1
-import os
+  # the model it names is there. The assistant then simply stops answering and
+  # the log line is a 404 with no explanation. Same shape as the audio check
+  # above, and the same rule: verify the value that came from .env, at the
+  # point of deploying.
+  #
+  # Read from $PROD and parse .env directly. `config.load_dotenv()` is called
+  # with no path and so reads the .env of whatever the CWD is, and the deploy
+  # runs from $DEV -- an earlier version of this check imported prod's
+  # dataclass defaults with dev's .env and reported llama3.1:8b while prod's
+  # .env was the thing under test. A check that reads a different file than it
+  # verifies is worse than none, because it is confidently wrong.
+  if (cd "$PROD" && ./venv/bin/python3 -) <<'PYMODEL' 2>&1
+import json
 import sys
-# config.load_dotenv() is called with no path, so it reads the .env of whatever
-# the CWD happens to be. The deploy runs from the dev repo, so `import config`
-# picked up prod's dataclass DEFAULTS and dev's .env -- and reported
-# llama3.1:8b and llava:7b while prod's .env was the one under test. A check
-# that reads a different file than the thing it verifies is worse than no check,
-# because it is confidently wrong.
-os.environ["DOTENV_PATH"] = os.path.join(os.getcwd(), ".env")
-try:
-    import config as c
-    import ollama
-except Exception as exc:
-    print(f"  could not read the model config: {exc}", file=sys.stderr)
-    sys.exit(1)
+import urllib.error
+import urllib.request
 
-targets = [
-    ("primary", getattr(c, "OLLAMA_HOST_PRIMARY", None), getattr(c, "OLLAMA_MODEL_PRIMARY", None)),
-    ("fallback", getattr(c, "OLLAMA_HOST_FALLBACK", None), getattr(c, "OLLAMA_MODEL_FALLBACK", None)),
-    ("vision", getattr(c, "OLLAMA_HOST_PRIMARY", None), getattr(c, "OLLAMA_VISION_MODEL", None)),
-]
-bad = []
-for label, host, model in targets:
+# role -> (model key, host key). Vision runs on the primary: that is where the
+# two models now live, and a second host for it would be another thing to keep
+# installed for no reason.
+ROLES = {
+    "primary": ("OLLAMA_MODEL_PRIMARY", "OLLAMA_HOST_PRIMARY"),
+    "fallback": ("OLLAMA_MODEL_FALLBACK", "OLLAMA_HOST_FALLBACK"),
+    "vision": ("OLLAMA_VISION_MODEL", "OLLAMA_HOST_PRIMARY"),
+}
+
+
+def read_env(path: str = ".env") -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                values[key.strip()] = val.strip()
+    except OSError as exc:
+        print(f"  could not read {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return values
+
+
+def installed(host: str) -> list[str]:
+    # Plain HTTP rather than the ollama SDK on purpose: the job of this check
+    # is to catch the case where the runtime cannot serve the model, so it must
+    # not depend on the same client library being healthy.
+    url = host.rstrip("/") + "/api/tags"
+    with urllib.request.urlopen(url, timeout=20) as resp:
+        payload = json.load(resp)
+    return [m.get("model") or m.get("name") or "" for m in payload.get("models", [])]
+
+
+cfg = read_env()
+bad: list[str] = []
+for role, (model_key, host_key) in ROLES.items():
+    host, model = cfg.get(host_key), cfg.get(model_key)
     if not host or not model:
-        bad.append(f"{label}: host/model not set in .env")
+        bad.append(f"{role}: {model_key} or {host_key} is not set in .env")
         continue
     try:
-        client = ollama.Client(host=host, timeout=20)
-        names = {
-            (m.get("model") or m.get("name") or "")
-            for m in client.list().get("models", [])
-        }
-        # Ollama accepts "gemma3:4b" for a model stored as "gemma3:4b"; some
-        # builds list the untagged form too, so compare on the name before the
-        # first colon as well.
-        wanted = {model}
-        wanted.add(model.split(":")[0])
-        if not (names & wanted):
-            bad.append(f"{label}: {model!r} not on {host} (has: {sorted(names)})")
-        else:
-            print(f"  ok    {label} model {model}")
-    except Exception as exc:
-        bad.append(f"{label}: cannot reach {host}: {exc}")
+        names = installed(host)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        bad.append(f"{role}: cannot read {host}/api/tags: {exc}")
+        continue
+    # Ollama lists the tag as pulled, but some builds also list the untagged
+    # form, so accept either spelling.
+    if not {model, model.split(":")[0]} & set(names):
+        bad.append(f"{role}: {model!r} is not installed on {host} (has: {sorted(names)})")
+    else:
+        print(f"  ok    {role} model {model} on {host}")
 
 if bad:
     print("  the configured model is not available:", file=sys.stderr)
     for b in bad:
         print(f"    {b}", file=sys.stderr)
-    sys.exit(1)
-PY
+    raise SystemExit(1)
+PYMODEL
   then
     :
   else
-    echo "  FAILED: model .env check (see above)" >&2
+    echo "  FAILED: the model in .env is not installed (see above)" >&2
     if [ "$DRY_RUN" -eq 1 ]; then exit 3; else exit 1; fi
   fi
 

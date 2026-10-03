@@ -95,21 +95,36 @@ class TestOllamaLLM:
         mock_client.chat.return_value = {"message": {"content": "Hello, how can I help?"}}
         mock_client_class.return_value = mock_client
 
-        llm = OllamaLLM()
-        result = llm.chat("Hello")
+        with patch("src.pipeline.llm.config") as mock_config:
+            mock_config.llm.host = "http://localhost:11434"
+            mock_config.llm.host_fallback = "http://backup:11434"
+            mock_config.llm.model = "escolhido-por-medicao:4b"
+            mock_config.llm.model_fallback = "escolhido-por-medicao:4b"
+            mock_config.llm.system_prompt = "Test prompt"
 
-        assert result.success is True
-        assert result.data == "Hello, how can I help?"
-        assert result.duration_ms > 0
+            llm = OllamaLLM()
+            result = llm.chat("Hello")
 
-        # Verify call arguments
-        call_args = mock_client.chat.call_args
-        assert call_args.kwargs["model"] == "llama3.1:8b"
-        assert call_args.kwargs["options"]["num_ctx"] == 8192
-        messages = call_args.kwargs["messages"]
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
+            assert result.success is True
+            assert result.data == "Hello, how can I help?"
+            assert result.duration_ms > 0
+
+            # Verify call arguments
+            call_args = mock_client.chat.call_args
+            # The configured model, not a literal. It asserted "llama3.1:8b"
+            # until 2026-10-03, and the swap to gemma3:4b then failed in prod:
+            # the test pinned the model NAME, so any change of model broke a
+            # plumbing test while the plumbing stayed identical. What is worth
+            # asserting is that the configured value is the one sent -- the
+            # property that survives a model swap. The stub value above is
+            # deliberately not a real model name, so a hardcoded default in the
+            # code cannot pass this by accident.
+            assert call_args.kwargs["model"] == "escolhido-por-medicao:4b"
+            assert call_args.kwargs["options"]["num_ctx"] == 8192
+            messages = call_args.kwargs["messages"]
+            assert len(messages) == 2
+            assert messages[0]["role"] == "system"
+            assert messages[1]["role"] == "user"
         assert messages[1]["content"] == "Hello"
 
     @patch("src.pipeline.llm.ollama.Client")
