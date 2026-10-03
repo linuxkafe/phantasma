@@ -680,3 +680,64 @@ Nota relacionada: `routes.py:344` documenta que com `PHANTASMA_COMMAND_TOKEN`
 por definir o gate devolvia `True` — "EITHER credential is enough, and NEITHER
 is refused". Se essa frase ainda for verdade, o problema e maior e o teste
 primeiro tem de ser esse.
+
+---
+
+## 2026-10-03 — gemma3:4b substitui llama3.1:8b, nos dois hosts
+
+**Motivo.** O `llama3.1:8b` não escreve português europeu. Medido em produção,
+três tentativas, nenhuma resultado:
+
+| experiência | resultado |
+|---|---|
+| pergunta nua, só a persona | "Sua obra é um reflexo..." |
+| com a pesquisa em checo/castelhano | "Seus contos, como 'O Corvo'..." |
+| com tabela de substituições explícita | "Sua obra", "Seus poemas" (pior) |
+
+A tabela de substituições piorou. Não é bug de prompt: é o modelo.
+
+**O bake-off.** Seis perguntas pelo prompt real de produção
+(`scripts/eval_models.py`), com e sem o ruído da pesquisa:
+
+| modelo | score (web) | falhou | pt-BR | scaffolding | palavras |
+|---|---|---|---|---|---|
+| `gemma3:4b` | **100.0** | 0/6 | 1 | 0 | 36.5 |
+| `qwen2.5:7b` | 36.0 | 3/6 | 1 | 0 | 56.7 |
+| `llama3.1:8b` | 0.0 | 2/6 | 5 | 1 | 53.0 |
+| `aya-expanse:8b` | 0.0 | 4/6 | 6 | 4 | 111.0 |
+
+`aya-expanse:8b` foi o pior e era a hipótese antes de medir — multilingue com forte
+cobertura europeia, escolhido por convicção. Um 4B ganhar a um 8B também não era
+esperado.
+
+**Visão verificada antes de apagar o `llava:7b`:** vermelho → "Vermelho", verde →
+"Verde.". Nos dois hosts. Um modelo de visão que não funciona deixa o assistente a
+ouvir e cego, e a remoção é que causaria isso.
+
+**Só `gemma3:4b` nos dois hosts**, por decisão do dono. Os restantes foram
+removidos depois de o serviço estar em cima e o gate novo passar.
+
+**Onde o nome do modelo vivia — e porque `deploy.sh` ganhou uma verificação:**
+
+| local | papel |
+|---|---|
+| `.env` | `OLLAMA_MODEL_PRIMARY`, `_FALLBACK`, `OLLAMA_VISION_MODEL` |
+| `config.py` `LLMConfig` | `model`, `model_fallback` |
+| `config.py` `Config` | `ollama_vision_model` |
+| `assistant.py` | fallbacks literais |
+
+O `.env` ganha em runtime. Os outros existem para o caso de o `.env` faltar ou o
+nome estar errado — e nesse caso **não há erro**: o Ollama responde 404 por
+pedido, o serviço arranca, e o `/api/health` diz healthy porque pergunta se o
+host está de pé e não se o modelo que nomeou existe. É a mesma classe do
+`AUDIO_AUTO_DETECT` morto, pelo mesmo motivo: um valor de host num sítio que
+falha em aberto. `deploy.sh` passou a ler `/api/tags` nos três papéis.
+
+**O `--force-host` foi usado de propósito.** `config.py` deixou de estar
+congelado nesta tarefa: os defaults passaram a `gemma3:4b` porque o dono decided
+que é o modelo medido, e um default que aponta para um modelo apagado é o modo de
+falha acima. Registado aqui porque o gate exige.
+
+**Verificado depois da remoção:** visão nos dois hosts, os dois hosts a responder,
+`dependency_check.py` verde, `/api/health` 200, e as cinco perguntas de conversa
+sem português brasileiro, sem scaffolding e sem citação.
