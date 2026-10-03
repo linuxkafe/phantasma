@@ -981,8 +981,8 @@ class PhantasmaPipeline:
         parts = []
         if local:
             parts.append(
-                "### CONHECIMENTO LOCAL DO PHANTASMA (fonte primaria):\n"
-                "Isto e o que o Phantasma guardou. Usa estes factos.\n"
+                "### CONHECIMENTO LOCAL DO PHANTASMA (fonte primária):\n"
+                "Isto é o que o Phantasma guardou. Usa estes factos.\n"
                 f"{local}\n"
             )
         if (web or "").strip():
@@ -996,32 +996,35 @@ class PhantasmaPipeline:
             # pile of text and a question and no instruction about either.
             parts.append(
                 "### COMO RESPONDER COM A PESQUISA\n"
-                "A pesquisa acima e a fonte desta resposta. Baseia-te nela e\n"
-                "diz de onde veio. Se a pesquisa nao responder a pergunta, diz\n"
-                "isso numa frase -- 'a pesquisa nao fala disso' -- e NAO completes\n"
-                "com o que sabes de memoria nem com o que imaginas.\n"
-                "NAO inventes paginas, fontes, pessoas, datas ou dimensoes que\n"
-                "nao aparecam no bloco acima.\n"
+                "O bloco acima é a fonte desta resposta: responde a partir dele e\n"
+                "diz de onde veio.\n"
+                "Se o bloco não responder à pergunta, DIZ-LO numa frase e para.\n"
+                "Não completes com o que sabes de memória, e não completes com o que\n"
+                "imaginas. Inventar páginas, fontes, pessoas, datas ou dimensões que\n"
+                "não estejam no bloco acima é pior do que dizer que não sabes.\n"
+                "Não nomeies o mecanismo: não digas \"a pesquisa\" nem \"as fontes\"\n"
+                "nem \"os resultados\". Responde como quem sabe, ou diz que não sabe.\n"
             )
         if web_empty and local:
             parts.append(
                 "### COMO RESPONDER\n"
-                "Nao ha pesquisa web disponivel, mas o conhecimento local acima e\n"
-                "a fonte primaria e chega para responder. Responde a partir dele\n"
-                "com confianca. So dizes que nao sabes quando o conhecimento\n"
-                "local tambem nao cobrir o assunto.\n"
+                "Não há pesquisa web disponível, mas o conhecimento local acima é\n"
+                "a fonte primária e chega para responder. Responde a partir dele\n"
+                "com confiança. Só dizes que não sabes quando o conhecimento\n"
+                "local também não cobre o assunto.\n"
             )
         elif web_empty:
             parts.append(
                 "### PESQUISA WEB INDISPONIVEL\n"
-                "Nao ha pesquisa web nem conhecimento guardado para esta pergunta.\n"
-                "Responde a partir do que sabes e tem cuidado para nao inventar\n"
-                "fontes nem factos.\n"
+                "Não há pesquisa web nem conhecimento guardado para esta pergunta.\n"
+                "Responde a partir do que sabes, com cuidado para não inventar\n"
+                "fontes nem factos. Não nomes o mecanismo.\n"
             )
         parts.append(
-            "### INSTRUCAO DE RESPOSTA:\n"
-            "Responde de forma fluida e natural em portugues europeu. "
-            "NAO uses cabecalhos ou marcacoes.\n"
+            "### INSTRUÇÃO DE RESPOSTA:\n"
+            "Português europeu, nunca português do Brasil. Escreve por extenso: não\n"
+            "abrevies palavras, e confirma que a tua ortografia saiu correcta mesmo\n"
+            "quando a palavra é rara. Não uses cabeçalhos, listas ou marcações.\n"
         )
         full_prompt = "\n".join(parts) + f"\nUtilizador: {text}"
 
