@@ -1,3 +1,20 @@
+# NAO E O FICHEIRO QUE CORRE EM PRODUCAO.
+#
+# A configuracao canonica e o `docker-compose.yml` deste directorio, com o
+# projeto docker "phantasma" (ver `docker inspect ollama --format
+# '{{index .Config.Labels "com.docker.compose.project.config_files"}}'`).
+# Esse ficheiro tem container_name `ollama` e `searxng`, com os volumes
+# `./ollama-data` e `./searxng-settings.yml`.
+#
+# Este ficheiro aqui e uma variante para instalar so um componente, com nomes
+# e volumes diferentes (`phantasma-ollama`, `./data/ollama`). Fica por uma
+# razao legitima: quem instala pode querer um container so, isolado, sem a
+# aplicacao. Nao se apaga por isso.
+#
+# O que nao pode acontecer e alguem pegar no ficheiro errado e recriar o
+# container de producao com os volumes deste. Da a advertencia e deixa a
+# decisao a quem instala.
+#
 services:
   searxng:
     image: searxng/searxng:latest
