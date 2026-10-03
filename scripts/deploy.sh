@@ -19,6 +19,13 @@
 #   .env          prod credentials, prod DB paths, and every host value that
 #                 used to be hardcoded in config.py (block_size, auto_detect,
 #                 device_in). This is the ONLY place prod-specific values live.
+#   scripts/      deploy.sh, dependency_check.py, update_containers.sh.
+#                 Synced so the operator-side tooling lives next to the thing it
+#                 operates on and is versioned with it: a script copied to
+#                 /opt/phantasma by hand drifts, and the drift is invisible
+#                 until the day it matters. deploy.sh is already read from dev;
+#                 this makes the OTHER scripts in that directory reachable on the
+#                 box too.
 #   data/         brain.db, memory.db, config.db -- live state
 #   venv/ cache/ .coverage coverage.xml *.pid  build artefacts
 #
@@ -52,7 +59,7 @@ PROD="/opt/phantasma"
 # What is code. tests/ is included on purpose: prod can only verify a deploy
 # if it can run the same suite dev runs, and prod was missing 16 of the 27
 # test modules, including tests/conftest.py.
-SYNC_DIRS=(src tests skills prompts public)
+SYNC_DIRS=(src tests skills prompts public scripts)
 
 # Top-level files that ARE part of the product and must therefore be deployed.
 # assistant.py is the service entry point: not syncing it meant a change reached
