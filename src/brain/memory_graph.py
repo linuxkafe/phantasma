@@ -675,8 +675,49 @@ def retrieve_neighborhood(prompt: str, max_results: int = 5) -> list[dict]:
     if not nodes:
         # Fallback: partial substring containment on significant words.
         nodes = [r for r in rows if any(w in r["label"].lower() for w in words)]
+
+    # The substring fallback matched something with no affinity -- the
+    # assistant's own previous reply, which lives in the graph as a node. The
+    # measured case: "quem sou eu" matches the node
+    # "Olha, não sou uma pessoa que se apresenta com sorriso", at affinity 0.0,
+    # which MIN_AFFINITY then drops. So `nodes` is NON-empty, and a fallback
+    # written as `if not nodes` never runs for the very question it was written
+    # for.
+    #
+    # That is the common case hiding the rare one: an exact question with a weak
+    # substring hit returned nothing, while a vaguer one ("e em Lisboa?") had no
+    # hit at all and did get the dominant nodes. The filter has to run BEFORE
+    # this decision, not after it in `relevant`.
+    nodes = [r for r in nodes if float(r["affinity"] or 0.0) >= MIN_AFFINITY]
+
     if not nodes:
-        return []
+        # NOTHING MATCHED, and this is the common case, not the edge case.
+        #
+        # Measured on production, 2026-10-03, against a graph of 1566 nodes:
+        #
+        #   retrieve_neighborhood("quem sou eu")   -> []
+        #   retrieve_neighborhood("e em Lisboa?")  -> []
+        #   retrieve_neighborhood("o que sabes de mim") -> []
+        #
+        # So `graph_context_text` returned "" and the assistant answered with no
+        # local context at all, on every ordinary question, while the graph sat
+        # there holding 1566 nodes and a top affinity of 61 on "capitalismo
+        # tardio". The rule was "return the neighbourhood of a node the prompt
+        # names", and a person rarely names a node -- they ask questions.
+        #
+        # The owner's instruction, and the reason this is right rather than
+        # merely kind: what dominates the graph is the personality. "capitalismo
+        # tardio" at affinity 61 and everything else at 0 is a statement about
+        # who this house is. So when nothing matches, hand over what dominates
+        # instead of handing over nothing -- ordered by affinity, so the most
+        # prevalent is first, which is exactly the ranking the owner asked for.
+        #
+        # It is context, not an instruction: it tells the model what this
+        # conversation is about, and the persona still decides the voice.
+        dominant = [r for r in rows if (r["affinity"] or 0) > 0]
+        if not dominant:
+            return []
+        nodes = dominant[:max_results]
 
     matched = [r["label"].lower() for r in nodes]
     # An edge stores node_keys in source/target ("node:plataformas"), never

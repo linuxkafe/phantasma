@@ -161,9 +161,57 @@ def test_relations_render_as_labels_not_node_keys(graph):
     assert "node:" not in out, f"a node_key leaked into the context: {out!r}"
 
 
-def test_unrelated_question_gets_nothing(graph):
+def test_a_greeting_still_carries_the_dominant_context(graph):
+    """An unrelated question DOES get context, and that is deliberate.
+
+    This test asserted the opposite: with a node at affinity 61, "bom dia" must
+    return "". It was my own test, written when the rule was "return the
+    neighbourhood of a node the prompt names" -- and the owner's instruction
+    reversed that rule:
+
+        "as mais prevalentes devem ser usadas na resposta, isso define a
+         personalidade"
+
+    What dominates the graph is who this house is. A top affinity of 61 on
+    "capitalismo tardio" is a statement about the assistant, and handing that to
+    the model on every message -- greeting, question, aside -- is what makes the
+    register consistent instead of dependent on whether the owner happened to
+    name a node.
+
+    The counter-argument was a real one, and it is why the decision is recorded
+    here rather than made silently: context on a greeting is context that can be
+    wasted, and a weaker node could surface on "bom dia" and colour a
+    conversation it has nothing to do with. The counter to that is MIN_AFFINITY,
+    which drops the assistant's own previous replies (measured: they live in the
+    graph as nodes at affinity 0.0) -- the exact noise this rule could have
+    introduced.
+
+    What it must NOT become is "a greeting invents context": the dominant nodes
+    and nothing else.
+    """
     _insert_node(graph, "node:capitalismo", "capitalismo tardio", 61.0)
-    assert mg.graph_context_text("bom dia") == ""
+    text = mg.graph_context_text("bom dia")
+    assert "capitalismo tardio" in text, (
+        f'"bom dia" nao recebeu contexto dominante: {text!r}. A personalidade '
+        f"e o que domina o grafo, e nao depende de a pergunta nomear um no."
+    )
+
+
+def test_a_greeting_never_gets_the_noise(graph):
+    """The other half: affinity 0 is not context, whatever the question is.
+
+    Without this, "always include the dominant nodes" could inject the
+    assistant's own previous answer as context -- and those live in the graph as
+    nodes. A bad answer would then feed itself: ask about cats, get an answer
+    about cats, that answer becomes a node, and the next unrelated question
+    retrieves it.
+    """
+    _insert_node(graph, "node:capitalismo", "capitalismo tardio", 61.0)
+    _insert_node(graph, "node:anterior", "Não, isso é um erro comum.", 0.0)
+    text = mg.graph_context_text("bom dia")
+    assert "erro comum" not in text, (
+        f"a resposta anterior do assistente entrou como contexto: {text!r}"
+    )
 
 
 # --- find_node_for_text: which node a reaction reinforces -------------------

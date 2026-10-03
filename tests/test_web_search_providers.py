@@ -223,11 +223,28 @@ def test_the_branch_with_context_tells_the_model_to_use_it(assistant_src):
 
 
 def test_the_no_inventing_rule_applies_where_the_search_worked(assistant_src):
+    """The rule against inventing must stay in the branch where search WORKED.
+
+    Asserted on meaning rather than wording. It used to look for the literal
+    "NAO inventes", so a rewrite that made the prompt accented Portuguese --
+    "Não inventes páginas, fontes, pessoas..." -- failed a test whose subject is
+    "is there still a rule here?", and a rewrite that DELETED the rule would have
+    passed as long as some other phrase contained those letters.
+
+    So: both halves have to be there, whatever they are called.
+    """
     block = _prompt_block(assistant_src, 'parts.append(f"### PESQUISA WEB')
-    assert "NAO inventes" in block, (
+
+    normalised = block.lower().replace("não", "nao")
+    assert "invent" in normalised, (
         "sem a regra de não inventar no ramo em que a pesquisa funcionou, o "
-        "modelo responde a partir da memória com a confiança de quem pesquisou"
+        f"modelo responde a partir da memória com a confiança de quem pesquisou. "
+        f"Bloco: {block[-300:]}"
     )
+    # And the specific things it must not make up. The measured failure was
+    # "sim, eu sei quem e" about a person invented out of a Czech ham e-shop.
+    for alvo in ("páginas", "fontes", "pessoas", "datas", "dimensões"):
+        assert alvo in block, f"a regra deixou de cobrir {alvo}"
 
 
 def test_the_context_header_stops_offering_an_opt_out(tools_src=None):
