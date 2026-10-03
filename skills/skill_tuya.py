@@ -55,7 +55,7 @@ ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
 # que ja estava aqui desde sempre, nunca disparou por voz. E um defeito mais largo
 # que este ficheiro; nao se corrige aqui. Mas um gatilho novo nao pode nascer
 # partido, senao nasce morto.
-STATUS_TRIGGERS = ["como está", "estado", "temperatura", "humidade", "nível",
+STATUS_TRIGGERS = ["estado", "temperatura", "humidade", "nível", "nivel",
                    "leitura", "quanto está", "quanto esta", "quanto marca",
                    "quanto rende", "gastar", "consumo"]
 DEBUG_TRIGGERS = ["diagnostico", "dps"]
@@ -72,9 +72,14 @@ BASE_NOUNS = ["sensor", "luz", "lâmpada", "desumidificador", "exaustor", "tomad
 # So the noun the owner used has to be a DEVICE type, and it has to appear in
 # the nickname. A room word can qualify the room but never stand in for the
 # device.
+# "wc" is here because the file's own comment discusses "como esta o wc" as the
+# reading that "como está" existed to serve, and DEVICE_NOUNS did not list it --
+# so removing the wide trigger took that reading with it. A water meter is a
+# device type; it was simply never named.
 DEVICE_NOUNS = ["luz", "luzes", "lâmpada", "lampada", "candeeiro", "abajur",
                 "desumidificador", "exaustor", "ventoinha", "ventilador",
-                "tomada", "ficha", "forno", "carregador", "sensor", "aspirador"]
+                "tomada", "ficha", "forno", "carregador", "sensor", "aspirador",
+                "wc", "contador", "medidor"]
 
 
 def _matches_a_device_noun(prompt_lower, nickname_lower):
@@ -89,6 +94,27 @@ VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.5]
 
 def _get_tuya_triggers():
     base = BASE_NOUNS + ACTIONS_ON + ACTIONS_OFF + STATUS_TRIGGERS + DEBUG_TRIGGERS
+    # "como está <aparelho>", generated from DEVICE_NOUNS so a new device gets
+    # them for free.
+    #
+    # The bare "como está" used to do this job and was far too wide: it also
+    # matched "como está o tempo", which put the household's device skill on an
+    # ordinary weather question and got it REFUSED at the guest tier --
+    # "Não tens acesso a tuya." The phrase needs a noun after it, so it gets one.
+    #
+    #   'como esta o tempo'  -> ['skill_weather']   (was refused)
+    #   'como esta o wc'     -> ['skill_tuya']      (the meter reading it served)
+    #
+    # Same narrowing "quanto" already got, for the same reason: a trigger that
+    # appears in a common question AND asks about the house, with the house
+    # inside it. See b0b5835.
+    base += [f"como está {d}" for d in DEVICE_NOUNS]
+    base += [f"como esta {d}" for d in DEVICE_NOUNS]
+    # With the article, because that is how it is said: "como esta o wc", not
+    # "como esta wc". Both forms, because dropping the article made the reading
+    # unreachable and the only test of it was the sentence in the comment above.
+    base += [f"como está o {d}" for d in DEVICE_NOUNS]
+    base += [f"como esta o {d}" for d in DEVICE_NOUNS]
     if hasattr(config, 'TUYA_DEVICES'):
         base += list(config.TUYA_DEVICES.keys())
     return base

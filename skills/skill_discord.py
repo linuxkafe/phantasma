@@ -182,13 +182,16 @@ async def on_message(message):
         # Se for um user standard bloqueado, avisamos. Se for desconhecido, ignoramos ou logamos.
         if "limite diário" in error_msg:
             await message.channel.send(f"🚫 {error_msg}")
-        else:
-            print(
-                f"[Discord Skill] Acesso negado para {message.author.name} ({message.author.id})"
-            )
+        # logger, not print: a refusal is the one event that must be visible
+        # when someone asks "why did it not answer?", and `journalctl` is where
+        # they will look. The print that used to be here left no trace.
+        logger.info(
+            "Acesso negado para %s (%s): %s",
+            message.author.name, message.author.id, error_msg,
+        )
         return
 
-    print(f"[Discord Skill] Comando aceite de {message.author.name}: {prompt}")
+    logger.info("Comando aceite de %s: %s", message.author.name, prompt)
 
     async with message.channel.typing():
         response_text = await _send_to_phantasma(prompt)
@@ -355,7 +358,7 @@ def init_skill_daemon():
     from src.brain.fly_brain import get_shared_fly_brain
 
     _fly_brain = get_shared_fly_brain()
-    print(f"[Discord Skill] FlyBrain inicializado: {_fly_brain is not None}")
+    logger.info("FlyBrain inicializado: %s", _fly_brain is not None)
 
     # The skill resolver, for deciding which skill a request lands on BEFORE any
     # of it is spent. `assistant.py` builds the shared `SkillContext` WITHOUT
@@ -366,17 +369,54 @@ def init_skill_daemon():
     # So the resolver is built here against the loader's own skill directory.
     # A second SkillLoader is the concern that `_installed_skills` documents,
     # and it applies here too -- but this loader is used to MATCH, never to
-    # execute, and it loads no daemons and holds no state.
+    # execute, and it starts no daemons and holds no state.
+    #
+    # `load_all()` IS REQUIRED, and leaving it out is worse than not wiring a
+    # resolver at all. `SkillLoader.__init__` only sets `self.skills = []`;
+    # loading happens in `load_all()`. Without the call, `resolve_matching_skills`
+    # returns `[]` for every prompt -- and `[]` is NOT `None`, so the
+    # "an unwired resolver must refuse" guard in `_guest_tier` never fires.
+    # `outside` is empty, the guest is allowed, and `respond_to_text` then runs
+    # the real skill.
+    #
+    # That is what shipped. Measured, by the peer review that caught it:
+    #
+    #   skills right after __init__: 0
+    #   resolve_matching_skills("acende a luz da sala") -> []
+    #   after load_all(): 22
+    #   resolve -> ['skill_chacon', 'skill_tuya', 'skill_xiaomi']
+    #   guest 111, matching=[] -> (True, '')
+    #
+    # Six real guests were on the production allowlist while this stood. The
+    # allowlist was the whole point of the change and it was not being applied.
+    # An empty resolver is not a degraded resolver; it is a disabled one, and it
+    # fails OPEN, which is the one direction this rule may never fail.
     try:
         from skills.loader import SkillLoader
 
         _resolver_loader = SkillLoader(skills_dir=config.SKILLS_DIR)
+        _resolver_loader.load_all()
+        if not _resolver_loader.skills:
+            # Not a warning. An empty resolver authorises everything, so this
+            # must leave `_resolve_skill` as None -- which refuses -- rather than
+            # bind a callable that silently matches nothing.
+            raise RuntimeError(
+                "resolver carregou zero skills: a allowlist ficaria sem efeito"
+            )
         _resolve_skill = _resolver_loader.resolve_matching_skills
-        print("[Discord Skill] Resolver de skills ligado")
+        # INFO, and it says how many skills it actually loaded, because this
+        # number is the only proof in production that guests are checked against
+        # a real skill list. Until it existed, `print()` went nowhere useful:
+        # `journalctl` was empty from every restart, so a bot that received
+        # messages and stayed silent looked exactly like a bot that never
+        # connected -- and the first four hours of that were spent on the gateway
+        # instead of on this file.
+        logger.info("Resolver de skills ligado (%d skills)", len(_resolver_loader.skills))
     except Exception as exc:  # noqa: BLE001
-        print(f"[Discord Skill] Resolver de skills NAO ligado: {exc}")
+        _resolve_skill = None
+        logger.error("Resolver de skills NAO ligado: %s", exc)
 
-    print("[Discord Skill] A iniciar daemon do Discord...")
+    logger.info("A iniciar daemon do Discord...")
     t = threading.Thread(target=_run_discord_loop, daemon=True)
     t.start()
 

@@ -92,25 +92,42 @@ def allowed_guest_skills() -> list[str]:
     return out
 
 
-def _read_store_setting(key: str, default: str = "") -> str:
-    """Only the admin page's value for ``key``, or ``default``.
+def _owner_set(key: str) -> tuple[str | None, bool]:
+    """``(value, store_was_readable)`` for the admin page's value of ``key``.
 
-    Split out because the id lists live in ``config`` as ``list[int]`` and the
-    reader above ends in ``str(value)``: ``str([111, 222])`` is ``"[111, 222]"``,
-    and splitting that on commas yields the ids ``"[111"`` and ``"222]"``. Two ids
-    that exist in nobody's account, in a list whose purpose is to name real ones.
-    So the id path reads the store here and reads ``config`` through ``_ids_in``,
-    and neither value ever passes through ``str()``.
+    Split out because three states have to stay apart, and the two previous
+    readers could not tell them:
+
+    - the owner set a value, including the empty string
+    - the owner never touched this key
+    - the store could not be read
+
+    ``None`` means the second, and a readable-but-empty string means the first.
+    Collapsing them is what made revocation impossible: emptying the id box
+    wrote ``""``, the reader treated that as "unset", and `_owner_list` fell
+    back to the `.env` -- so deleting a guest from the page handed the id
+    straight back. Verified:
+
+        store='' env=[111]  ->  _owner_guest_ids() == {'111'}
+        check(111) -> (True, '')
+
+    The third state matters just as much. A `database is locked` at the moment
+    the owner revoked the last skill used to fall through to
+    ``DEFAULT_GUEST_SKILLS``, handing every guest weather and calculator. The
+    docstring of `_read_owner_setting` states the opposite is intended, so the
+    code contradicted its own stated rule. ``check()`` already refuses on a
+    broken profile lookup; the POLICY lookup now fails the same way, because a
+    permission check that opens the door when the database is unhappy is not a
+    permission check.
     """
     try:
         from src.settings_store import get_setting
 
         stored = get_setting(key, None)
-        if stored is not None and stored != "":
-            return str(stored)
+        return (None if stored is None else str(stored)), True
     except Exception as exc:  # noqa: BLE001
-        log.warning("discord: leitura de %s falhou: %s", key, exc)
-    return default
+        log.error("discord: leitura de %s falhou (%s)", key, exc)
+        return None, False
 
 
 def _read_owner_setting(key: str, default: str, empty_is_a_value: bool = False) -> str:
@@ -131,19 +148,20 @@ def _read_owner_setting(key: str, default: str, empty_is_a_value: bool = False) 
     empty string is indistinguishable from never being set, and guessing wrong
     there is harmless.
     """
-    try:
-        from src.settings_store import get_setting
-
-        stored = get_setting(key, None)
-        if stored is not None and (stored != "" or empty_is_a_value):
-            return str(stored)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("discord: leitura de %s falhou: %s", key, exc)
+    stored, readable = _owner_set(key)
+    if not readable:
+        # Fail CLOSED, not open. The owner's intent for this key is known and it
+        # is the restrictive one; substituting the default because the database
+        # was busy would grant exactly what was taken away, at the moment
+        # somebody was relying on it being gone.
+        return ""
+    if stored is not None and (stored != "" or empty_is_a_value):
+        return stored
     from_env = getattr(config, key, None)
     if from_env not in (None, ""):
         # Strings and numbers only. The id lists are the ones `config.py` keeps
         # as `list[int]`, and they never come through here -- `_owner_list` reads
-        # `config` via `_ids_in` and the page via `_read_store_setting`. Passing
+        # `config` via `_ids_in` and the page via `_owner_set`. Passing
         # a list here is what produced the ids "[111" and "222]".
         return str(from_env)
     return default
@@ -175,7 +193,23 @@ def _owner_list(key: str) -> set[str]:
     an int that overflowed, or a form value that arrived padded, must not match by
     accident -- and must not fail to match either.
     """
-    return _ids_in(getattr(config, key, None)) | _ids_in(_read_store_setting(key))
+    stored, readable = _owner_set(key)
+    if not readable:
+        log.error("discord: %s ilegivel; a lista do dono fica vazia", key)
+        return set()
+    if stored is not None:
+        # The page is authoritative whenever the owner has touched it. It used
+        # to be a UNION with the `.env`, which was right for adding an id and
+        # wrong for revoking one: emptying the field returned the `.env` list
+        # unchanged, so removing a guest from the page did not remove them. A
+        # union cannot express "take this away", and revoking is the operation
+        # that has to work -- an admin page that locks people out by accident is
+        # bad, and one that cannot unlock them at all is worse.
+        #
+        # The `.env` remains the default for anyone who has never opened the
+        # page, so the owner's existing setup keeps working untouched.
+        return _ids_in(stored)
+    return _ids_in(getattr(config, key, None))
 
 
 def _owner_guest_ids() -> set[str]:

@@ -419,13 +419,26 @@ def test_guest_ids_come_from_the_admin_page(monkeypatch):
     monkeypatch.setattr(
         settings_store, "get_setting", lambda k, default=None: values.get(k, default)
     )
-    assert "222" in da._owner_guest_ids()
-    # The two lists are a UNION. The page was going to shadow the `.env`, which
-    # means the first time the owner saved it every id he had in `.env` and did
-    # not retype became disallowed at once -- with no message, because a refused
-    # guest is silent by design. An admin page that locks people out as a side
-    # effect of being used is worse than one that forgets.
-    assert da.check(111, "bom dia", [])[0], "o .env deixou de valer ao guardar na pagina"
+    assert da._owner_guest_ids() == {"222", "333"}
+
+    # NOT a union, and that is a deliberate reversal of an earlier decision
+    # recorded in this same test. The union was chosen so that the first save
+    # could not silently lock everyone out of the `.env` list. It also made
+    # revocation impossible: emptying the field wrote `""`, the union returned
+    # the `.env` unchanged, and a guest the owner had just deleted kept the
+    # house. That was found by the peer review and reproduced:
+
+    #     store='' env=[111]  ->  _owner_guest_ids() == {'111'}
+
+    # Locking people out by accident is real; being unable to lock anyone out
+    # is worse, because revocation is the operation you reach for when someone
+    # should not have access. The `.env` still applies in full to an owner who
+    # has never opened the page -- covered by
+    # `test_the_page_wins_over_the_env_once_the_owner_has_used_it`.
+    da.reset_quotas()
+    assert not da.check(111, "bom dia", [])[0], (
+        "o id do .env devia ter saido quando a pagina o removeu"
+    )
     assert da.check(222, "bom dia", [])[0], "o id posto na pagina nao chegou"
     # An id on neither list is refused before the quota is consulted.
     assert not da.check(999, "bom dia", [])[0]
@@ -553,3 +566,124 @@ def test_the_checkboxes_are_named_the_way_the_rule_compares():
         assert short in da.allowed_guest_skills(), (
             f"a caixa para {name} gravaria um nome que a regra nao reconhece"
         )
+
+
+# ---------------------------------------------------------------------------
+# Revocation, and failing closed. Found by the peer review, both reproduced.
+# ---------------------------------------------------------------------------
+
+
+def _stub_store(monkeypatch, values):
+    from src import settings_store
+
+    monkeypatch.setattr(
+        settings_store, "get_setting",
+        lambda k, d=None: values.get(k, d),
+    )
+
+
+def test_the_page_wins_over_the_env_once_the_owner_has_used_it(monkeypatch):
+    """.env still applies to an owner who has never opened the page.
+
+    The union that used to be here was right for ADDING an id and wrong for
+    removing one, and adding is the operation that happens once.
+    """
+    import config
+    from src.api import discord_access as da
+
+    monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [111], raising=False)
+    _stub_store(monkeypatch, {})  # owner never touched it
+
+    assert da._owner_guest_ids() == {"111"}
+    assert da.check(111, "ola", [])[0] is True
+
+
+def test_clearing_the_page_revokes_an_id_that_is_also_in_the_env(monkeypatch):
+    """The owner's operation that must work.
+
+    Reproduced from the review:
+
+        store='' env=[111]  ->  _owner_guest_ids() == {'111'}
+        check(111) -> (True, '')
+
+    The owner deletes a guest from the page, gets no warning, and the guest
+    still has the house. An admin page that cannot revoke is worse than one that
+    locks people out by accident, because revocation is what you reach for when
+    someone should not have access.
+    """
+    import config
+    from src.api import discord_access as da
+
+    monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [111], raising=False)
+    _stub_store(monkeypatch, {"DISCORD_STANDARD_USERS": ""})
+
+    assert da._owner_guest_ids() == set(), (
+        "apagar o campo devia revogar o id que o .env ainda tem; "
+        f"ficou {sorted(da._owner_guest_ids())}"
+    )
+    da.reset_quotas()
+    allowed, msg = da.check(111, "ola", [])
+    assert allowed is False, f"o id revogado ainda passa: {msg}"
+
+
+def test_adding_an_id_on_the_page_replaces_the_env_list_not_unions_it(monkeypatch):
+    """Consequence of the page being authoritative: a REPLACEMENT, not a union.
+
+    Written down because it is a behaviour change and someone will want the
+    union back. It has to be a replacement: the owner removing id A while adding
+    id B is the same save, and a union cannot express it.
+    """
+    import config
+    from src.api import discord_access as da
+
+    monkeypatch.setattr(config, "DISCORD_STANDARD_USERS", [111], raising=False)
+    _stub_store(monkeypatch, {"DISCORD_STANDARD_USERS": "222, 333"})
+
+    assert da._owner_guest_ids() == {"222", "333"}
+
+
+def test_a_broken_store_revokes_rather_than_restoring_the_default(monkeypatch):
+    """`database is locked` must not hand every guest weather and calculator.
+
+    The review's measurement:
+
+        discord: leitura de GUEST_SKILLS_ALLOWED falhou: database is locked
+        allowed_guest_skills() -> ['weather', 'calculator']
+
+    while the owner had set `""`. `check()` already refuses on a broken PROFILE
+    lookup; the POLICY lookup fell open, so the file applied its own stated rule
+    to one and not the other.
+    """
+    import sqlite3
+
+    from src import settings_store
+    from src.api import discord_access as da
+
+    def _locked(key, default=None):
+        if key in ("GUEST_SKILLS_ALLOWED", "DISCORD_STANDARD_USERS"):
+            raise sqlite3.OperationalError("database is locked")
+        return default
+
+    monkeypatch.setattr(settings_store, "get_setting", _locked)
+
+    assert da.allowed_guest_skills() == [], (
+        f"uma store avariada devolveu {da.allowed_guest_skills()} -- a "
+        f"revogacao do dono foi desfeita por uma base de dados ocupada"
+    )
+    assert da._owner_guest_ids() == set()
+
+
+def test_the_allowlist_unticked_empty_is_still_not_the_default(monkeypatch):
+    """Unticking every box keeps meaning "no skills", including on a good store.
+
+    The regression that `empty_is_a_value` exists for, restated next to the new
+    reader so a future edit to one does not quietly undo the other.
+    """
+    from src import settings_store
+    from src.api import discord_access as da
+
+    monkeypatch.setattr(
+        settings_store, "get_setting",
+        lambda k, d=None: ("" if k == "GUEST_SKILLS_ALLOWED" else d),
+    )
+    assert da.allowed_guest_skills() == []

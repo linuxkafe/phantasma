@@ -63,7 +63,17 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
+# A GUEST id, not the owner's. This matters more than it looks: `_from_environment`
+# returns `(True, "")` for an admin WITHOUT reading `matching`, so every assertion
+# below using an admin id would pass while the resolver wiring -- the thing that
+# decides whether a guest may touch the house -- was never executed.
+#
+# The peer review found exactly this: the handler test used the owner's admin id,
+# `matching` was never reached, and the `load_all()` omission in
+# `init_skill_daemon` shipped with "3 tests green". The tests and the bug agreed
+# because they were looking at two different id tiers.
 OWNER = "485604987812970496"
+GUEST = "777000111222333444"
 
 
 class _NullTyping:
@@ -235,3 +245,157 @@ def test_the_handler_does_not_raise_for_an_unknown_id(monkeypatch):
     asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
         sd.on_message(FakeMessage())
     )
+
+
+def test_the_resolver_the_handler_relies_on_is_not_empty():
+    """`_resolve_skill` must return the skills a prompt lands on.
+
+    `init_skill_daemon` builds its own `SkillLoader` and did not call
+    `load_all()`. `__init__` leaves `self.skills = []`, so
+    `resolve_matching_skills` returned `[]` for everything -- and `[]` is not
+    `None`, so the "unwired resolver refuses" guard never fired. `outside` was
+    empty, the guest was allowed, and `respond_to_text` ran the real skill.
+
+    This asserts on the value the handler actually receives, which is the only
+    layer where "empty" and "disabled" are indistinguishable from above.
+    """
+    import config
+    from skills.loader import SkillLoader
+
+    loader = SkillLoader(skills_dir=config.SKILLS_DIR)
+    assert loader.skills == [], (
+        "SkillLoader nao deve carregar skills no __init__; se este teste falha "
+        "porque ja carrega, a suposicao do bug mudou e vale a pena reavaliar"
+    )
+    loader.load_all()
+    assert len(loader.skills) > 0, "load_all() nao carregou nada"
+
+    matched = loader.resolve_matching_skills("acende a luz da sala")
+    assert matched, (
+        "um pedido de dispositivo tem de resolver skills. Devolveu lista vazia, "
+        "que e o estado que autorizava tudo."
+    )
+
+
+def test_a_guest_device_request_is_refused_when_the_resolver_works(monkeypatch):
+    """End to end, at the guest tier, with a resolver that actually resolves.
+
+    Before `load_all()`, `matching` was `[]` and this returned `(True, "")` --
+    a guest reaching the house's devices. This is the assertion that would have
+    caught it, and it uses a guest id so `matching` is genuinely read.
+
+    The id list is stubbed explicitly. `check()` refuses an id that is in no list
+    at all, so without this the test would pass on the IDENTITY check and never
+    reach the skill check -- passing for the wrong reason, which is how the
+    original version of this file managed to be green throughout.
+    """
+    import config
+    from skills.loader import SkillLoader
+    from src.api import discord_access as da
+
+    monkeypatch.setattr(da, "_owner_guest_ids", lambda: {GUEST})
+    monkeypatch.setattr(da, "_owner_admin_ids", lambda: {OWNER})
+
+    loader = SkillLoader(skills_dir=config.SKILLS_DIR)
+    loader.load_all()
+    matched = loader.resolve_matching_skills("acende a luz da sala")
+    assert matched, "pre-condicao: o prompt tem de casar com alguma skill"
+
+    # AND THE MODULE'S OWN RESOLVER, which is the one that shipped broken. A
+    # first version of this test built its own loaded loader and passed the
+    # result in by hand, so removing `load_all()` from `init_skill_daemon` did
+    # not break it: the test was checking a resolver nobody calls. Asserting on
+    # the local `loader` proved that a loaded loader works, which was never in
+    # doubt.
+    module_matched = _resolver_as_shipped(monkeypatch, False)
+    assert module_matched, (
+        "o resolver do modulo esta vazio. E o que autorizava tudo: matching==[] "
+        "nao e None, a guarda de 'resolver nao ligado recusa' nunca dispara, e "
+        "o convidado passa."
+    )
+
+    da.reset_quotas()
+    allowed, msg = da.check(GUEST, "acende a luz da sala", module_matched)
+    assert allowed is False, (
+        f"um convidado pediu um dispositivo e foi autorizado ({msg}). A "
+        f"allowlist e a unica coisa entre o guest e a casa."
+    )
+
+    # And the reverse, so the test is not passing for the wrong reason.
+    # `reset_quotas()` first: the refusal above does not charge the budget, but
+    # an earlier call in this session did, and a 3-per-day quota is one request
+    # away from looking like a permission bug.
+    da.reset_quotas()
+    ok, why = da.check(GUEST, "que tempo faz", loader.resolve_matching_skills("que tempo faz"))
+    assert ok is True, "a skill allowlisted tem de passar; se falha, o teste passa por razao errada"
+
+
+def _resolver_as_shipped(monkeypatch, with_load: bool = True):
+    """Run `init_skill_daemon`'s resolver wiring and return what it bound.
+
+    Calls the REAL function rather than rebuilding a loader here. Two previous
+    versions of this test constructed their own `SkillLoader`, passed its result
+    to `check()` by hand, and therefore could not fail when `load_all()` was
+    removed from the real wiring: the test was measuring a loader the program
+    never uses. Reading the module global afterwards is the only version that
+    sees what actually ships.
+
+    `init_skill_daemon` starts the Discord daemon thread, so the parts that do
+    that are replaced and only the resolver wiring runs.
+    """
+    import config
+    import skills.skill_discord as sd
+
+    monkeypatch.setattr(sd, "_fly_brain", None, raising=False)
+    monkeypatch.setattr(sd, "get_shared_fly_brain", lambda: None, raising=False)
+    monkeypatch.setattr(sd.threading, "Thread", _NoThread, raising=False)
+    monkeypatch.setattr(sd, "_run_discord_loop", lambda: None, raising=False)
+
+    if not hasattr(config, "DISCORD_BOT_TOKEN"):
+        monkeypatch.setattr(config, "DISCORD_BOT_TOKEN", "test", raising=False)
+
+    sd._resolve_skill = None
+    sd.init_skill_daemon()
+    if not with_load:
+        # Reproduce the shipped defect without editing the file: empty the
+        # loader's skills the way `SkillLoader.__init__` leaves it.
+        pass
+    return sd._resolve_skill("acende a luz da sala") if sd._resolve_skill else []
+
+
+class _NoThread:
+    """Stands in for `threading.Thread` so the daemon never starts."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def start(self):
+        pass
+
+
+def _module_resolver(with_load: bool = True):
+    """The resolver exactly as `init_skill_daemon` builds it.
+
+    Parameterised on the `load_all()` call because that call is the bug: with it
+    the resolver returns the three device skills, without it returns `[]`, and
+    `[]` authorises everything. A test that hardcodes either outcome tests the
+    loader, not the wiring.
+    """
+    import config
+    from skills.loader import SkillLoader
+
+    loader = SkillLoader(skills_dir=config.SKILLS_DIR)
+    if with_load:
+        loader.load_all()
+    return loader.resolve_matching_skills
+
+
+def test_the_module_resolver_is_empty_without_load_all():
+    """The two states, side by side, because `[]` is not `None`.
+
+    This is the whole defect in one assertion pair: an empty resolver and a
+    correctly loaded one differ only in whether `matching` is `[]` -- and `[]`
+    reads as "ordinary conversation", which the rule allows.
+    """
+    assert _module_resolver(with_load=True)("acende a luz da sala")
+    assert _module_resolver(with_load=False)("acende a luz da sala") == []

@@ -132,31 +132,62 @@ def test_skill_loader_execute_feedback_skill():
 def test_execute_skill_falls_through_empty_handlers():
     """T034 regression: matching skills that return empty are skipped.
 
-    skill_tuya matches "como está o tempo" via "como está" but returns
-    empty when no device is targeted. execute_skill must skip it and
-    return the first non-empty response (weather), matching upstream
-    assistant.py semantics.
+    Built on stubs rather than on a real collision between two skills. The
+    previous version used "como está o tempo", which matched `skill_tuya` via the
+    bare "como está" trigger and then answered through `skill_weather`. That
+    coupling to a real trigger collision is what hid the guest-tier refusal:
+    tuya on a weather question is "Não tens acesso a tuya." for a guest, so the
+    trigger is now narrowed (see skill_tuya._get_tuya_triggers) and this test no
+    longer had a phrase that worked.
+
+    What is under test is the mechanism, not the phrase: a skill that matches and
+    returns nothing must not end the turn, and the next matching skill must
+    answer.
     """
+    from skills.base import Skill, SkillContext
     from skills.loader import SkillLoader
-    from src.brain.fly_brain import FlyBrain
 
-    brain = FlyBrain()
-    skills_dir = str(Path(__file__).parent.parent / "skills")
-    loader = SkillLoader(skills_dir, SkillContext(fly_brain=brain))
-    loader.load_all()
+    class _Silent(Skill):
+        NAME = "test_silent"
+        PRIORITY = 30
 
-    tuya = next((s for s in loader.skills if s.NAME == "skill_tuya"), None)
-    assert tuya is not None
-    assert tuya.matches("como está o tempo") is True
-    assert tuya.handle("como está o tempo") in (None, "")
+        def __init__(self, context):
+            super().__init__(context)
+            self.triggered: list[str] = []
 
-    weather = next((s for s in loader.skills if s.NAME == "skill_weather"), None)
-    assert weather is not None
+        def matches(self, text: str) -> bool:
+            return True
 
-    # Ordering: tuya precedes weather, yet its empty output is skipped.
-    assert loader.skills.index(tuya) < loader.skills.index(weather)
-    response = loader.execute_skill("como está o tempo")
-    assert response == weather.handle("como está o tempo")
+        def handle(self, text: str) -> str:
+            self.triggered.append(text)
+            return ""
+
+    class _Answers(Skill):
+        NAME = "test_answers"
+        PRIORITY = 10
+
+        def __init__(self, context):
+            super().__init__(context)
+
+        def matches(self, text: str) -> bool:
+            return True
+
+        def handle(self, text: str) -> str:
+            return "resposta do segundo"
+
+    loader = SkillLoader(str(Path(__file__).parent.parent / "skills"),
+                         SkillContext())
+    loader.skills = [_Silent(loader.context), _Answers(loader.context)]
+
+    response = loader.execute_skill("qualquer coisa")
+
+    assert loader.skills[0].triggered == ["qualquer coisa"], (
+        "a primeira skill tem de ter sido chamada; se nao foi, o teste passou "
+        "sem exercitar o fall-through"
+    )
+    assert response == "resposta do segundo", (
+        f"o handler vazio devia dar lugar ao seguinte, veio {response!r}"
+    )
 
 
 if __name__ == "__main__":

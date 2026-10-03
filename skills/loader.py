@@ -25,6 +25,33 @@ from typing import Any, List, Optional
 
 from skills.base import Skill, SkillContext, TriggerType
 
+
+def _fold(text: str) -> str:
+    """Text with accents removed and lowercased, for comparing against triggers.
+
+    Trigger matching used `text.lower()` and nothing else, so an accented
+    trigger could never match anything and an accented prompt could never be
+    matched. Measured: `resolve_matching_skills("como está o tempo")` returned
+    `['skill_tuya', 'skill_weather']` while the unaccented spelling returned
+    `['skill_weather']` -- and the guest tier refuses on ANY skill outside the
+    allowlist, so the accented spelling of an ordinary weather question was
+    refused with "Não tens acesso a tuya." The guest typed the phrase correctly
+    and was denied for spelling it correctly.
+
+    `skill_tuya` even documents the bug about itself: "As formas sem acento nao
+    sao redundancia ... `matches` faz `contains` palavra-a-palavra sobre o texto
+    tal e qual, e o texto vem do STT, que nao acenta." Voice happened to produce
+    unaccented text, so the defect hid; a typed message did not.
+
+    NFKD then drop the combining marks, so "está" -> "esta" and "nível" -> "nivel".
+    Lowercasing comes first because `"İ".lower()` decomposes in ways that are not
+    worth reasoning about here.
+    """
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
 logger = logging.getLogger(__name__)
 
 # Legacy module-level TRIGGER_TYPE strings -> TriggerType enum.
@@ -72,8 +99,10 @@ class LegacySkillAdapter(Skill):
         if not triggers:
             return False
         t = self.TRIGGER_TYPE
+        # Both sides folded. Folding only the text would make every accented
+        # trigger dead rather than alive, which is the state this file was in.
         stripped = text.strip().lower()
-        triggers_lower = [x.lower() for x in triggers]
+        triggers_lower = [_fold(x) for x in triggers]
         if t == TriggerType.EXACT:
             return stripped in triggers_lower
         if t == TriggerType.STARTSWITH:
@@ -89,7 +118,7 @@ class LegacySkillAdapter(Skill):
             for x in triggers_lower:
                 if not x:
                     continue
-                if _re.search(r"\b" + _re.escape(x) + r"\b", stripped):
+                if _re.search(r"\b" + _re.escape(x) + r"\b", _fold(stripped)):
                     return True
             return False
         if t == TriggerType.REGEX:
