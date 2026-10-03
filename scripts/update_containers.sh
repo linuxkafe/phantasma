@@ -26,7 +26,30 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="$ROOT/docker-compose.yml"
+
+# Where the compose file the RUNNING containers were actually created from.
+#
+# It is not $ROOT. The `phantasma` compose project lives in the development tree,
+# and `docker inspect` says so:
+#
+#   docker inspect ollama --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+#   /home/seyon/dev/pHantasma/docker-compose.yml
+#
+# and its bind mounts point there too -- `./ollama-data` resolves to
+# /home/seyon/dev/pHantasma/ollama-data, which is where the models are. So
+# copying the compose file into /opt/phantasma would be worse than not deploying
+# it: the relative volumes would resolve to a fresh empty directory and
+# `docker compose up` would recreate the Ollama container with no models in it.
+#
+# This was written assuming `$ROOT/docker-compose.yml`, which does not exist in
+# production, so the image half of the nightly job exited 2 on every run and the
+# rollback code below was never reached. Found by the peer review, which read
+# the log: four "compose file not found" lines.
+#
+# Overridable, and `PHANTASMA_COMPOSE_DIR` is the honest name -- this is a host
+# value, and the rule from CLAUDE.md is that a host value does not go in code.
+COMPOSE_DIR="${PHANTASMA_COMPOSE_DIR:-$ROOT}"
+COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
 SERVICES_DEFAULT=(searxng ollama)
 
 CHECK_ONLY=0
@@ -54,6 +77,9 @@ fail() { printf '%s %s\n' "$(date -Is)" "$*" >&2; }
 
 if [ ! -f "$COMPOSE_FILE" ]; then
   fail "compose file not found: $COMPOSE_FILE"
+  fail "  PHANTASMA_COMPOSE_DIR=$COMPOSE_DIR"
+  fail "  where do the running containers come from?"
+  fail "  docker inspect ollama --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'"
   exit 2
 fi
 if ! docker compose version >/dev/null 2>&1; then
@@ -101,16 +127,86 @@ remote_digest_of() {  # service -> the digest `pull` would install, or empty
     | grep -m1 '"digest"' | cut -d'"' -f4
 }
 
-verify() {  # service -> 0 if the dependency actually answers
-  say "verifying with a real generation request (up to ${VERIFY_TIMEOUT_S}s)..."
+# Tag the image the service was running before, under a name compose can
+# actually start.
+#
+# The previous version wrote `${run_image}:rollback`, e.g.
+# `ollama/ollama:latest:rollback`. Docker rejects that outright -- a repository
+# cannot carry two colons -- so the tag always failed, and it was silenced with
+# `2>/dev/null || true`. Both occurrences. The rollback therefore rested on
+# nothing and the comment described a step that never ran.
+rollback_tag() {  # service, image-id -> prints the tag it created, or fails
+  local svc="$1" img_id="$2" run_image
+  run_image=$(docker inspect --format '{{.Config.Image}}' "$svc" 2>/dev/null) || return 1
+  case "$run_image" in
+    *@sha256:*)
+      # Digest-pinned: the ref cannot be re-tagged ("refusing to create a tag with
+      # a digest reference"), so the rollback target has to be the id itself.
+      printf '%s' "$img_id"
+      return 0
+      ;;
+  esac
+  # `repo/name:tag` -> `repo/name:rollback-<short id>`
+  local base="${run_image%:*}" short="${img_id:0:12}"
+  docker image tag "$img_id" "${base}:rollback-${short}" 2>/dev/null || return 1
+  printf '%s' "${base}:rollback-${short}"
+}
+
+# Put the service back on a specific image, and only take it down once the
+# replacement is known to be startable.
+#
+# The order here is the whole point. It used to be:
+#
+#   docker update --restart=no "$svc"
+#   docker rm -f "$svc"
+#   if docker image tag "$before" "$run_image"; then compose up; fi
+#
+# `rm -f` first, and the retag second, guarded. When the retag failed -- which
+# it did, always -- the container was already deleted with its restart policy
+# disabled and `compose up` never ran. The service was down AND staying down,
+# which is strictly worse than the unverified update the rollback was written to
+# undo.
+rollback() {  # service, image-id -> 0 if the service is back
+  local svc="$1" img_id="$2" target
+  target=$(rollback_tag "$svc" "$img_id") || {
+    fail "$svc: nao foi possivel preparar a imagem anterior; o servico fica como esta"
+    return 1
+  }
+  say "$svc: rollback para $target (antes de mexer no container)"
+  # The tag exists now, so removing the container cannot strand it.
+  docker rm -f "$svc" >/dev/null 2>&1 || true
+  if [ "$target" = "$img_id" ]; then
+    docker run -d --name "$svc" --restart unless-stopped "$img_id" \
+      >>"$LOG_FILE" 2>&1 || true
+  else
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps "$svc" >>"$LOG_FILE" 2>&1 || true
+  fi
+  return 0
+}
+
+verify() {  # service -> 0 if THAT service's dependency actually answers
+  # Scoped on purpose. It used to run the whole-project check, so updating
+  # `searxng` while the Ollama fallback was slow rolled `searxng` back -- the
+  # wrong container, for a reason it did not cause. And the fallback IS slow
+  # right now, which means the first night any digest moves would have undone a
+  # good update at 03:30.
+  say "verifying $1 (up to ${VERIFY_TIMEOUT_S}s)..."
+  local only="${1:-}"
   if [ -x "$ROOT/venv/bin/python" ]; then
     PY="$ROOT/venv/bin/python"
-  elif [ -x "$PROD_PY" ] || [ -x "/opt/phantasma/venv/bin/python" ]; then
-    PY="/opt/phantasma/venv/bin/python"
+  elif [ -x /opt/phantasma/venv/bin/python ]; then
+    PY=/opt/phantasma/venv/bin/python
   else
-    PY="$(command -v python3)"
+    # No `$PROD_PY`: it was referenced and never assigned, and under
+    # `set -u` that is not a fallback that fails, it is a script that DIES --
+    # after the pull, after the restart, before the check and before the
+    # rollback. An update landing unverified is worse than the outage the
+    # rollback exists to prevent.
+    echo "no venv python with the ollama SDK; refusing to verify" >&2
+    return 2
   fi
-  PROBE_TIMEOUT="$VERIFY_TIMEOUT_S" "$PY" "$ROOT/scripts/dependency_check.py"
+  PROBE_TIMEOUT="$VERIFY_TIMEOUT_S" "$PY" "$ROOT/scripts/dependency_check.py" \
+    ${only:+--only "$only"}
 }
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -162,10 +258,7 @@ for svc in "${SERVICES[@]}"; do
   if ! docker compose -f "$COMPOSE_FILE" up -d --no-deps "$svc" >>"$LOG_FILE" 2>&1; then
     fail "$svc: restart failed, rolling back to ${before:-unknown}"
     if [ "$ROLLBACK_ON_FAILURE" = "1" ] && [ -n "$before" ]; then
-      # Retag the image we were running before, so compose can start it again.
-      run_image=$(docker inspect --format '{{.Config.Image}}' "$svc" 2>/dev/null)
-      docker image tag "$before" "${run_image}:rollback" 2>/dev/null || true
-      docker compose -f "$COMPOSE_FILE" up -d --no-deps "$svc" >>"$LOG_FILE" 2>&1 || true
+      rollback "$svc" "$before" || fail "$svc: rollback nao restores o servico"
     fi
     FAILED+=("$svc (restart failed)")
     overall=1
@@ -185,19 +278,12 @@ for svc in "${SERVICES[@]}"; do
   else
     fail "$svc: updated but verification FAILED -- rolling back"
     if [ "$ROLLBACK_ON_FAILURE" = "1" ] && [ -n "$before" ]; then
-      run_image=$(docker inspect --format '{{.Config.Image}}' "$svc" 2>/dev/null)
-      docker image tag "$before" "${run_image}:rollback" 2>/dev/null || true
-      # compose starts the tagged image it knows about; if it pulled the newer
-      # one, point the service back at the old id explicitly.
-      docker update --restart=no "$svc" >/dev/null 2>&1 || true
-      docker rm -f "$svc" >/dev/null 2>&1 || true
-      if docker image tag "$before" "$run_image"; then
-        docker compose -f "$COMPOSE_FILE" up -d --no-deps "$svc" >>"$LOG_FILE" 2>&1 || true
-      fi
-      if verify; then
-        fail "$svc: rolled back to $before and verified working again"
-      else
-        fail "$svc: ROLLBACK DID NOT RESTORE SERVICE. Needs a human now."
+      if rollback "$svc" "$before"; then
+        if verify "$svc"; then
+          fail "$svc: rolled back to $before and verified working again"
+        else
+          fail "$svc: ROLLBACK DID NOT RESTORE SERVICE. Needs a human now."
+        fi
       fi
     fi
     FAILED+=("$svc (verification failed)")

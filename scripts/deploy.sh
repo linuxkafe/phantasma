@@ -207,10 +207,49 @@ for d in "${SYNC_DIRS[@]}"; do
     # restart steps. --no-owner/--no-group keep it honest about what it can
     # actually do, so a permission problem fails loudly at the rsync call
     # instead of silently skipping the gates.
-    rsync -rlt --no-owner --no-group --no-times --delete "${RSYNC_EXC[@]}" "$DEV/$d/" "$PROD/$d/"
+    # `-p` as well as `-rlt`. Without it the destination file takes its mode from
+    # the umask of whoever runs the deploy, and the acceptance gate runs as
+    # `seyon` while the service runs as `phantasma`
+    # (`User=phantasma` in phantasma.service). A file synced 0600 therefore passes
+    # the prod suite, prints "deploy OK", and leaves the service unable to import
+    # it -- the same class of divergence this script exists to prevent for
+    # assistant.py and tools.py, reached by permission rather than by content.
+    #
+    # `--chmod` would do it without the umask indirection: the synced tree is
+    # readable by everyone, which is what a tree that both the deployer and the
+    # service read needs to be.
+    rsync -rltp --chmod=Du+rwx,Dgo+rx,Fu+rw,Fgo+r --no-owner --no-group --no-times --delete "${RSYNC_EXC[@]}" "$DEV/$d/" "$PROD/$d/"
   fi
   changed=1
 done
+
+# The service must be able to READ everything that was just synced. The suite
+# above proves the code runs as the deployer; this proves it runs as the service.
+# Found by the peer review: `scripts/` had joined the sync set with no `--perms`,
+# so nothing in the repository checked that the other user can read the result.
+SERVICE_USER="$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/phantasma.service 2>/dev/null || true)"
+if [ -n "$SERVICE_USER" ] && id "$SERVICE_USER" >/dev/null 2>&1; then
+  unreadable=0
+  for d in "${SYNC_DIRS[@]}" $PROD; do
+    [ -d "$PROD/$d" ] || continue
+    while IFS= read -r f; do
+      if ! sudo -u "$SERVICE_USER" test -r "$f" 2>/dev/null; then
+        echo "  unreadable by $SERVICE_USER: $f" >&2
+        unreadable=$((unreadable+1))
+      fi
+    # The parens matter: `-name a -o -name b` without them binds as
+    # `find PATH -name '*.py' -o (-name '*.sh')`, which still evaluates, but the
+    # parenthesised form is what a reader expects and is what `-print` belongs on.
+    done < <(find "$PROD/$d" \( -name '*.py' -o -name '*.sh' \) 2>/dev/null)
+  done
+  if [ $unreadable -gt 0 ]; then
+    echo "DEPLOY FAILED: $unreadable file(s) not readable by $SERVICE_USER" >&2
+    exit 1
+  fi
+  echo "  readability for $SERVICE_USER: ok"
+else
+  echo "  WARN: could not determine the service user; skipped the readability check"
+fi
 
 # Top-level files that are part of the product and must be deployed.
 for f in "${TOP_LEVEL_SYNC[@]}"; do
@@ -473,15 +512,35 @@ echo "verifying prod suite ($reason)..."
   # fix: files synced, "deploy OK", bot still silent, and `ActiveEnterTimestamp`
   # proving the service had not restarted.
   #
-  # Without `-n` the password prompt reaches the operator, who restarts the
-  # service and lets sudo's cache serve the runs the script does not need.
-  # PROMPT is the escape hatch for CI, where no human is present; it restores
-  # the old silent behaviour and says so.
+  # `sudo -n`, and this host does not need the prompt.
+  #
+  # A previous revision dropped the `-n` and told CLAUDE.md that without it the
+  # command "sai não-zero, o serviço não reinicia". That is a claim about this
+  # host, and sudoers refutes it:
+  #
+  #   sudo -n -l
+  #   (root) NOPASSWD: /usr/sbin/service phantasma start, ... restart, status
+  #
+  # So `sudo -n` would have succeeded, and the thing that actually cost the
+  # Discord bot a day was the missing MainPID assertion -- which this same commit
+  # added. Dropping `-n` fixed nothing and introduced a new hazard: without `-n`
+  # and without a timeout, a run with a TTY blocks on a password prompt
+  # indefinitely, and a run without a TTY aborts at this line, skipping the
+  # MainPID proof below.
+  #
+  # So: `-n`, always, and the MainPID assertion is what decides. If sudo is not
+  # available, the restart fails and the assertion catches it -- which is the
+  # whole point of the assertion, and it works either way.
+  #
+  # DEPLOY_SUDO=1 is kept as an explicit "I know the service is not mine to
+  # restart", for a host where an agent syncs files but a human restarts. It is
+  # documented in CLAUDE.md and it FAILS the deploy rather than skipping
+  # silently: a restart that cannot happen is a deploy that has not landed.
   if [ -n "${DEPLOY_SUDO:-}" ]; then
-    echo "  DEPLOY_SUDO set: using non-interactive sudo, restart may be skipped"
-    sudo -n service phantasma restart || echo "  WARN restart skipped (non-interactive)"
+    echo "  DEPLOY_SUDO set: not restarting; this deploy will FAIL the restart assertion"
+    echo "  (documented in CLAUDE.md. If you did not mean this, unset it.)"
   else
-    sudo service phantasma restart
+    sudo -n service phantasma restart || echo "  WARN: sudo could not restart; the assertion below decides"
   fi
   # PROVE the restart happened. Asking sudo to restart and then checking that
   # the process is healthy is not the same as checking the process is NEW: a
@@ -528,10 +587,16 @@ echo "verifying prod suite ($reason)..."
   _pid_after=$(systemctl show phantasma -p MainPID --value 2>/dev/null || true)
   _stamp_after=$(systemctl show phantasma -p ActiveEnterTimestamp --value 2>/dev/null || true)
   if [ -n "${DEPLOY_SUDO:-}" ]; then
-    # Non-interactive mode may legitimately skip the restart; say so loudly
-    # rather than claiming the running service has the new code.
-    echo "  WARN non-interactive mode: cannot prove the restart happened" >&2
-    echo "       MainPID $_pid_before -> $_pid_after" >&2
+    # This branch used to warn and fall through to "deploy OK". The files are on
+    # disk and the process is still the old one, so "deploy OK" there was exactly
+    # the lie this script was changed to stop telling -- and CLAUDE.md claims
+    # the proof is enforced. It is, everywhere except here.
+    echo >&2
+    echo "DEPLOY FAILED: DEPLOY_SUDO is set, so the service was not restarted." >&2
+    echo "  MainPID $_pid_before -> $_pid_after" >&2
+    echo "  The code is on disk in $PROD and the running process is still the old" >&2
+    echo "  one. Restart it yourself, or unset DEPLOY_SUDO and re-run." >&2
+    exit 1
   elif [ -n "$_pid_before" ] && [ "$_pid_before" = "$_pid_after" ]; then
     echo >&2
     echo "DEPLOY FAILED: the service was NOT restarted." >&2

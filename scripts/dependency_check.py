@@ -47,8 +47,21 @@ import time
 # A generation, not a ping. This is the whole point: the failure that motivated
 # this file passed every reachability check in the repository.
 PROBE_PROMPT = "di: ok"
-PROBE_TIMEOUT_S = 45.0
-CONNECT_TIMEOUT_S = 5.0
+# Read from the environment. It was hardcoded to 45.0 while `update_containers.sh`
+# exported `PROBE_TIMEOUT=180` and printed "up to 180s" in the log -- so the
+# operator's knob turned nothing and the log claimed a number the code did not
+# use. The mismatch is visible in production output:
+#
+#   FALHA fallback  http://localhost:11434  qwen3:8b
+#         ReadTimeout apos 45s
+#
+# next to a log line saying 180. A timeout that lies about itself is worse than
+# one that is short, because you stop reading the message.
+#
+# The default is still 45s: it is what surfaced the broken fallback in seconds
+# rather than minutes, and raising it is a deliberate act by whoever sets it.
+PROBE_TIMEOUT_S = float(os.getenv("PROBE_TIMEOUT", "45"))
+CONNECT_TIMEOUT_S = float(os.getenv("CONNECT_TIMEOUT", "5"))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -114,7 +127,18 @@ def check_llm(host: str, model: str, quick: bool) -> dict:
         client = ollama.Client(host=host, timeout=CONNECT_TIMEOUT_S)
         client.list()
     except Exception as exc:  # noqa: BLE001
-        res["detail"] = f"inalcançavel: {type(exc).__name__}"
+        # NOT "inalcançavel" for everything. An `AttributeError` here is this
+        # script being wrong about the SDK -- `ollama.list()` returns a
+        # `ListResponse`, not a dict -- and that reported itself as every host
+        # being unreachable, which is how a broken check cost an afternoon of
+        # looking at the network. A connection failure is a fact about the host;
+        # a TypeError/AttributeError is a fact about this file, and they must
+        # not print the same word.
+        kind = type(exc).__name__
+        if kind in ("TypeError", "AttributeError", "ImportError"):
+            res["detail"] = f"CHECK COM ERRO (nao e o host): {kind}: {exc}"[:120]
+        else:
+            res["detail"] = f"inalcançavel: {kind}"
         return res
     if quick:
         res["ok"] = True
@@ -148,7 +172,17 @@ def check_searxng(url: str) -> dict:
         sys.path.insert(0, ROOT)
         from tools import search_with_searxng  # noqa: PLC0415
 
-        out = search_with_searxng("teste de dependencias")
+        # `search_with_searxng` prints progress to stdout ("A pesquisar na web:
+        # ..."), which lands in the middle of the JSON document under `--json` and
+        # makes it unparseable. `json.load` on the monitor's side raised
+        # JSONDecodeError, so the machine-readable contract did not hold --
+        # and no test passed `--json`.
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = search_with_searxng("teste de dependencias")
         res["ok"] = bool(out and str(out).strip())
         res["detail"] = "respondeu com resultados" if res["ok"] else "vazio (pesquisa sem resultados)"
     except Exception as exc:  # noqa: BLE001
@@ -161,6 +195,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quick", action="store_true", help="connectivity only, no generation")
+    ap.add_argument(
+        "--only",
+        help="check one dependency: 'primary', 'fallback' or 'searxng'",
+    )
     args = ap.parse_args()
 
     try:
@@ -173,6 +211,13 @@ def main() -> int:
     if not targets:
         print("no LLM hosts configured", file=sys.stderr)
         return 2
+
+    if args.only and args.only not in ("primary", "fallback", "searxng"):
+        print(f"unknown --only {args.only!r}; use primary, fallback or searxng",
+              file=sys.stderr)
+        return 2
+    if args.only and args.only != "searxng":
+        targets = [(n, h, m) for n, h, m in targets if n == args.only]
 
     results = {
         "llm": [dict(name=n, **check_llm(h, m, args.quick)) for n, h, m in targets],
@@ -190,11 +235,18 @@ def main() -> int:
         or getattr(web, "searxng_url", None)
         or os.getenv("SEARXNG_URL")
     )
-    if url:
+    if url and (args.only in (None, "searxng")):
         results["searxng"] = check_searxng(url)
-    else:
-        # Not silent. A search dependency that cannot be located is a gap in the
-        # check, and the caller is told it is a gap rather than a pass.
+    elif args.only == "searxng" or args.only is None:
+        # Asked for it -- explicitly, or because nothing narrowed the scope -- and
+        # it could not be found. A search dependency whose config is missing is a
+        # gap in the check, and reported as a gap rather than as a pass.
+        #
+        # `or args.only is None` was missing at first, so a plain run with no
+        # SEARXNG_URL produced `searxng: None`, `failures` ignored it, and the
+        # script printed "todas as dependencias respondem" while never having
+        # looked. Silent success on a check that did not run is the failure mode
+        # this file exists to remove.
         results["searxng"] = {
             "url": None, "ok": False,
             "detail": "SEARXNG_URL nao encontrado na config",

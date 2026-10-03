@@ -50,6 +50,24 @@ note() { printf '%s\n' "$*" >>"$LOG"; }
 
 mkdir -p "$ROOT/data"
 
+# A run that dies before its verdict -- no venv, a missing compose file, a killed
+# shell -- left yesterday's `ok` sitting in the status file with no new log line,
+# because crontab sends everything to /dev/null. So the status is written on EVERY
+# exit, including the ones nobody planned for.
+# `_verdict_written`, not a file comparison. The first version used
+# `[ "$STATUS" -ot "$LOG" ]`, and mtime has one-second granularity: two runs in
+# the same second compared equal, the trap stayed silent, and the second run left
+# the first run's status in place. An abort marker that does not appear on the
+# second abort is worse than none, because it looks like it works.
+_verdict_written=0
+_write_abort_status() {
+  local code=$?
+  [ "$_verdict_written" = "1" ] && return 0
+  printf 'NIGHTLY UPDATE ABORTED (exit %s)\nwhen: %s\n' "$code" "$(date -Is)" >"$STATUS"
+  say "ABORTED with exit $code -- wrote $STATUS"
+}
+trap _write_abort_status EXIT
+
 # Keep the log from growing without bound. Ten runs is three months of nights,
 # which is long enough to see a pattern and short enough to read.
 find "$LOG" -mtime +90 -delete 2>/dev/null || true
@@ -105,7 +123,22 @@ echo "$AFTER" >>"$LOG"
 #    admin page shows. Silence is fine for the normal path; it is not fine for
 #    the path where the house is broken and nobody was told.
 # --------------------------------------------------------------------------
-if [ $post_rc -ne 0 ] && [ $PRE_BROKEN -eq 0 ]; then
+# `post_rc` alone is not the verdict. It reads `post_rc` and nothing else, so a
+# run where every image failed to update and every model failed to verify still
+# wrote "NIGHTLY UPDATE: ok" as long as the dependencies answered afterwards --
+# and they answer afterwards precisely because nothing was changed. `img_rc` and
+# `mod_rc` were captured and never consulted outside the failure branch.
+if [ $post_rc -eq 0 ] && [ $img_rc -ne 0 ] && [ $mod_rc -ne 0 ]; then
+  {
+    echo "NIGHTLY UPDATE DID NOTHING"
+    echo "when: $(date -Is)"
+    echo "images exit: $img_rc   models exit: $mod_rc"
+    echo "Every step failed and nothing changed. The dependencies below are"
+    echo "healthy because they were never touched, not because the update worked."
+  } >"$STATUS"
+  _verdict_written=1
+  say "RESULT: nothing was updated (images=$img_rc models=$mod_rc) -- wrote $STATUS"
+elif [ $post_rc -ne 0 ] && [ $PRE_BROKEN -eq 0 ]; then
   {
     echo "NIGHTLY UPDATE LEFT SOMETHING BROKEN"
     echo "when: $(date -Is)"
@@ -113,11 +146,23 @@ if [ $post_rc -ne 0 ] && [ $PRE_BROKEN -eq 0 ]; then
     echo
     echo "$AFTER"
   } >"$STATUS"
+  _verdict_written=1
   say "RESULT: BROKEN AFTER AN UPDATE THAT STARTED HEALTHY -- wrote $STATUS"
 elif [ $post_rc -ne 0 ]; then
+  _verdict_written=1
   say "RESULT: still broken, but it was already broken before the run"
   printf 'NIGHTLY UPDATE: dependency broken (pre-existing)\nwhen: %s\n' "$(date -Is)" >"$STATUS"
+elif [ $img_rc -ne 0 ] || [ $mod_rc -ne 0 ]; then
+  {
+    echo "NIGHTLY UPDATE PARTLY FAILED"
+    echo "when: $(date -Is)"
+    echo "images exit: $img_rc   models exit: $mod_rc"
+    echo "Dependencies answer, but a step failed and its rollback may not have run."
+  } >"$STATUS"
+  _verdict_written=1
+  say "RESULT: partial failure (images=$img_rc models=$mod_rc) -- wrote $STATUS"
 else
+  _verdict_written=1
   say "RESULT: all dependencies healthy"
   printf 'NIGHTLY UPDATE: ok\nwhen: %s\n' "$(date -Is)" >"$STATUS"
 fi

@@ -205,14 +205,26 @@ conflict count.
 ## Reiniciar o serviço (sudo)
 
 ```
-sudo service phantasma restart
+sudo -n service phantasma restart
 ```
 
-**Sem `-n`.** Com `sudo -n` o prompt nunca aparece: se o utilizador não tiver
-sudo sem password, o comando sai não-zero, o serviço **não** reinicia, e nada
-diz que não reiniciou. Foi assim que o fix do `self` (bot Discord mudo, `c642d9b`)
-ficou em `/opt/phantasma` com "deploy OK" e o serviço a correr o código de antes
-— `ActiveEnterTimestamp` 22:51, uptime 1h, bot mudo o resto do dia.
+**Com `-n`, e `-n` funciona nesta máquina.** O sudoers tem `NOPASSWD` para
+`/usr/sbin/service phantasma start|stop|restart|status`.
+
+Uma revisão descreveu o `-n` como a causa do bot Discord mudo de 2026-10-02
+("se o utilizador não tiver sudo sem password, o comando sai não-zero"). Isso é
+uma afirmação sobre este host, e o sudoers refuta-a. A causa real era a ausência
+da asserção do `MainPID` — um serviço velho e saudável responde 200 ao
+`/api/health` a correr o código de ontem, e o script imprimia "deploy OK" por
+cima. O `-n` nunca esteve em causa.
+
+Tirar o `-n` não corrigiu nada e criou um perigo novo: sem prompt e sem
+`timeout`, uma corrida com TTY bloqueia à espera da palavra passe
+indefinidamente.
+
+```
+sudo -n service phantasma restart
+```
 
 Verificar que reiniciou mesmo:
 
@@ -221,5 +233,10 @@ systemctl show phantasma -p MainPID -p ActiveEnterTimestamp
 ```
 
 Um `MainPID` igual ao de antes significa que não reiniciou, por saudável que o
-`/api/health` responda. `deploy.sh` passou a exigir esta prova (falhando com
-`DEPLOY FAILED: the service was NOT restarted`) em `e63cd18`.
+`/api/health` responda. `deploy.sh` exige esta prova desde `e63cd18` e falha com
+`DEPLOY FAILED: the service was NOT restarted`.
+
+`DEPLOY_SUDO=1` existe para um host onde um agente sincroniza ficheiros mas uma
+pessoa reinicia. **Falha o deploy** em vez de saltar o restart em silêncio — um
+restart que não pode acontecer é um deploy que não aterrou. Ver CLAUDE.md acima
+para o porquê.
