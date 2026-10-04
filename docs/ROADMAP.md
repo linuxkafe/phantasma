@@ -1238,14 +1238,23 @@ cada variante *contém* o substantivo. Não contém — `ventoinha` não contém
 `exaustor` — e nunca contém. Passou a afirmar a propriedade que importa, que é
 que o dono chega ao dispositivo.
 
-## Um comando de dispositivo não é uma pergunta para a web
+## A terceira linha do log não era um defeito
 
-A terceira linha do log é a mais grave das três: a casa **pesquisou na internet**
-«Liga o exaustório». Isto não está corrigido. Um comando que nenhuma skill
-reconhece cai no modelo, e o modelo procura. Qualquer frase imperativa que falhe
-o reconhecimento tem este destino. Corrigi-o no ROADMAP como pendente em vez de
-o dar por resolvido: é uma decisão de desenho (que frases são comando, e o que
-fazer com elas quando não há skill) e não é minha para escolher.
+Escrevi aqui que a casa pesquisou «Liga o exaustório» na web e que isso ficava
+por corrigir. **Estava errado, e o dono corrigiu-me**: quando nenhuma skill
+apanha a frase, cair no modelo é o desenho. O modelo procura na web antes de
+responder, como responde qualquer coisa. Não há nada a corrigir.
+
+Vale a pena registar porque é o modo de este erro se produzir pela segunda vez:
+o comportamento de reserva **funcionou**, e eu li-o como a falha. A falha estava
+uma camada acima — a skill devia ter apanhado «liga o exaustório» e não apanhou,
+por causa do acento. Um teste que passa porque o modelo compensou uma skill que
+devia ter entrado é a forma mais cara de não ver o que está partido.
+
+Observação, não recomendação: uma frase que é comando mas não é reconhecida paga
+a pesquisa e os 42-65 s do modelo para uma resposta que não era a pretendida.
+Se algum dia isso incomodar, o sítio é a reconnaissance — não o de reserva, que
+está certo.
 
 ---
 
