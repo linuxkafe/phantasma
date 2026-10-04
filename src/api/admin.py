@@ -1076,6 +1076,28 @@ CONFIG_CONTROLS: dict[str, dict] = {
                                 help="Usado para a maioria das tarefas."),
     "OLLAMA_MODEL_FALLBACK": dict(category="LLM", type="text", label="Modelo secundário"),
     "OLLAMA_VISION_MODEL": dict(category="LLM", type="text", label="Modelo de visão"),
+    # Temperature for conversation, adjustable here. 0.6 measured on 2026-10-03
+    # as the point where the persona's cadence survives: below it the answers go
+    # flat and "o que achas do Edgar Allan Poe" came back as a third-person
+    # literary review. The slider stops at 1.0 because above it an 8B stops being
+    # the house and starts being a different writer on every message.
+    "LLM_TEMPERATURE_CONVERSATION": dict(
+        category="LLM", type="number", min=0, max=1, step=0.05,
+        label="Temperatura da conversa",
+        help=("Quanto o Phantasma varia de resposta. Mais alto: mais vivo e "
+              "imprevisível. Mais baixo: mais contido e repetível. Vale já na "
+              "próxima mensagem.")),
+    # The factual temperature is deliberately NOT a slider. It is 0.15 from a
+    # measurement, not a preference: at 0.6 an 8B embellishes a fact instead of
+    # reporting it, and asked what the Capuchinho Verde is, with "a pastelaria
+    # vegan" in the context, it answered at length about a residential security
+    # module. It is listed so the page can explain the absence rather than leave
+    # the owner wondering, and marked readonly so the form cannot post it.
+    "LLM_TEMPERATURE_FACTUAL": dict(
+        category="LLM", type="text", label="Temperatura dos factos",
+        help=("Fixo a 0.15, medido: a 0.6 o modelo enfeita factos em vez de os "
+              "relatar. Não é ajustável de propósito."),
+        readonly=True),
     "OLLAMA_CONTEXT_SIZE": dict(category="LLM", type="number", min=512, max=65536, step=512,
                                 label="Contexto (tokens)"),
     "OLLAMA_THREADS": dict(category="LLM", type="number", min=1, max=16, step=1,
@@ -1488,7 +1510,8 @@ CONFIG_TEMPLATE = (
         Persona e reacções</h2>
       <p style="color: var(--muted); font-size: .875rem; margin-bottom: 1.25rem;">
         Como o Phantasma fala, e quanto cada reacção o reforça. Vale no chat e
-        no Discord, e aplica-se à próxima mensagem sem reiniciar.
+        no Discord, e <strong>aplica-se à próxima mensagem, sem reiniciar</strong>
+        — ao contrário do resto desta página.
       </p>
       <label for="persona" style="font-weight: 600; font-size: .875rem;">Persona</label>
       <textarea name="persona" id="persona" rows="16"
@@ -1496,6 +1519,7 @@ CONFIG_TEMPLATE = (
       <p style="margin-top: 1rem; display: flex; gap: .75rem; flex-wrap: wrap;">
         <button type="submit" name="action" value="save_persona">Guardar persona</button>
         <button type="submit" name="action" value="reset_persona">Voltar ao original</button>
+        <a href="/admin/persona" style="margin-left: .5rem;">Abrir a página só de reacções</a>
       </p>
       <p style="color: var(--muted); font-size: .8rem;">
         {% if persona_overridden %}Personalizada.{% else %}Estás a usar o original.{% endif %}
@@ -3494,6 +3518,11 @@ def config_manager():
             flash("Acesso de convidados guardado. Vale a partir da proxima mensagem.")
             return redirect(url_for("admin.config_manager"))
         for key, meta in CONFIG_CONTROLS.items():
+            # Listed for explanation only. It has no slider because there is
+            # deliberately no slider, and letting the form post it would let the
+            # page overwrite the value it just told the owner it does not allow.
+            if meta.get("readonly"):
+                continue
             field = f"config_{key}"
             if meta["type"] == "bool":
                 value = "true" if field in request.form else "false"

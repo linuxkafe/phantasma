@@ -254,6 +254,15 @@ _OVERLAY_KEYS = frozenset(
         "OLLAMA_MODEL_PRIMARY",
         "OLLAMA_MODEL_FALLBACK",
         "OLLAMA_VISION_MODEL",
+        # Temperature, 2026-10-04. The factual one is whitelisted although it has
+        # no slider: the save loop skips readonly keys so no row exists, and the
+        # whitelist only permits a row that does. Excluding it would break the
+        # equality with CONFIG_CONTROLS that
+        # tests/test_admin_config_ui.py::TestOverlay asserts, and the exclusion
+        # would buy nothing -- which is the wrong trade in either direction, so
+        # both keys go in together.
+        "LLM_TEMPERATURE_CONVERSATION",
+        "LLM_TEMPERATURE_FACTUAL",
         "OLLAMA_CONTEXT_SIZE",
         "OLLAMA_THREADS",
         "OLLAMA_TIMEOUT",

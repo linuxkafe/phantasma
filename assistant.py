@@ -1215,7 +1215,11 @@ class PhantasmaPipeline:
         grounded = bool((rag or "").strip() or (graph_ctx or "").strip())
         factual = self._is_factual_lookup(text)
         opinion = self._is_opinion(text)
-        temperature = 0.15 if ((factual or grounded) and not opinion) else 0.6
+        from src.brain.model_config import temperature as resolve_temperature
+
+        temperature = resolve_temperature(
+            factual=factual or (grounded and not opinion)
+        )
         logger.info(
             f"LLM temperature {temperature} (factual={factual}, "
             f"opinion={opinion}, grounded={grounded}, rag={len(rag or '')}, "

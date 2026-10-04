@@ -795,3 +795,47 @@ a página é como as duas se separam outra vez, e isso só o dono resolve.
 **Verificado em produção:** tabela `config` mostra `gemma3:4b`, o valor efectivo
 resolve para `gemma3:4b`, gravar pela página muda o valor resolvido
 (`env` → `settings`), e repor repõe. `MainPID 736861 → 1411965`.
+
+---
+
+## 2026-10-04 — Persona e temperatura na página de configuração
+
+Duas coisas do dono:
+
+1. *"o admin/config agora não tem a edição de persona e devia ter"*
+2. *"deve ter também a gestão da temperatura do modelo com um slider"*
+
+**Correcção ao que eu disse antes, e é minha.** Afirmei duas vezes que não
+existia boot overlay. Existe: `config.py:269`, `_overlay_owner_settings`, chamado
+em `config.py:528`. A página **não** era um espelho morto para os modelos —
+escrevia na store, o overlay aplicava-a ao `os.environ` antes de o `Config` ser
+construído, e o `config.py` lia-a. A minha busca por `putenv` e `os.environ[...]`
+não encontrou nada porque procurei o **consumidor** (`assistant.py`) e não o
+**produtor** (`_overlay_owner_settings`).
+
+O que era verdade e continua a ser: a `config.db` mostrava `llava:7b`, um modelo
+removido; e o `assistant.py` lia `config.OLLAMA_MODEL_*`, o que exigia reinício
+para uma mudança pela página.
+
+**A persona nunca faltou.** Havia uma secção "Persona e reacções" no fim do
+`CONFIG_TEMPLATE`, com `save_persona`, `reset_persona` e o aviso de personalizada.
+Procurei primeiro no template de `/admin/persona`, o que fez "vive noutro sítio"
+parecer resposta, e a segunda busca por `name="persona"` encontrou o `textarea` da
+outra página antes do que eu queria. Acabei por **duplicar** a secção, e o teste
+que escrevi afirmava um bug que não existia — corrigido, e o teste passa a fixar
+o que é útil (que há um editor completo e que as duas rotas gravam no mesmo sítio).
+
+**A secção ficou mais honesta:** diz que aplica-se à próxima mensagem sem
+reiniciar, ao contrário do resto da página, que precisa de arranque. A voz estava
+entre valores pendentes de reinício sem nenhum sinal de que era a excepção — e é
+o ajuste que mais se muda.
+
+**Temperatura: um slider, não dois.** O de conversa (0 a 1, passo 0.05, default
+0.6 medido) é do dono. O dos factos aparece mas é `readonly` e o loop de gravação
+salta-o. A 0.6 um 8B enfeita factos em vez de os relatar: perguntado o que é o
+Capuchinho Verde, com "a pastelaria vegan" no contexto, respondeu durante
+páginas sobre um módulo de segurança residencial. Deixá-lo num slider seria
+reintroduzir isso sem querer.
+
+Verificado em produção: slider `0.6 → 0.25` pela página, conversa a `0.25`, factos
+a `0.15`, e repor volta a `0.6`. `MainPID 1411965 → 1822882`.

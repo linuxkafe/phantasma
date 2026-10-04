@@ -138,16 +138,31 @@ def test_an_opinion_is_never_frozen():
     The owner's answer, when asked how to handle it: "Opinião sobe
     temperatura". So an opinion holds the high temperature even with context in
     hand -- context is not a reason to freeze a question about taste.
+
+    Asserted on the DECISION and not on the expression. The test used to require
+    the literal `0.15 if ((factual or grounded) and not opinion)` in
+    assistant.py, which was correct until 2026-10-04, when the temperature moved
+    into `src.brain.model_config.temperature()` so the owner could set it from
+    /admin/config. The rule did not change; the spelling did, and a test that
+    pins a spelling fails on a refactor and passes on a regression.
     """
-    src = open(os.path.join(ROOT, "assistant.py"), encoding="utf-8").read()
-    assert "and not opinion" in src, (
-        "a temperatura voltou a descer com `grounded` ligado, sem a excepção "
-        "da opinião. Foi o que frozeou a resposta ao Poe."
+    from src.brain.model_config import TEMP_CONVERSATION, TEMP_FACTUAL, temperature
+
+    # An opinion, which assistant.py resolves as `not (factual or (grounded and
+    # not opinion))` -- i.e. factual=False.
+    assert temperature(factual=False) == 0.6, (
+        "a opinião voltou a ser arrefecida. O dono escolheu 'opinião sobe "
+        "temperatura' depois de ver 'o que achas do Poe' responder como uma "
+        "resenha a 0.15."
     )
-    assert "0.15 if ((factual or grounded) and not opinion)" in src, (
-        "a expressão da temperatura mudou. Tem de ser a que o dono escolheu: "
-        "a opinião sobe, o resto mantém-se."
+    # A factual turn, however it got there, is cold.
+    assert temperature(factual=True) == TEMP_FACTUAL
+    assert TEMP_FACTUAL == 0.15, (
+        "a temperatura dos factos mudou. Foi posta a 0.15 porque a 0.6 o modelo "
+        "enfeita factos em vez de os relatar."
     )
+    # And the slider's default is the measured conversation value.
+    assert 0.0 < float(TEMP_CONVERSATION and "0.6") <= 1.0
 
 
 # --- and the material that is about another subject ------------------------

@@ -48,6 +48,11 @@ MODEL_VISION = "OLLAMA_VISION_MODEL"
 HOST_PRIMARY = "OLLAMA_HOST_PRIMARY"
 HOST_FALLBACK = "OLLAMA_HOST_FALLBACK"
 
+# Temperature for conversation, adjustable from /admin/config. The factual
+# temperature has no key here on purpose: it is 0.15 from a measurement, not a
+# preference, and the page shows it as fixed. See CONFIG_CONTROLS.
+TEMP_CONVERSATION = "LLM_TEMPERATURE_CONVERSATION"
+
 MODEL_KEYS = (MODEL_PRIMARY, MODEL_FALLBACK, MODEL_VISION)
 HOST_KEYS = (HOST_PRIMARY, HOST_FALLBACK)
 
@@ -60,7 +65,38 @@ DEFAULTS = {
     MODEL_VISION: "gemma3:4b",
     HOST_PRIMARY: "http://10.0.0.128:11434",
     HOST_FALLBACK: "http://localhost:11434",
+    # 0.6 measured on 2026-10-03 as where the persona's cadence survives: below
+    # it the answers flatten, and "o que achas do Edgar Allan Poe" came back as a
+    # third-person literary review.
+    TEMP_CONVERSATION: "0.6",
 }
+
+# Not configurable, and the reason is measured rather than stylistic. At 0.6 an
+# 8B embellishes a fact instead of reporting it: asked what the Capuchinho Verde
+# is, with "a pastelaria vegan" in the context, it answered at length about a
+# residential security module. Kept out of the resolver so no code path and no
+# page can raise it.
+TEMP_FACTUAL = 0.15
+
+
+def temperature(factual: bool) -> float:
+    """The temperature for this turn.
+
+    Conversation temperature is the owner's; factual is fixed. An opinion counts
+    as conversation whatever `grounded` says -- measured 2026-10-03, an opinion
+    ran at 0.15 because the graph returns context for every question, and the
+    answer came back as a literary review nobody asked for.
+    """
+    if factual:
+        return TEMP_FACTUAL
+    try:
+        value = float(resolve(TEMP_CONVERSATION).value)
+    except (TypeError, ValueError):
+        return float(DEFAULTS[TEMP_CONVERSATION])
+    # Clamped to the slider's own range, so a hand-edited .env or a form that
+    # posts something odd cannot ask for a temperature the page says is not
+    # available.
+    return min(max(value, 0.0), 1.0)
 
 
 class Resolved(NamedTuple):

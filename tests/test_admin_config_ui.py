@@ -160,6 +160,25 @@ class TestOverlay:
 
         assert cfg_mod._OVERLAY_KEYS == set(admin_mod.CONFIG_CONTROLS)
 
+    def test_a_readonly_control_still_reaches_the_overlay(self):
+        """The factual temperature is listed but has no slider.
+
+        It is in CONFIG_CONTROLS so the page can explain its absence, and
+        _OVERLAY_KEYS must stay equal to CONFIG_CONTROLS -- so it is whitelisted
+        for the overlay too. That is harmless: the save loop skips readonly keys,
+        so no row is ever written, and the whitelist only permits a row that
+        exists.
+
+        Worth pinning because the two sets are compared for EQUALITY. The day
+        someone excludes the readonly key from the overlay to "keep the lists
+        tidy", this fails -- which is the moment to find out that the exclusion
+        would have broken the invariant the equality exists to protect.
+        """
+        import config as cfg_mod
+
+        assert "LLM_TEMPERATURE_FACTUAL" in cfg_mod._OVERLAY_KEYS
+        assert "LLM_TEMPERATURE_CONVERSATION" in cfg_mod._OVERLAY_KEYS
+
     def test_overlay_pushes_only_whitelisted_settings(self, tmp_path, monkeypatch):
         import config as cfg_mod
 
