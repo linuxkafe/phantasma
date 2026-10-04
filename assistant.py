@@ -764,6 +764,67 @@ class PhantasmaPipeline:
             )
         )
 
+    @staticmethod
+    def _strip_accents(text: str) -> str:
+        """Lowercased and without diacritics, so "vês" and "ves" match alike."""
+        return "".join(
+            c
+            for c in unicodedata.normalize("NFD", text)
+            if unicodedata.category(c) != "Mn"
+        )
+
+    # The same list _is_opinion matches on, kept in one place because the search
+    # subject and the routing decision have to agree: if the router treats a
+    # phrase as an opinion and the search does not strip it, the engine looks up
+    # the wrapper. That is not hypothetical, it is what SearxNG returned on the
+    # first live run.
+    OPINION_MARKERS = (
+        "o que achas", "o que pensas", "qual achas", "que achas", "como ves",
+        "como vês", "o que te parece", "o que lhe parece", "gostas de",
+        "gostas do", "gostas da", "gosto de", "gosto do", "concordas",
+        "a tua opiniao", "na tua opiniao", "a tua visao", "o que sentes",
+    )
+
+    # Only these can be a PREFIX, so only these can be stripped off a query
+    # without cutting into the subject. "gostas de" cannot: "gostas de-listedas"
+    # is not a thing, but a bare "gostas do" with nothing after it would leave an
+    # empty query, so it is handled by the fallback in _search_subject.
+    OPINION_PREFIXES = (
+        "o que achas", "o que pensas", "qual achas", "que achas", "como ves",
+        "como vês", "o que te parece", "o que lhe parece", "o que sentes",
+        "concordas", "a tua opiniao", "na tua opiniao", "a tua visao",
+    )
+
+    @classmethod
+    def _search_subject(cls, text: str) -> str:
+        """The part of the question worth looking up.
+
+        Strips the opinion framing so the engine gets "como está o tempo em
+        Lisboa" instead of "o que achas de como está o tempo em Lisboa". Only
+        applied when there is something left to search; if stripping would empty
+        the query, the original text is searched unchanged, because a bare "o
+        que achas" is still a question about the house and something is better
+        than an empty query.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return raw
+        low = cls._strip_accents(raw).lower()
+        for prefix in cls.OPINION_PREFIXES:
+            if low.startswith(prefix):
+                rest = raw[len(prefix):].strip()
+                # "o que achas DE X" and "concordas COM X": the preposition is
+                # part of the wrapper, and leaving it in makes the engine search
+                # for "com isso".
+                for lead in ("de ", "do ", "da ", "dos ", "das ", "com ",
+                             "about "):
+                    if cls._strip_accents(rest).lower().startswith(lead):
+                        rest = rest[len(lead):].strip()
+                        break
+                if rest:
+                    return rest
+        return raw
+
     @classmethod
     def _is_opinion(cls, text: str) -> bool:
         """A question about taste, not about a fact.
@@ -781,37 +842,10 @@ class PhantasmaPipeline:
         Matched on substring, not prefix: "e o que achas do X" and "concordas
         com ele" are the same request as "o que achas".
         """
-        t = (text or "").strip().lower()
+        t = cls._strip_accents((text or "").strip().lower())
         if not t:
             return False
-        t = "".join(
-            c
-            for c in unicodedata.normalize("NFD", t)
-            if unicodedata.category(c) != "Mn"
-        )
-        return any(
-            marker in t
-            for marker in (
-                "o que achas",
-                "o que pensas",
-                "qual achas",
-                "que achas",
-                "como ves",
-                "como vês",
-                "o que te parece",
-                "o que lhe parece",
-                "gostas de",
-                "gostas do",
-                "gostas da",
-                "gosto de",
-                "gosto do",
-                "concordas",
-                "a tua opiniao",
-                "na tua opiniao",
-                "a tua visao",
-                "o que sentes",
-            )
-        )
+        return any(marker in t for marker in cls.OPINION_MARKERS)
 
     @staticmethod
     def _render_memory(raw: str) -> str:
@@ -1081,7 +1115,16 @@ class PhantasmaPipeline:
         # result is digested with the persona and the local knowledge, and what
         # comes out is an answer. Measured 2026-10-03, asked "Olá":
         # rag=0, graph=80, web=517 -- and the answer was Infopédia's definition.
-        web = sanitize_llm_context(search_with_searxng(text))
+        # Search the SUBJECT, not the opinion wrapper.
+        #
+        # Measured 2026-10-04 in production, on the first live run of the reading
+        # route: "o que achas de como está o tempo em Lisboa?" went to SearxNG
+        # whole, and came back with a Spanish thread about the phrase "tal y
+        # como está" and Infopédia's dictionary entry for the word "achas". The
+        # engine searched for the wrapper because the wrapper was in the query.
+        # The reading already answers the question; the web is there for what the
+        # sensors cannot know.
+        web = sanitize_llm_context(search_with_searxng(self._search_subject(text)))
         logger.debug(f"Web context length: {len(web)}")
         # Say so when the search found nothing. Measured 2026-09-28: from this
         # host every engine refuses us (duckduckgo CAPTCHA, brave/startpage
@@ -1121,6 +1164,13 @@ class PhantasmaPipeline:
                 "voz. Não digas que consultaste um sensor, um serviço ou uma "
                 "fonte, e não recites a leitura como uma linha de dados: "
                 "responde ao que te perguntaram sobre ela.\n"
+                "Os números da leitura são o que a casa mediu: se trouxer "
+                "uma temperatura, um índice, uma potência ou uma contagem, cita "
+                "esse valor na resposta, por extenso ou em algarismos. Não o "
+                "substituas por 'frio', 'baixo', 'alto' ou 'muitos' -- quem "
+                "perguntou quer o número, e paraphrasear é responder a outra "
+                "pergunta. Se o valor não couber na frase, põe a leitura no fim, "
+                "com as cifras.\n"
                 f"{skill_data}\n"
             )
         if local:

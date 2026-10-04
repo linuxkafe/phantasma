@@ -149,7 +149,7 @@
   A alegação original de "idênticos antes e depois" foi **retirada**: `/opt/phantasma`
   não tem commits e o `config.py` pré-refactor não é recuperável, portanto a
   metade "antes" era NÃO-VERIFICÁVEL e dependia apenas da palavra do autor.
-  Isto é uma lacuna real de proveniência, não um，示意 de que houve regressão:
+  Isto é uma lacuna real de proveniência, não um sinal de que houve regressão:
   o `block_size=512` de prod é um valor que já vinha do dataclass *antes* do
   refactor e que o `validate.sh` fixa agora como invariante verificada.
 - **Achado do peer review (BLOCKER, corrigido)**: mover o valor para o `.env`
@@ -903,3 +903,130 @@ a `.env` pede não estiver instalado, nos três papéis (primário, secundário 
 visão). É a diferença entre o `.env` estar errado e isso ser descoberto numa
 conversa. O que **não** verifica é se os caminhos de áudio e aos `.onnx`
 existem — continuam a ser responsabilidade de quem monta a máquina.
+
+---
+
+## 2026-10-04 — `qwen3:8b` volta, e a casa passa a ver com um modelo e a falar com outro
+
+Esta entrada **contradiz** a de 2026-10-03 e explica porquê. A de 3 de Outubro
+ficou no arquivo como registo do que se pensava na altura; não a apagar.
+
+### O bake-off de 3 de.Outubro mediu a pergunta errada
+
+Classificou `gemma3:4b` como 100.0 e `qwen2.5:7b` como 36.0 em seis prompts
+genéricos. Nenhum deles era uma **opinião sobre uma leitura viva**. A casa
+pergunta "o que achas de como está o tempo?", e aí o que interessa não é
+desembaraço — é se a pessoa consegue escrever como o dono escreve.
+
+### A medição que mudou a decisão
+
+Mesmo caminho real (`_respond_with_llm_body` com `skill_data`), mesma leitura
+(`entre 7 e 15 graus`, ar boa, UV 2.85), contra a resposta de referência do dono
+de 3 de Outubro, que tem ~90 palavras, é português europeu e **cita as
+cifras**:
+
+| | palavras | tempo | registo |
+|---|---|---|---|
+| `qwen3:8b` | **103** | 49.4s | o registo pedido |
+| `gemma3:4b` | 57 | 13.3s | mais sóbrio |
+
+O gemma chega lá com mais temperatura? **Não.** E o motivo é o que vale a pena
+registar — a temperatura não compra o registo poético, compra-o **a custo dos
+dados**:
+
+| temp | 7 e 15 e UV | nota |
+|---|---|---|
+| 0.6 | preservados | melhor ponto da curva |
+| 0.75 | preservados | mesma imagens, mais ruído |
+| 0.9 | **"os setenta e quinze graus"** | a leitura dizia 7 a 15 |
+| 1.0 | **"quinze castanhos"** | sem sentido |
+| 1.15 | perdidos | |
+
+Aos 0.9 a casa responde que está a trinta e cinco graus, com fluência e em
+português europeu. É o pior defeito possível numa casa que fala com sensores: não
+se nota.
+
+**Decisão do dono:** `qwen3:8b` responde; `gemma3:4b` vê. `qwen3:8b` não tem
+pesos de visão, portanto a divisão não é uma preferência, é uma capacidade.
+
+### O que o qwen faz de pior, medido e não suposto
+
+Está em `config.py` ao lado do default e nos testes, para não se perder:
+
+1. **Português brasileiro.** Reproduzido duas vezes, em execução real: perguntado
+   sobre Poe, escreveu *"Sua obra não desenha apenas histórias"* e *"Em suas
+   páginas"*. A persona exige português europeu.
+2. **Parafraseia a leitura.** Dada a leitura, respondeu *"o tempo hesita entre
+   frio e calor, sem decidir"* — sem uma única cifra.
+3. **Corrige factos.** "18 km/h" saiu "dezesseis quilômetros". Nenhuma regra de
+   prompt impede isto.
+4. **Degenera.** "obrigado" entrou uma vez num laço de repetição de 271 palavras
+   (*"E... E... E..."*); outra respondeu que a gratidão não era necessária. Nenhum
+   dos dois se reproduziu no caminho da leitura.
+
+### A regra dos números, e o que ela não resolve
+
+Acrescentada ao prompt: se a leitura trouxer uma temperatura, um índice, uma
+potência ou uma contagem, **cita esse valor**, e não o substitui por "frio",
+"baixo" ou "alto".
+
+| leitura | sem regra | com regra |
+|---|---|---|
+| tempo, 7/15/2.85 | **0/3** | **3/3** |
+| consumo, 8.7/3.42/9.1 | — | **3/3** |
+| ar, 12 e 6.1 | — | **2/2** |
+| total | — | **13/17** |
+
+Dos 4 "perdidos": dois são **seleção** (perguntou-se a temperatura, ele cita a
+temperatura e não a humidade), um é o detector que não reconhecia "três euros e
+quarenta e dois cêntimos" como 3.42, e **um é o modelo a mentir** (18 → 16).
+Lido à mão, **16/17**. A regra resolve a parafrase; não resolve a amostragem.
+
+### O detector errou duas vezes antes de acertar
+
+Dois detectores consecutivos deram **14%** e **57%** para o mesmo tipo de
+resposta. Ambos estavam errados: o modelo escreve "vinte e um ponto quatro" e
+"6,1" na mesma frase, e os detectores só procuravam algarismos. Um instrumento
+que accuse o modelo de ser infiel quando o instrumento é infiel é pior do que
+nenhum. O detector está agora em `tests/fidelity_probe.py` com 23 testes que
+fixam os casos que o fazem falhar — incluindo os que **não** são perda.
+
+### Latência
+
+Mediana de 41.8s, máximo de 51.2s por resposta de opinião. É o preço do registo,
+e é o dobro do `gemma3:4b`. Fica registado porque numa casa que se fala por
+vídeo este número aparece como "a casa está a pensar".
+
+### O que muda onde
+
+| | antes | agora |
+|---|---|---|
+| `OLLAMA_MODEL_PRIMARY` / `_FALLBACK` | `gemma3:4b` | `qwen3:8b` |
+| `OLLAMA_VISION_MODEL` | `gemma3:4b` | `gemma3:4b` (inalterado, e agora **por motivo**) |
+| defaults em `config.py` | `gemma3:4b` nos três | `qwen3:8b` texto, `gemma3:4b` visão |
+
+A `.env` de prod foi mudada à mão e o `.env` de dev deixou de estar desatualizado,
+o que obrigou a testes que afirmavam `llama3.1:8b` a lerem o valor certo.
+
+### Duas coisas que só apareceram em produção
+
+**O SearxNG recebia a pergunta inteira.** Na primeira execução real do caminho,
+`"o que achas de como está o tempo em Lisboa?"` foi pesquisado como um todo e
+devolveu uma thread espanhola sobre a expressão *"tal y como está"* e a entrada
+do dicionário Infopédia para a palavra *"achas"*. O motor procurou o
+enquadramento porque o enquadramento estava na consulta. Agora pesquisa-se o
+assunto: `"como está o tempo em Lisboa?"`, e o contexto devolvido passa a ser
+sobre Lisboa.
+
+Isto não era visível nos testes, e areasonão é instructive: **falsificar a
+correcção deixou o ficheiro inteiro a verde.** Todos os testes chamavam
+`_search_subject` directamente, portanto passavam com a correccção revertida no
+local de uso. Um teste de helper não é um teste de wiring. O teste que apanha a
+reversão chama o caminho real e verifica o que o motor recebeu.
+
+**A leitura da meteorologia está errada, não a resposta.** O modelo respondeu
+*"o índice ultravioleta está a 3,45"* e a skill devolve literalmente
+*"o UV está moderado (3.45)"*. Conferi a leitura antes de culpar o modelo, como
+se faz com um sensor: o número veio errado da fonte. Uma resposta que repete o
+número que recebeu está correcta — mesmo quando o número é falso. **Isto é um
+defeito a corrigir na skill da meteorologia, e não no LLM.**

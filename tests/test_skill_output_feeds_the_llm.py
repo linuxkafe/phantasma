@@ -197,8 +197,25 @@ def test_the_reading_reaches_the_prompt_text_and_the_llm_is_actually_called(monk
     assert "LEITURA DOS DISPOSITIVOS" in captured["prompt"]
     # The reading must not displace the persona: persona leads, per the order
     # the owner set.
-    assert "ETHICAL CORE" in captured["persona"], (
-        "a leitura entrou, mas a persona deixou de ser a fonte primária"
+    #
+    # Asserted as a shape, not as a string. This used to check for "ETHICAL
+    # CORE", a header of config.SYSTEM_PROMPT -- and it passed in dev and failed
+    # in prod, because prod's persona is not config.SYSTEM_PROMPT. It is the
+    # 2748-character "### IDENTITY & TONE" text the owner curated on
+    # /admin/config and which lives in app_settings, i.e. host data this deploy
+    # does not carry. The test was asserting on the host's persona, which the
+    # host is allowed to change, and it only looked green because dev had never
+    # been asked.
+    #
+    # What the code actually owes is: the persona is the system turn, it is not
+    # empty, it is not the assembled prompt, and the reading did not leak into
+    # it. Those four hold for any persona.
+    assert captured["persona"].strip(), "o turno de sistema chegou vazio"
+    assert captured["persona"] != captured["prompt"], (
+        "a persona e o prompt são o mesmo texto -- a montagem duplicou um turno"
+    )
+    assert WEATHER not in captured["persona"], (
+        "a leitura foi parar à persona em vez do turno de utilizador"
     )
 
 
@@ -240,4 +257,123 @@ def test_a_lookup_does_not_invent_a_reading_block(monkeypatch):
     assert "LEITURA DOS DISPOSITIVOS" not in captured["prompt"], (
         "um cabeçalho de leitura vazio é o mesmo defeito que o bloco de "
         "conhecimento local vazio causava: o modelo passa a narrar o andaime"
+    )
+
+
+# --- the search subject, added 2026-10-04 after the first live run -----------
+#
+# "o que achas de como está o tempo em Lisboa?" was sent to SearxNG whole and
+# came back with a Spanish thread about the phrase "tal y como esta" and
+# Infopedia's dictionary entry for the word "achas". The engine searched for the
+# wrapper because the wrapper was in the query. The reading already answers the
+# question; the web is there for what the sensors cannot know.
+
+SEARCH_SUBJECT = [
+    ("o que achas de como está o tempo em Lisboa?", "como está o tempo em Lisboa?"),
+    ("qual achas do Edgar Allan Poe?", "Edgar Allan Poe?"),
+    ("como vês a sala?", "a sala?"),
+    ("o que te parece disto?", "disto?"),
+    # nothing to strip: the question IS the subject
+    ("como está o tempo em Lisboa?", "como está o tempo em Lisboa?"),
+    # stripping would empty the query, so the original is searched
+    ("o que achas", "o que achas"),
+]
+
+
+@pytest.mark.parametrize("asked,expected", SEARCH_SUBJECT)
+def test_the_search_gets_the_subject_not_the_opinion_wrapper(asked, expected):
+    assert PhantasmaPipeline._search_subject(asked) == expected
+
+
+def test_every_strippable_prefix_is_an_opinion_marker():
+    """The two lists have to agree, or a routed opinion still reaches the engine.
+
+    If a phrase routes to the LLM as an opinion but is not in the prefixes, the
+    wrapper survives into the query -- the exact 2026-10-04 failure. Asserted as
+    a set relationship rather than by copying the list twice.
+    """
+    prefixes = set(PhantasmaPipeline.OPINION_PREFIXES)
+    markers = set(PhantasmaPipeline.OPINION_MARKERS)
+    assert prefixes <= markers, f"prefixos que não são marcadores: {prefixes - markers}"
+
+
+@pytest.mark.parametrize("marker", ["gostas de", "gostas do", "gosto de"])
+def test_a_marker_that_is_not_a_prefix_leaves_the_query_intact(marker):
+    """Not stripping is the safe failure.
+
+    "gostas do Porto" is about liking Porto, not about the city forecast, and
+    these markers are deliberately NOT prefixes: stripping "do" would search for
+    "Porto" and hand the engine a question nobody asked. They route to the LLM
+    as opinions, and the whole phrase goes with them.
+    """
+    q = f"{marker} Porto"
+    assert PhantasmaPipeline._search_subject(q) == q
+    assert PhantasmaPipeline._is_opinion(q), "mesmo assim continua a ser opinião"
+
+
+@pytest.mark.parametrize(
+    ("asked", "expected"),
+    [
+        ("concordas com isso?", "isso?"),
+        ("concordas que está frio?", "que está frio?"),
+    ],
+)
+def test_concordas_is_a_prefix_and_is_stripped(asked, expected):
+    """"concordas" IS a prefix, unlike "gostas do".
+
+    It was in both lists while this test asserted it was in neither, which is
+    the assertion being wrong rather than the code: "concordas com isso" has
+    nothing to search for except "isso".
+    """
+    assert PhantasmaPipeline._search_subject(asked) == expected
+
+
+def test_the_search_actually_receives_the_subject(monkeypatch):
+    """The call site, not just the helper.
+
+    Added because falsifying the fix -- putting `text` back where
+    `_search_subject(text)` was -- left this file GREEN. Every test above called
+    the helper directly, so they passed while the production path searched the
+    whole wrapper again and SearxNG went back to returning the dictionary entry
+    for "achas". A helper test is not a wiring test.
+    """
+    asked = []
+
+    def fake_search(q, *a, **k):
+        asked.append(q)
+        return ""
+
+    monkeypatch.setattr("assistant.search_with_searxng", fake_search)
+    monkeypatch.setattr("assistant.retrieve_from_rag", lambda _t: None)
+    monkeypatch.setattr("assistant.get_cached_response", lambda _t: None)
+
+    class _Resp:
+        @staticmethod
+        def chat(*a, **k):
+            return {"message": {"content": "resposta"}}
+
+    class _Client(_Resp):
+        def __init__(self, host=None, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_e):
+            return False
+
+    monkeypatch.setattr("ollama.Client", _Client)
+
+    p = PhantasmaPipeline.__new__(PhantasmaPipeline)
+    p._fly_brain = type("FB", (), {"step": lambda self, **k: None})()
+    p._web_derived = False
+
+    p._respond_with_llm_body("o que achas de como está o tempo em Lisboa?")
+
+    assert asked, "a pesquisa não foi chamada"
+    assert "achas" not in asked[0], (
+        f"o enquadramento da opinião chegou ao motor de pesquisa: {asked[0]!r}"
+    )
+    assert "tempo em Lisboa" in asked[0], (
+        f"o assunto não chegou ao motor de pesquisa: {asked[0]!r}"
     )

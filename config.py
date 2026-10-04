@@ -131,8 +131,41 @@ class LLMConfig:
 
     host: str = "http://10.0.0.128:11434"
     host_fallback: str = "http://localhost:11434"
-    model: str = "gemma3:4b"
-    model_fallback: str = "gemma3:4b"
+    # qwen3:8b answers. gemma3:4b reads images. Not interchangeable, and the
+    # split is measured rather than preferred.
+    #
+    # Reversed 2026-10-04. The bake-off had ranked gemma3:4b first and the
+    # choice held for a day, but that eval never asked the question the house
+    # actually asks: an opinion about a live reading. Measured on that, with
+    # the skill's weather output in the prompt:
+    #
+    #   qwen3:8b   103 palavras, 49.4s
+    #   gemma3:4b   57 palavras, 13.3s
+    #
+    # The owner's reference answer is ~90 words of European Portuguese with the
+    # measured numbers still in it, and qwen is the one that reaches it. gemma
+    # is kept for `ollama_vision_model` below because qwen3:8b cannot see.
+    #
+    # Three defects in qwen3:8b, measured on 2026-10-04 and accepted by the
+    # owner, not discovered later:
+    #
+    #   1. Brazilian Portuguese. Reproduced twice, live: asked about Poe it
+    #      wrote "Sua obra nao desenha apenas historias" and "Em suas paginas".
+    #      The persona demands European Portuguese.
+    #   2. It drops the measurement. Given the reading "entre 7 e 15 graus",
+    #      air good, UV 2.85, it answered "o tempo hesita entre frio e calor,
+    #      sem decidir qual lado escolher" -- no figure at all. The owner's own
+    #      reference answer keeps "entre 7 e 15 graus". This is the defect that
+    #      costs the most, because the reading exists to be quoted.
+    #   3. "obrigado" once sent it into a degenerate repetition loop, 271 words
+    #      of "E... E... E..."; another time it replied that no gratitude was
+    #      necessary. Neither reproduced in the reading path.
+    #
+    # qwen3:8b is more often correct AND more often beautiful than gemma3:4b.
+    # It is also wrong in ways that read fluently. If the persona slips, or if
+    # a sensor reading stops being quoted, re-measure before blaming the skill.
+    model: str = "qwen3:8b"
+    model_fallback: str = "qwen3:8b"
     timeout: int = 600
     # Connect timeout, separate from the read timeout above.
     #
@@ -378,6 +411,10 @@ class Config:
     tapo_user: str = ""
     tapo_pass: str = ""
     tapo_cameras: dict = field(default_factory=dict)
+    # The camera reads with gemma3:4b and NOT with the model that answers.
+    # qwen3:8b is text-only: pointing vision at it would leave the house able
+    # to hear and blind. Verified before the split, on both hosts: red ->
+    # "Vermelho", green -> "Verde.". Keep that test green when this changes.
     ollama_vision_model: str = "gemma3:4b"
     iqair_key: str = ""
     home_coords: tuple = field(default_factory=lambda: (41.1737008, -8.5909798))
