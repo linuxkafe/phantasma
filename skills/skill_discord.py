@@ -156,6 +156,18 @@ async def on_ready():
 _resolve_skill = None
 
 
+def _mention_tokens(message):
+    """Every Discord spelling that can address this bot in one message.
+
+    `<@id>` and `<@!id>` are the user; `<@&id>` is each of the bot's roles.
+    """
+    tokens = [f"<@{client.user.id}>", f"<@!{client.user.id}>"]
+    if message.guild is not None:
+        for role in getattr(message.guild.me, "roles", ()):
+            tokens.append(f"<@&{role.id}>")
+    return tokens
+
+
 @client.event
 async def on_message(message):
     # Ignorar mensagens do próprio bot
@@ -167,14 +179,75 @@ async def on_message(message):
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mention = client.user in message.mentions
 
+    # A role mention is not a user mention, and `message.mentions` does not
+    # contain roles. Measured 2026-10-04 in #linuxkafe: the owner wrote
+    # `<@&1442506598726766659> como está o tempo em Aveiro?` and got nothing,
+    # while `<@1442501057170243614> diz olá` in the same channel answered
+    # "olá". 1442506598726766659 is the bot's own role in that guild. Discord
+    # puts a role mention in `message.role_mentions` and leaves
+    # `message.mentions` empty, so the `else` below returned in silence.
+    #
+    # Nobody debugs this by reading the code, because the code looks right for
+    # the spelling a developer types by hand. It only shows up in production,
+    # in the spelling a person actually produces by clicking the bot.
+    is_role_mention = False
+    if message.guild is not None:
+        # Compare ids, never objects. `role.id in message.role_mentions` looks
+        # right and is always False: the left side is a str and the right side
+        # holds Role objects, and `Role.__eq__` does not accept a str. The
+        # first draft of this fix shipped exactly that, and the regression test
+        # built from the owner's real message failed on it -- which is the only
+        # reason it is worth having.
+        mentioned_role_ids = {r.id for r in message.role_mentions}
+        bot_role_ids = {
+            r.id for r in getattr(message.guild.me, "roles", ())
+        }
+        is_role_mention = bool(bot_role_ids & mentioned_role_ids)
+
+    # Every message that reaches here is logged, BEFORE any early return.
+    #
+    # Measured 2026-10-04: the owner mentions the bot in a channel and gets
+    # nothing, while guests are answered. Nothing in the journal said either way,
+    # because both `logger.info` calls below were invisible -- the root logger is
+    # at WARNING, `assistant.py` configures no logging at all, and only `print`
+    # reached the journal. So "no log line" proved nothing, and the conclusion
+    # drawn from it -- that on_message never ran -- was unfounded.
+    #
+    # print, not logger: that is the call that is known to arrive. The three
+    # lines distinguish the three silent branches below, which are otherwise
+    # indistinguishable from a bot that is offline.
+    print(
+        f"[Discord Skill] on_message de {message.author.id} "
+        f"({message.author.name}) dm={is_dm} mention={is_mention} "
+        f"content={message.content!r}",
+        flush=True,
+    )
+
     if is_dm:
         prompt = message.content
-    elif is_mention:
-        prompt = message.content.replace(f"<@{client.user.id}>", "").strip()
+    elif is_mention or is_role_mention:
+        # Every spelling Discord can emit, stripped. A USER mention arrives as
+        # `<@id>` or `<@!id>` depending on the client; a ROLE mention arrives as
+        # `<@&id>`. Leaving a token in the prompt makes the bot quote its own
+        # mention back at the person who summoned it.
+        prompt = message.content
+        for token in _mention_tokens(message):
+            prompt = prompt.replace(token, "")
+        prompt = prompt.strip()
     else:
+        print(
+            f"[Discord Skill] ignorada: nem DM nem menção "
+            f"(content={message.content!r})",
+            flush=True,
+        )
         return
 
     if not prompt:
+        print(
+            f"[Discord Skill] ignorada: prompt vazio depois de remover a menção "
+            f"(content={message.content!r})",
+            flush=True,
+        )
         return
 
     # --- VERIFICAÇÃO DE PERMISSÕES E QUOTAS ---

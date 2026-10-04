@@ -182,6 +182,12 @@ def test_a_message_reaches_the_authorization_code_without_raising(monkeypatch):
             self.channel = channel
             self.content = "que horas sao"
             self.mentions = []
+            # A real Message ALWAYS has these two; a DM has guild=None and
+            # role_mentions=[]. Omitting them made the handler raise
+            # AttributeError in the tests only, which is how a double can be
+            # wrong in the direction that hides a real attribute access.
+            self.guild = None
+            self.role_mentions = []
             self.author = type("A", (), {"id": OWNER, "name": "owner"})()
 
     to_assistant: list[str] = []
@@ -237,6 +243,8 @@ def test_the_handler_does_not_raise_for_an_unknown_id(monkeypatch):
             self.channel = FakeDM()
             self.content = "acende a luz"
             self.mentions = []
+            self.guild = None  # see the note in the DM double above
+            self.role_mentions = []
             self.author = type("A", (), {"id": "999999999999999999", "name": "x"})()
 
     monkeypatch.setattr(sd, "client", type("C", (), {"user": object(), "id": 2})())
@@ -467,6 +475,8 @@ def test_a_failed_request_is_not_charged_to_the_guest(monkeypatch):
             self.channel = _Chan()
             self.content = "conta-me uma historia"
             self.mentions = []
+            self.guild = None  # see the note in the DM double above
+            self.role_mentions = []
             self.author = type("A", (), {"id": GUEST, "name": "guest"})()
 
     loop = asyncio.new_event_loop()
@@ -480,3 +490,82 @@ def test_a_failed_request_is_not_charged_to_the_guest(monkeypatch):
         f"tres pedidos que a casa nao entregou cobraram {da.spent(GUEST)} ao "
         f"convidado -- e o quarto seria recusado com 'atingiste o limite'"
     )
+
+
+def test_a_role_mention_reaches_the_assistant_under_real_discordpy(monkeypatch):
+    import skills.skill_discord as sd
+
+    """`<@&id>` summons the bot, tested against the REAL discord.py.
+
+    The owner's own message from #linuxkafé on 2026-10-04, which got no reply:
+
+        <@&1442506598726766659> como está o tempo em Aveiro?
+
+    1442506598726766659 is the bot's role in that guild. `message.mentions` does
+    not contain roles -- Discord fills `role_mentions` and leaves `mentions`
+    empty -- so a handler that only checks `mentions` returns in silence.
+
+    This lives here, next to the real-discord.py doubles, because the AST
+    harness in test_skill_discord.py strips decorators and therefore cannot see
+    a handler that is registered wrongly. It hid exactly that mistake once.
+    """
+    BOT = "1442501057170243614"
+    BOT_ROLE = "1442506598726766659"
+    OWNER = "485604987812970496"
+
+    sent: list[str] = []
+    to_assistant: list[str] = []
+
+    class _Role:
+        def __init__(self, role_id):
+            self.id = role_id
+
+    class _BotMember:
+        roles = [_Role(BOT_ROLE)]
+
+    class _Guild:
+        me = _BotMember()
+
+    class _Channel:
+        def typing(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def send(self, content):
+            sent.append(content)
+
+    class _Msg:
+        channel = _Channel()
+        content = f"<@&{BOT_ROLE}> como está o tempo em Aveiro?"
+        mentions = []  # the whole point: a role mention is NOT a user mention
+        role_mentions = [_Role(BOT_ROLE)]
+        guild = _Guild()
+        author = type("A", (), {"id": OWNER, "name": "linuxkafe"})()
+
+    monkeypatch.setattr(
+        sd,
+        "client",
+        type("C", (), {"user": type("U", (), {"id": BOT})(), "id": 2})(),
+    )
+
+    async def _send(prompt):
+        to_assistant.append(prompt)
+        return "Em Lisboa está incerto", True
+
+    monkeypatch.setattr(sd, "_send_to_phantasma", _send, raising=False)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(sd.on_message(_Msg()))
+    finally:
+        loop.close()
+
+    assert to_assistant == ["como está o tempo em Aveiro?"], (
+        f"a mencao de role nao chegou ao assistente: {to_assistant!r}"
+    )
+    assert sent == ["Em Lisboa está incerto"]
