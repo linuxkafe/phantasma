@@ -839,3 +839,67 @@ reintroduzir isso sem querer.
 
 Verificado em produção: slider `0.6 → 0.25` pela página, conversa a `0.25`, factos
 a `0.15`, e repor volta a `0.6`. `MainPID 1411965 → 1822882`.
+
+---
+
+## 2026-10-04 — O que `/opt/phantasma/.env` tem de ter
+
+A `.env` **não está no git**, por desenho: é onde vivem os valores de host
+(tokens, IPs, caminhos, calibragens) e versioná-la seria versionar segredos.
+Consequência prática: **um clone novo não sabe que `gemma3:4b` é o modelo**, e
+quem montar a máquina nova tem de saber o que preencher. Não deve depender de
+memória. Registado aqui.
+
+67 variáveis na `.env` actual. Não são todas igualmente obrigatórias.
+
+### Bloqueia o arranque
+
+| chave | porque |
+|---|---|
+| `OLLAMA_MODEL_PRIMARY` | modelo do primário. O `deploy.sh` falha se não estiver instalado no host |
+| `OLLAMA_MODEL_FALLBACK` | idem para o secundário |
+| `OLLAMA_VISION_MODEL` | câmara e interpretação de imagens. A sua ausência **não se nota logo**: o assistente continua a ouvir e a responder |
+| `OLLAMA_HOST_PRIMARY` | `http://10.0.0.128:11434` |
+| `OLLAMA_HOST_FALLBACK` | `http://localhost:11434` |
+| `MEMORY_DB_PATH`, `BRAIN_DB_PATH` | ambos apontam para `/opt/phantasma/data/brain.db` — é uma base só, apesar dos dois nomes |
+| `WHISPER_MODEL` | `medium`. Modelo diferente = transcrição pior, sem aviso |
+| `WAKEWORD_MODELS` | `.onnx` da palavra de activação. Falta = o assistente nunca acorda |
+| `TTS_MODEL_PATH` | voz. Falta = não fala |
+| `ALSA_DEVICE_IN`, `ALSA_DEVICE_OUT` | dispositivos de áudio |
+| `OLLAMA_TIMEOUT` | `600`. É um orçamento de **leitura**, não de ligação |
+
+### Sintonia local — há default no código
+
+`ALSA_VOLUME_PERCENT`, `MIC_SAMPLERATE`, `VAD_AGGRESSIVENESS`,
+`VAD_FRAME_DURATION_MS`, `WAKEWORD_CONFIDENCE`, `WAKEWORD_PERSISTENCE`,
+`WAKEWORD_COOLDOWN_SECONDS`, `DEBUG_MODE`, `QUIET_START`, `QUIET_END`,
+`TTS_GHOST_EFFECTS`, `AUDIO_FEEDBACK_ENABLED`, `USE_SOX_EFFECTS`.
+
+### Tokens de terceiros — vazios significam "feature desligada"
+
+`GEMINI_API_KEY`, `CLOOGY_USERNAME`, `SHELLY_GAS_URL`, `TUYA_DEVICES_JSON`,
+`MIIO_DEVICES_JSON`, `DISCORD_BOT_TOKEN`, `PHANTASMA_COMMAND_TOKEN`.
+
+### A armadilha que já mordeu
+
+`AUDIO_AUTO_DETECT` está na `.env` **comentada**, e é uma armadilha viva:
+
+    # AUDIO_AUTO_DETECT was dead: config.py reads AUDIO_DEVICE_AUTO_DETECT.
+    # AUDIO_AUTO_DETECT=false
+
+O nome está errado, a linha nunca fez nada, e editá-la não mudou o
+comportamento — parece funcionar e não muda. `AUDIO_DEVICE_AUTO_DETECT` é a que
+o código lê. A linha morta fica comentada **de propósito**, como aviso para quem
+achar que o problema é o valor e não é o nome.
+
+Antes de mudar qualquer definição de áudio, confirmar que o nome na `.env`
+**coincide** com o nome em `config.py`. Uma divergência falha para o default e
+parece que a definição não funciona.
+
+### O que verifica esta lista
+
+`scripts/deploy.sh` pergunta a `/api/tags` de cada host e falha se o modelo que
+a `.env` pede não estiver instalado, nos três papéis (primário, secundário e
+visão). É a diferença entre o `.env` estar errado e isso ser descoberto numa
+conversa. O que **não** verifica é se os caminhos de áudio e aos `.onnx`
+existem — continuam a ser responsabilidade de quem monta a máquina.
