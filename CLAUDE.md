@@ -193,14 +193,30 @@ At the end of every non-trivial task, always summarise:
 Tag format is `v<YY>.<MM>.<DD>`, the date the release is cut. First release:
 `v26.09.28`. Cut on `testing`, never straight onto `main`.
 
-`main` and `testing` have **no common ancestor** (`git merge-base` is empty;
-`git merge-tree` refuses unrelated histories). So a release is a tag, not a
-merge. Do not try to reconcile them as a fast-forward: the two lineages
-disagree on 273 files and `main` carries work `testing` has never seen
-(weather skill fixes, IPMA colour filter, image-model restrictions, dream
-improvements). Investigate with `git patch-id` before proposing a merge, and
-never pass `--allow-unrelated-histories` without the owner having seen the
-conflict count.
+**The unrelated-histories note below is OBSOLETE as of 2026-10-04.** It used to
+be true: `git merge-base origin/main origin/testing` was empty and the two
+lineages disagreed on 273 files. They now share `e5995a3`, `main` is a direct
+ancestor of `testing`, and `main` holds **0 commits that `testing` has not
+seen**. Promoting is therefore a plain fast-forward:
+
+```
+git push origin origin/testing:main
+```
+
+No merge, no `--allow-unrelated-histories`, nothing to reconcile. Re-check
+before you rely on this — the property that made it safe is that
+`git rev-list --count origin/testing..origin/main` is 0, and that is a fact to
+verify per promotion, not a property to assume:
+
+```
+git merge-base --is-ancestor origin/main origin/testing && echo fast-forward
+git rev-list --count origin/testing..origin/main
+```
+
+If the count is non-zero, `main` carries work `testing` has never seen. Then
+stop and look with `git log --oneline origin/testing..origin/main` before doing
+anything: investigate with `git patch-id`, and never pass
+`--allow-unrelated-histories` without the owner having seen the conflict count.
 
 ## Reiniciar o serviço (sudo)
 
