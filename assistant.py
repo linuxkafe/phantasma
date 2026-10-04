@@ -1158,7 +1158,18 @@ class PhantasmaPipeline:
         )
         full_prompt = "\n".join(parts) + f"\nUtilizador: {text}"
 
-        # Try Ollama with primary and fallback hosts
+        # Which model answers, and which host, resolved per call.
+        #
+        # Read through `src.brain.model_config` rather than off `config` alone.
+        # `/admin/config` showed one model and the service ran another: the page
+        # read the `config` table, nothing applied it, and `config.py` never
+        # consulted the settings store. The owner could save a value, see
+        # "guardado", and have no effect at all. Resolved per call so a change
+        # applies to the next message, like the persona page promises.
+        #
+        # The `config.llm` attributes are still consulted first because they are
+        # populated by explicit constructor arguments in some entry points; they
+        # resolve to the same values.
         primary_host = getattr(config, "llm", None) and getattr(config.llm, "host", None)
         primary_model = getattr(config, "llm", None) and getattr(config.llm, "model", None)
         fallback_host = getattr(config, "llm", None) and getattr(config.llm, "host_fallback", None)
@@ -1166,18 +1177,24 @@ class PhantasmaPipeline:
             config.llm, "model_fallback", None
         )
 
-        if not primary_host:
-            primary_host = getattr(config, "OLLAMA_HOST_PRIMARY", None)
-            primary_model = primary_model or getattr(config, "OLLAMA_MODEL_PRIMARY", "gemma3:4b")
-        if not fallback_host:
-            fallback_host = getattr(config, "OLLAMA_HOST_FALLBACK", "http://localhost:11434")
-            fallback_model = fallback_model or getattr(config, "OLLAMA_MODEL_FALLBACK", "llama3")
+        from src.brain.model_config import (
+            HOST_FALLBACK,
+            HOST_PRIMARY,
+            MODEL_FALLBACK,
+            MODEL_PRIMARY,
+            resolve,
+        )
+
+        primary_host = primary_host or resolve(HOST_PRIMARY).value
+        fallback_host = fallback_host or resolve(HOST_FALLBACK).value
+        primary_model = primary_model or resolve(MODEL_PRIMARY).value
+        fallback_model = fallback_model or resolve(MODEL_FALLBACK).value
 
         inference_targets = []
         if primary_host:
-            inference_targets.append((primary_host, primary_model or "gemma3:4b"))
+            inference_targets.append((primary_host, primary_model))
         if fallback_host and fallback_host != primary_host:
-            inference_targets.append((fallback_host, fallback_model or "llama3"))
+            inference_targets.append((fallback_host, fallback_model))
 
         if not inference_targets:
             logger.error("No Ollama hosts configured")

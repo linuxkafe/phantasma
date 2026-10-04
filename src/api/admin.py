@@ -41,6 +41,15 @@ from flask import (
 
 import config
 from src.api.discord_access import DEFAULT_GUEST_SKILLS
+from src.brain.model_config import (
+    as_dict as model_values,
+)
+from src.brain.model_config import (
+    provenance as model_sources,
+)
+from src.brain.model_config import (
+    write_env_file,
+)
 from src.pipeline import quiet
 from src.settings_store import (
     DEFAULT_REACTION_WEIGHTS,
@@ -1087,9 +1096,56 @@ CONFIG_CONTROLS: dict[str, dict] = {
 CONFIG_CONTROL_CATEGORIES = {meta["category"] for meta in CONFIG_CONTROLS.values()}
 
 
+_MODEL_KEYS = frozenset({"OLLAMA_MODEL_PRIMARY", "OLLAMA_MODEL_FALLBACK",
+                         "OLLAMA_VISION_MODEL"})
+_MODEL_HOST_KEY = {
+    "OLLAMA_MODEL_PRIMARY": "OLLAMA_HOST_PRIMARY",
+    "OLLAMA_MODEL_FALLBACK": "OLLAMA_HOST_FALLBACK",
+    "OLLAMA_VISION_MODEL": "OLLAMA_HOST_PRIMARY",
+}
+# Keys whose .env write did not happen on this save, so the page can say so
+# instead of the two sources drifting apart quietly.
+_model_env_updated: dict[str, bool] = {}
+
+
+def _model_is_installed(key: str, model: str) -> tuple[bool, str]:
+    """Is `model` present on the host that key points at?
+
+    Checked before the save, not after. With the page now authoritative, saving a
+    name that does not exist would take the assistant down for every message --
+    Ollama 404s, the request fails, and `/api/health` stays green because it
+    asks whether the host is up. Refusing at the save is the difference between a
+    typo and an outage.
+    """
+    from src.brain.model_config import resolve as _resolve_model
+
+    host = _resolve_model(_MODEL_HOST_KEY[key]).value
+    try:
+        import ollama
+
+        client = ollama.Client(host=host, timeout=20)
+        names = {
+            (m.get("model") or m.get("name") or "")
+            for m in client.list().get("models", [])
+        }
+    except Exception as exc:  # noqa: BLE001
+        # Unreachable host must not block the save: an outage of the Ollama box is
+        # not the owner's typo, and refusing here would lock them out of the page
+        # exactly when the machine is already broken.
+        return True, f"nao consegui confirmar {host} ({type(exc).__name__}); guardado na mesma"
+
+    if {model, model.split(":")[0]} & names:
+        return True, ""
+
+    listed = ", ".join(sorted(n for n in names if n)) or "(nenhum)"
+    return False, (
+        f"{model!r} nao esta instalado em {host}. Modelos disponiveis: {listed}. "
+        f"O nome tem de ser exacto."
+    )
+
+
 def _normalize_config_value(key: str, meta: dict, raw: str) -> str:
     """Coerce a submitted control value to the string the config DB/env stores.
-
     Numbers are clamped to the declared range; an unparsable number falls back
     to the minimum rather than raising. Booleans are normalised earlier by the
     caller (checkbox present/absent), so ``type != "number"`` passes through.
@@ -1190,6 +1246,19 @@ CONFIG_TEMPLATE = (
                            class="cfg-input" style="width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.875rem;">
                     {% endif %}
                 </div>
+                {% if config.get('effective_source') %}
+                <p style="color: var(--muted); font-size: 0.75rem; margin: 0.4rem 0 0;">
+                    {% if config.effective_source == 'settings' %}
+                    Em vigor a partir desta página. Vale já na próxima mensagem.
+                    {% elif config.effective_source == 'env' %}
+                    Em vigor, vindo de <code>.env</code>. Guardar aqui passa a valer
+                    também, sem reiniciar.
+                    {% else %}
+                    Sem valor guardado: em vigor o valor por omissão do código.
+                    Guardar aqui passa a valer sem reiniciar.
+                    {% endif %}
+                </p>
+                {% endif %}
             </div>
             {% endif %}
             {% endfor %}
@@ -3432,15 +3501,88 @@ def config_manager():
                 value = _normalize_config_value(key, meta, request.form[field])
             else:
                 continue
+
+            # A model that is not installed is refused before it is written.
+            #
+            # The old failure was silent and total: the page showed a model, the
+            # service ignored the page, and the model in the `.env` answered. So a
+            # typo saved here did nothing at all. Now the page is the source, and
+            # a typo would become a total outage instead of a no-op -- so the
+            # write is checked against the host that will be asked.
+            if key in _MODEL_KEYS:
+                ok, detail = _model_is_installed(key, value)
+                if not ok:
+                    flash(detail, "error")
+                    return redirect(url_for("admin.config_manager"))
+                # Both stores, deliberately. The store applies on the next
+                # message; the .env is what the host requires and what survives a
+                # lost database. Writing only one is how they drift into
+                # disagreeing about what the host must have.
+                _model_env_updated[key] = write_env_file(key, value)
+
             update_config(key, value)
             # Also store where the running assistant reads at the next boot
             # (same table as quiet_schedule). The config-table write above is
             # the display mirror; this one is the source of truth.
             set_setting(key, value, updated_by=_current_user())
-        flash("Configurações guardadas. Aplicam-se a partir da próxima arranque.")
+        # Say which of the two stores actually took the value. The store always
+        # does; the .env only if this process can write it. A model name in the
+        # store alone still works -- it is read per call -- but a .env that has
+        # stopped tracking the page is how the two drift apart again, and the
+        # owner is the one who can fix that.
+        model_keys = [k for k in _model_env_updated if k in CONFIG_CONTROLS]
+        if model_keys:
+            kept = ", ".join(
+                k.replace("OLLAMA_", "").lower() for k in model_keys
+                if _model_env_updated.get(k)
+            )
+            missed = [k for k in model_keys if not _model_env_updated.get(k)]
+            msg = (
+                "Modelos guardados e já em vigor na proxima mensagem "
+                f"({kept}). Tambem ficaram em .env."
+            )
+            if missed:
+                msg += (
+                    " Nao consegui escrever em .env "
+                    f"({', '.join(missed)}); o valor da store prevalece."
+                )
+            flash(msg)
+        else:
+            flash("Configurações guardadas. Aplicam-se a partir da próxima arranque.")
         return redirect(url_for("admin.config_manager"))
 
     configs = get_configs_by_category()
+
+    # The model fields must show what the assistant WILL use, not what the config
+    # table happens to hold.
+    #
+    # Measured 2026-10-03: the page showed llama3.1:8b, qwen3:8b and llava:7b --
+    # all three deleted from the hosts -- while gemma3:4b was answering. Nothing
+    # applied the config table, so the page was a dead mirror: the owner could
+    # save a value, see "guardado", and have no effect at all.
+    #
+    # Now the page is the source, so the page has to tell the truth about what is
+    # in force, and where it came from. The provenance is shown because "the page
+    # says one thing and the assistant does another" should be visible rather than
+    # something the owner has to infer.
+    _eff = model_values()
+    _src = model_sources()
+    _model_rows = {}
+    for category_rows in configs.values():
+        for row in category_rows:
+            key = row.get("key")
+            if key in _MODEL_KEYS:
+                _model_rows[key] = (category_rows, row)
+    for key, value in _eff.items():
+        if key not in _MODEL_KEYS:
+            continue
+        holder = _model_rows.get(key)
+        if holder is None:
+            continue
+        _category_rows, row = holder
+        row["value"] = value
+        row["effective_source"] = _src.get(key, "default")
+        row["in_effect"] = True
     _sched = quiet.QuietSchedule.parse(get_setting("quiet_schedule", None))
     # A row that exists but is EMPTY is a decision -- "a guest may use nothing" --
     # and only a row that does not exist at all falls back to the default. The

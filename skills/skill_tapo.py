@@ -83,8 +83,16 @@ def _vision_cycle(target_ip):
             "Sê casual, direto e conciso em português de Portugal."
         )
 
+        # Through the resolver, like the chat path. This one read
+        # `config.OLLAMA_VISION_MODEL` directly, which is frozen at import, so a
+        # change saved on /admin/config never reached the camera -- and the
+        # camera is the one path a guest can never take, so it is also the one
+        # nobody would notice being wrong until a visitor was described by a
+        # model that had been deleted.
+        from src.brain.model_config import MODEL_VISION, resolve
+
         res = ollama.generate(
-            model=config.OLLAMA_VISION_MODEL,
+            model=resolve(MODEL_VISION).value,
             prompt=system_prompt,
             images=[img_path]
         )
