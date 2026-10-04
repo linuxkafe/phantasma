@@ -741,3 +741,57 @@ falha acima. Registado aqui porque o gate exige.
 **Verificado depois da remoção:** visão nos dois hosts, os dois hosts a responder,
 `dependency_check.py` verde, `/api/health` 200, e as cinco perguntas de conversa
 sem português brasileiro, sem scaffolding e sem citação.
+
+---
+
+## 2026-10-04 — `/admin/config` passou a ser a fonte dos modelos
+
+Pergunta do dono: *"tens a certeza que está a usar a config em admin/config?"*
+Não. A página mostrava, para as três chaves de modelo:
+
+```
+OLLAMA_MODEL_PRIMARY    llama3.1:8b
+OLLAMA_MODEL_FALLBACK   qwen3:8b
+OLLAMA_VISION_MODEL     llava:7b
+```
+
+Os três tinham sido removidos dos hosts. O `gemma3:4b` é que respondia.
+
+Três fontes, uma verdadeira: `.env` lida, `config.db` **não lida**,
+`app_settings` **não lida**. E não por falta de ligação — por nunca ter havido
+ligação. Não existe boot overlay: nenhuma escrita em `os.environ`, nenhum
+`putenv`, nenhum import do `admin` no runtime. O comentário no `CONFIG_CONTROLS`
+afirmava que o overlay honra a tabela "para os tokens secrets ficarem no `.env`".
+Esse overlay nunca foi construído.
+
+Consequência real: guardar um valor, ver "guardado", e nada acontecer. Um valor
+errado no `.env` falha alto assim que o host não o serve; **um valor numa página
+que não faz nada é indistinguível de sucesso.**
+
+**Precedência agora igual à dos guests**, onde a página é autoritativa e o código
+diz:
+
+```
+store  >  .env  >  dataclass
+```
+
+A store porque é a escolha mais recente e explícita. O `.env` porque é a verdade
+do host e sobrevive à base perdida. O dataclass como último recurso, com
+`source == "default"` para a página poder dizer que não há valor guardado — um
+default que ganha em silêncio é um valor de host a falhar em aberto.
+
+**A câmara lia `config.OLLAMA_VISION_MODEL`**, congelado no import.
+`skills/skill_tapo.py` descreveria um visitante com o modelo apagado, e a câmara
+é o caminho que um convidado nunca toca — só que nada mais o revelaria.
+
+**Antes de gravar, verifica-se se o modelo existe no host.** Com a página
+autoritativa, gravar um nome inexistente passaria a ser uma queda total em vez de
+um no-op: a diferença entre uma gralha e uma indisponibilidade.
+
+**Gravação dupla**, e a página diz qual das duas funcionou — a store vale já na
+próxima mensagem, o `.env` é o que o host exige. Um `.env` que deixe de acompanhar
+a página é como as duas se separam outra vez, e isso só o dono resolve.
+
+**Verificado em produção:** tabela `config` mostra `gemma3:4b`, o valor efectivo
+resolve para `gemma3:4b`, gravar pela página muda o valor resolvido
+(`env` → `settings`), e repor repõe. `MainPID 736861 → 1411965`.
