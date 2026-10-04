@@ -125,7 +125,18 @@ class TestFriendlyControls:
         assert 'type="checkbox"' in body and 'name="config_AUDIO_FEEDBACK_ENABLED"' in body
         assert 'name="config_WHISPER_MODEL"' in body
         assert 'name="config_DEBUG_MODE"' in body
-        assert "Som de confirmação" in body
+        # Asserted on the FIELD, not on a label. It used to look for
+        # "Som de confirmação", which is the label the control carried while the
+        # code played the WAKE sound -- a confirmation sound and a wake sound are
+        # different moments, and the name was the wrong one. Changing the label to
+        # say when the sound happens broke this test, which is how the wrong label
+        # survived as long as it did.
+        assert 'name="config_AUDIO_FEEDBACK_ENABLED"' in body
+        # The label has to name the moment, because that is the only thing an
+        # owner can act on.
+        assert "confirmação" not in body.lower(), (
+            "o som de activação voltou a chamar-se confirmação"
+        )
         assert "Confiança mínima para ativar" in body
         # Service secrets must no longer reach the page HTML.
         assert 'type="password"' not in body

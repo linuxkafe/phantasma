@@ -626,7 +626,59 @@ def delete_user(user_id: int) -> bool:
 # ----------------------------------------------------------------------
 
 
+def seed_missing_config_controls() -> int:
+    """Insert a row for every registered control the table does not have yet.
+
+    The page iterates the `config` TABLE, not the registry. So a control added to
+    `CONFIG_CONTROLS` is invisible until somebody submits the form and
+    `update_config`'s upsert creates the row -- and a control nobody can see is a
+    control nobody can fill in.
+
+    Measured 2026-10-04, the day the owner asked for a temperature slider: the
+    slider had been committed, deployed, unit-tested and its save path verified,
+    and it was not on the page. `LLM_TEMPERATURE_CONVERSATION` and
+    `LLM_TEMPERATURE_FACTUAL` were in `CONFIG_CONTROLS` and absent from the
+    table. The owner noticed by looking at the page, which is the only method
+    that checks the whole path.
+
+    Called on every read of the page, so the invariant is "every registered
+    control has a row" rather than "somebody remembered to add one".
+
+    Returns the number of rows inserted. Idempotent.
+    """
+    try:
+        conn = get_db_connection()
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        have = {r["key"] for r in conn.execute("SELECT key FROM config")}
+        missing = [(k, _config_category_for(k)) for k in CONFIG_CONTROLS if k not in have]
+        for key, category in missing:
+            conn.execute(
+                "INSERT OR IGNORE INTO config (category, key, value) VALUES (?, ?, ?)",
+                (category, key, ""),
+            )
+        if missing:
+            conn.commit()
+        return len(missing)
+    except Exception as exc:  # noqa: BLE001
+        # A read-only database must not take the page down: it would render every
+        # control that already has a row, which is the previous behaviour.
+        #
+        # Logging through `logging` and not `current_app`: this runs inside a
+        # request, but it is also called from tests and from any script that
+        # wants the rows, and `current_app` raises outside an app context --
+        # turning a handled warning into a NameError.
+        logging.getLogger("phantasma.config").warning(
+            "could not seed config controls: %s", exc
+        )
+        return 0
+    finally:
+        conn.close()
+
+
 def get_configs_by_category() -> dict:
+    seed_missing_config_controls()
     conn = get_db_connection()
     try:
         configs = conn.execute("SELECT * FROM config ORDER BY category, key").fetchall()
@@ -1052,8 +1104,15 @@ CONFIG_CONTROLS: dict[str, dict] = {
                                       label="Intervalo entre ativações (s)"),
     "WAKEWORD_MODELS": dict(category="Audio", type="text", label="Modelos de ativação",
                             help="Separados por vírgula (ex.: models/hey_fantasma.onnx,models/ola_fantasma.onnx)."),
-    "AUDIO_FEEDBACK_ENABLED": dict(category="General", type="bool", label="Som de confirmação",
-                                   help="Toca um som quando o assistente é ativado."),
+    # The help text here used to read "Toca um som quando o assistente é
+    # ativado", which describes the WAKE sound, not a response sound. That is why
+    # this read as already handled: there was a switch, it was labelled, and it
+    # did something -- just not what the owner was asking for.
+    "AUDIO_FEEDBACK_ENABLED": dict(category="Audio", type="bool", label="Som de activação",
+                                   help=("Toca uma música e a saudação quando a "
+                                         "palavra de activação é reconhecida. "
+                                         "Desligado, o Phantasma acorda em "
+                                         "silêncio.")),
     "USE_SOX_EFFECTS": dict(category="General", type="bool", label="Efeitos de áudio (SoX)",
                             help="Aplica efeitos de equalização ao áudio das respostas."),
     "FEEDBACK_WINDOW_SECONDS": dict(category="General", type="number", min=1, max=20, step=1,
@@ -1062,9 +1121,14 @@ CONFIG_CONTROLS: dict[str, dict] = {
                                   label="Tempo máximo de fala (s)"),
     "QUEUE_MAXSIZE": dict(category="General", type="number", min=1, max=50, step=1,
                           label="Tamanho da fila de mensagens"),
-    "MUSIC_DIR": dict(category="General", type="text", label="Pasta de música",
-                      help="Diretório com a música que o assistente pode tocar."),
-    "GREETING_PATH": dict(category="General", type="text", label="Ficheiro de saudação"),
+    "MUSIC_DIR": dict(category="Audio", type="text", label="Pasta de música",
+                      help=("Diretório com a música do som de activação. Escolhe "
+                            "um ficheiro aleatório de cada vez (.mp3, .wav ou "
+                            ".ogg). Se a pasta não existir, só toca a saudação.")),
+    "GREETING_PATH": dict(category="Audio", type="text", label="Ficheiro de saudação",
+                          help=("Ficheiro de áudio que o Phantasma toca ao "
+                                "activar, depois da música. Por omissão "
+                                "audio/greeting.wav.")),
     "TTS_MODEL_PATH": dict(category="General", type="text", label="Modelo de voz (TTS)"),
     "SKILLS_DIR": dict(category="General", type="text", label="Pasta das skills"),
     "HOME_COORDS": dict(category="General", type="text", label="Coordenadas de casa",
