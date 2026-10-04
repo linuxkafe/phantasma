@@ -613,6 +613,27 @@ class PhantasmaPipeline:
         # Check skills first (intercept ++/-- and weather/tuya before LLM)
         skill_response = self._execute_with_paused_shared_audio(text)
         if skill_response is not None:
+            # A skill's output is the answer to "what is the weather in Porto",
+            # and it is NOT the answer to "what do you make of the weather in
+            # Porto". The first is a lookup; the second is asking for a reading,
+            # and answering it with a bare telemetry line is the bot refusing to
+            # have an opinion -- measured 2026-10-04, "o que achas de como esta
+            # o tempo em Lisboa" returned "Hoje em Lisboa: estado incerto,
+            # entre 17 e 27" verbatim, with no persona and no research.
+            #
+            # So the skill still RUNS in both cases -- the data is the same and
+            # it is still the freshest source -- but in the opinion case it
+            # becomes an input to the model instead of the model's absence.
+            #
+            # Only for opinions, deliberately. "acende a luz" is a command: the
+            # user wants the light on, not a paragraph about lighting. Sending
+            # every skill through the LLM would make the house slower and less
+            # reliable to get exactly the answers it is best at.
+            if self._is_opinion(text):
+                logger.info(
+                    "Skill devolveu dados para uma opiniao: %s", skill_response
+                )
+                return self._respond_with_llm(text, skill_data=skill_response)
             logger.info(f"Skill '{text}' handled: {skill_response}")
             return skill_response
 
@@ -972,19 +993,29 @@ class PhantasmaPipeline:
                     logger.error("Could not resume listening: %s", exc)
         return Result.ok(None)
 
-    def _respond_with_llm(self, text: str) -> Optional[str]:
+    def _respond_with_llm(
+        self, text: str, skill_data: Optional[str] = None
+    ) -> Optional[str]:
         """Answer through SearXNG + the LLM, and mark the answer as web-derived.
 
         The flag is cleared in a finally: latched on, it would make every
         later answer uncacheable, which is the opposite of its purpose.
+
+        `skill_data` is the output of a skill that already ran for this same
+        message, when the message asked for an opinion rather than a lookup.
+        It is passed down rather than re-derived: running the skill twice would
+        cost a second HTTP call to a device and could report a different
+        reading than the one the answer is about.
         """
         self._web_derived = True
         try:
-            return self._respond_with_llm_body(text)
+            return self._respond_with_llm_body(text, skill_data=skill_data)
         finally:
             self._web_derived = False
 
-    def _respond_with_llm_body(self, text: str) -> Optional[str]:
+    def _respond_with_llm_body(
+        self, text: str, skill_data: Optional[str] = None
+    ) -> Optional[str]:
         # This path goes through SearXNG before the LLM, so its answers are not
         # the owner's own words and are not worth keeping. Set here rather
         # than inferred by the caller, because the caller only sees a string
@@ -1073,6 +1104,25 @@ class PhantasmaPipeline:
         # talking about the scaffolding.
         local = "\n".join(x for x in (rag, graph_ctx) if (x or "").strip())
         parts = []
+        # Reading taken from a skill that just ran for this message. It goes in
+        # FIRST and it is labelled as a live reading, because it is the only
+        # part of this prompt that was measured seconds ago: the graph is what
+        # Phantasma happens to have stored, and the web block is a search that
+        # may or may not have covered the question. Without the label, a
+        # forecast sitting next to stored opinions gets averaged with them --
+        # 17-27 graus next to "gosto de chuva" is how you get "chove, mas
+        # talvez" out of two hard facts.
+        if (skill_data or "").strip():
+            parts.append(
+                "### LEITURA DOS DISPOSITIVOS E SERVIÇOS (agora):\n"
+                "Isto foi lido agora, dos teus sensores e serviços. É a tua "
+                "fonte primária para o que foi medido, e vale mais do que o "
+                "guardado e do que a pesquisa. Fala a partir disto, na tua "
+                "voz. Não digas que consultaste um sensor, um serviço ou uma "
+                "fonte, e não recites a leitura como uma linha de dados: "
+                "responde ao que te perguntaram sobre ela.\n"
+                f"{skill_data}\n"
+            )
         if local:
             parts.append(
                 "### CONHECIMENTO LOCAL DO PHANTASMA (fonte primária):\n"
