@@ -60,15 +60,45 @@ All runtime configuration in `config.py` with environment variable overrides:
 
 | Env Var | Config Path | Description |
 |---------|-------------|-------------|
-| `PHANTASMA_DEVICE_IN` | `audio.device_in` | ALSA input device (e.g., "hw:1,0") |
-| `PHANTASMA_DEVICE_OUT` | `audio.device_out` | ALSA output device |
-| `PHANTASMA_VAD_AGGRESSIVENESS` | `vad.aggressiveness` | 0-3 (default 2) |
-| `PHANTASMA_HOTWORD_THRESHOLD` | `hotword.threshold` | 0.0-1.0 (default 0.5) |
-| `PHANTASMA_WHISPER_MODEL` | `stt.model_size` | tiny/base/small/medium/large |
-| `PHANTASMA_OLLAMA_HOST` | `llm.host` | Ollama URL (default http://127.0.0.1:11434) |
-| `PHANTASMA_OLLAMA_MODEL` | `llm.model` | Model name (default llama3:8b-instruct-8k) |
-| `PHANTASMA_PIPER_VOICE` | `tts.voice_model_path` | Path to .onnx voice model |
-| `PHANTASMA_QUEUE_SIZE` | `pipeline.queue_maxsize` | Audio queue size |
+Verified against `config.py` on 2026-10-04. The names below are the ones the
+code actually reads; an earlier version of this table listed
+`PHANTASMA_HOTWORD_THRESHOLD` and `PHANTASMA_OLLAMA_MODEL`, which no code path
+ever read — a mistyped variable name fails open to the default, so a table of
+invented names is worse than no table.
+
+| Env Var | Config Path | Description |
+|---------|-------------|-------------|
+| `ALSA_DEVICE_IN` / `ALSA_DEVICE_OUT` | `audio.device_in` / `.device_out` | ALSA devices (e.g. `hw:1,0`) |
+| `AUDIO_DEVICE_AUTO_DETECT` | `audio.auto_detect` | Probe for a working mic. See the dead `AUDIO_AUTO_DETECT` below. |
+| `AUDIO_BLOCK_SIZE` | `audio.block_size` | Capture block; 512 on prod |
+| `AUDIO_CAPTURE_VOLUME` | `audio.volume_percent` | Mic capture gain |
+| `VAD_AGGRESSIVENESS` | `vad.aggressiveness` | 0-3 (default 2) |
+| `WAKEWORD_CONFIDENCE` | `hotword.threshold` | Base bar, before the noise penalty (default 0.70) |
+| `WAKEWORD_CONFIDENCE_PER_MODEL` | `hotword` | Per-model bars, `ola_fantasma:0.70`. Malformed entries are reported, not ignored silently. |
+| `WAKEWORD_PERSISTENCE` | `hotword.persistence` | Consecutive 80 ms windows required (default 2) |
+| `WAKEWORD_MODELS` | `hotword.models` | Path(s) to the .onnx wake model |
+| `NOISE_QUIET_DB` | `hotword.noise_quiet_db` | Room level that costs no penalty (default -38) |
+| `NOISE_LOUD_DB` | `hotword.noise_loud_db` | Room level that costs the full bump (default -20) |
+| `NOISE_MAX_BUMP` | `hotword.noise_max_bump` | Largest penalty the adaptation may add (default 0.20) |
+| `WHISPER_MODEL` | `stt.model_size` | tiny/base/small/medium/large |
+| `STT_MAX_AUDIO_SECONDS` | `stt` | Cap on the utterance fed to Whisper |
+| `OLLAMA_HOST_PRIMARY` / `_FALLBACK` | `llm.host` | Primary then fallback Ollama |
+| `OLLAMA_MODEL_PRIMARY` / `_FALLBACK` | `llm.model` | **Text** model (qwen3:8b) |
+| `OLLAMA_VISION_MODEL` | vision | **Vision only** (gemma3:4b) |
+| `TTS_MODEL_PATH` | `tts.voice_model_path` | Piper voice .onnx |
+| `TTS_CACHE_DIR` | `tts.cache_dir` | Synthesised-audio cache |
+| `QUEUE_MAXSIZE` | `pipeline.queue_maxsize` | Audio queue size |
+| `QUIET_START` / `QUIET_END` | night mode | Hours where the assistant must not wake |
+| `FEEDBACK_WINDOW_SECONDS` | `hotword.feedback_window` | Length of the post-wake feedback tone |
+
+**`AUDIO_AUTO_DETECT` is dead.** The code reads `AUDIO_DEVICE_AUTO_DETECT`. The
+mistyped name fails open to the default and looks like the setting not working;
+prod keeps the wrong spelling commented out in `.env` as a warning.
+
+**Dead `NOISE_*` guard.** `NOISE_QUIET_DB` at or above `NOISE_LOUD_DB` makes the
+span zero or negative, the penalty stops meaning anything, and the failure is
+silence — the wake word simply never fires, with nothing in the log to say why.
+That combination is reported at startup rather than accepted.
 | `CHACON_PLUG_IP` | `chacon_plug_ip` | Local IP of the Chacon balcony plug (default 10.0.0.116). Non-empty ⇒ the device gets a tile in `/`. |
 | `CHACON_PLUG_NAME` | `chacon_plug_name` | Nickname shown on the tile (default "luz do balcão") |
 | `CHACON_PLUG_PORT` | `chacon_plug_port` | UDP port (default 18530) |
@@ -270,6 +300,13 @@ instead of pretending to work.
 - `skill_weather` daemon populates `weather_cache.json` every 30 min
 - IPMA forecast + Open-Meteo AQI + moon phase
 - UI shows stale indicator in tooltip
+- **Air quality and UV carry their observation hour.** Open-Meteo serves
+  `uv_index` on an hourly interval and the Lisbon index on 2026-10-04 ran
+  0.1 → 4.35 → 0.0 across the day, so a number without its hour is not a
+  reading. The spoken form is *"o UV está moderado (3.45, medido às 15h)"*;
+  when the hour is unknown the sentence admits the gap instead of claiming the
+  present. The 30-minute cache against an hourly source is the reason this
+  matters — see ROADMAP.md, 2026-10-04.
 
 ### GMIF Graph Memory
 - **Schema**: `memory_graph` extended with GMIF columns (`logical_form`, `validation_type`, `extraction_confidence`, `validation_confidence`, `source_chunks`, `gmif_level`, `node_gmif_type`, `node_gmif_confidence`, `node_gmif_evidence`)
@@ -283,6 +320,49 @@ instead of pretending to work.
 ### Wake Word Feedback
 - `++` / `--` exact triggers → DAN+/DAN- in FlyBrain
 - Immediate FlyBrain `persist()` flush
+
+### Wake Word Calibration
+
+The bar in force is **not** `WAKEWORD_CONFIDENCE`. It is that value plus a
+penalty from the measured room noise, capped by `NOISE_MAX_BUMP`:
+
+```
+bar = min(WAKEWORD_CONFIDENCE + penalty, 0.99)
+penalty = NOISE_MAX_BUMP * (floor_db - NOISE_QUIET_DB) / (NOISE_LOUD_DB - NOISE_QUIET_DB)
+```
+
+The score log prints the bar in force, the base value, and the floor, because
+the bar and the score are the only two numbers that decide whether you are
+heard:
+
+```
+🔬 Wake scores: ola_fantasma=0.8679 | bar 0.700 (base 0.700) | noise floor -42.2 dBFS, threshold +0.000
+```
+
+**Calibrate against your worst window, not your average one.** Measured in this
+room on 2026-10-04 (service stopped, mic at the service's own gain, 15 s of room
+tone through the same 80 ms windows the detector scores):
+
+| window | level | bar at `-42/-22` | bar at `-38/-20` |
+|--------|-------|------------------|------------------|
+| floor  | -40.5 | 0.711 | 0.700 |
+| median | -38.2 | 0.734 | 0.700 |
+| p90    | -35.8 | 0.758 | 0.724 |
+| max    | -34.5 | **0.771 — fails** | 0.739 |
+
+A genuine "olá fantasma" scores **0.7677**. The `-42/-22` calibration that looked
+correct on the median window failed in the loudest 3.2% of them — passing most of
+the time, which is the worst outcome there is, because it looks fixed right up
+until it is not. Both numbers are pinned in the tests.
+
+The adaptation earns its keep in the other direction: at -20 dBFS the bar goes
+to 0.90, which is what keeps out the 03:41 false positive (0.80 in an empty
+house that made the assistant say "Sim." at three in the morning).
+
+**Known limit.** Speech and noise overlap in this room, so no static threshold
+separates them. In a quiet room the bar sits at the 0.70 baseline — the same
+configuration that produced that 03:41 false alarm. This calibration removes
+misses and leaves the false-alarm exposure where it already was.
 
 ### Admin Features
 - **Dashboard** — stats, memory graph, FlyBrain state

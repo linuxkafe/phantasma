@@ -1030,3 +1030,79 @@ reversão chama o caminho real e verifica o que o motor recebeu.
 se faz com um sensor: o número veio errado da fonte. Uma resposta que repete o
 número que recebeu está correcta — mesmo quando o número é falso. **Isto é um
 defeito a corrigir na skill da meteorologia, e não no LLM.**
+
+---
+
+## 2026-10-04 — A casa ficou surda ao seu próprio nome
+
+### A medição
+
+Serviço parado, microfone no ganho que o serviço configura, 15 s de ruído da sala
+pelas mesmas janelas de 80 ms que o detector pontua:
+
+```
+rms dBFS    mediana -38.2    p90 -35.8    max -34.5
+piso de ruído assenta em -40.5
+```
+
+Com `quiet_db=-60`, `loud_db=-35`, `max_bump=0.20` esse piso cobra **+0.156** e a
+barra vai para **0.856**. Uma fala genuína de "olá fantasma" mede **0.7677**.
+
+Não era um modelo fraco nem um limiar demasiado picky. A barra estava
+*acima* de tudo o que o modelo produz com fala real: a casa não conseguia
+ouvir-se.
+
+### Duas causas, uma delas de diagnóstico
+
+**A calibração nunca foi medida nesta casa.** `-60` pressupõe uma sala 20 dB mais
+silenciosa que esta. E era inalcançável: `noise_quiet_db`, `noise_loud_db`,
+`noise_max_bump` e `noise_adaptive` eram defaults de dataclass **sem override
+por ambiente** — a mesma classe de bug do `AUDIO_AUTO_DETECT`, de batina de
+áudio. Agora há `NOISE_QUIET_DB`, `NOISE_LOUD_DB`, `NOISE_MAX_BUMP` e
+`NOISE_ADAPTIVE`, com os valores da casa no `.env` de prod. Um `quiet_db` acima
+de `loud_db` é reportado em vez de aceite: a penalização deixa de ter sentido e
+a falha é silêncio, sem nada no log que o explique.
+
+**O log mentia sobre si próprio.** A linha de scores imprimia o limiar *base* e
+o comentário afirmava que os dois não podiam divergir. Podem, até `max_bump`. O
+journal dizia `ola_fantasma=0.7677` — registado por ser "interessante" por estar
+perto de 0.70 — quando a barra que o recusava era 0.856. O log dizia que a
+palavra estava perto; não estava perto de nada. Passa a ir por
+`effective_threshold()` e a imprimir a barra em vigor e o piso.
+
+**Calibração final:** `quiet=-42`, `loud=-22`. Sala normal → barra ≈ 0.715, que
+0.7677 limpa. Sala realmente barulhenta (≥ -22 dBFS) → volta ao bump inteiro,
+0.90, que é o que mantém fora a falsa positiva das 03:41 (0.80 numa casa vazia).
+
+### Correcção ao registo anterior: o UV não vinha errado
+
+Este Roadmap afirma, mais acima, que *"o número veio errado da fonte"*. Hoje
+perguntei à fonte. Para Lisboa, 2026-10-04:
+
+```
+current=uv_index   15:00 -> 2.25
+daily=uv_index_max  hoje  -> 4.35
+hourly:  08:00 0.1  09:00 0.55  10:00 1.6  11:00 2.85  12:00 3.45
+         13:00 2.6  14:00 4.35  15:00 3.45  16:00 2.25  17:00 0.95  19:00 0.0
+```
+
+**3.45 é um valor real da Open-Meteo.** Aparece às 12:00 e às 15:00. Não havia
+bug de parsing e a resposta do modelo estava certa — a skill cacheia a cada 30
+minutos (`POLL_INTERVAL = 1800`) enquanto a fonte serve `uv_index` com
+`interval: 3600`, e o valor move-se quatro pontos no mesmo dia.
+
+O defeito era a frase: *"o UV **está** moderado (3.45)"*, no presente, sem hora.
+O número era verdadeiro e a afirmação sobre ele é que não. Passa a dizer
+`medido às 15h`, e quando a hora é desconhecida admite a lacuna em vez de
+afirmar o presente.
+
+A lição é a mesma da acima, noutra escala: **conferir a leitura antes de culpar
+o modelo é certo; dar por conferido o que não foi conferido não é.** Da primeira
+vez a verificação ficou por fazer e a conclusão errada foi para o registo.
+
+### Excepção ao `--force-host`
+
+`deploy.sh` falhou com `config.py diverges`. É a barreira a funcionar: prod ainda
+tinha o `config.py` antigo. Dev estava certo — é uma alteração de código, não um
+valor de host a vazar — por isso `--force-host`, e a calibração ficou também no
+`.env` de prod, que é onde pertence.

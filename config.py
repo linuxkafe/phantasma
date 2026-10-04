@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
@@ -102,9 +103,45 @@ class HotwordConfig:
     # turning the microphone off. 0.20 takes the 03:41 event (0.80) below a
     # 0.90 bar while leaving a real wake word, which scores far higher than the
     # 0.0009 speech floor measured on 2026-09-27, reachable.
+    #
+    # RECALIBRATED 2026-10-04, after the house stopped answering to its own
+    # wake word. These three were dataclass-only, so they could not be tuned per
+    # host -- which is the AUDIO_AUTO_DETECT class of bug wearing an audio
+    # costume: a host value pinned in code that no environment variable could
+    # reach.
+    #
+    # Measured in this room, service stopped, mic at the gain the service sets,
+    # 15 s of room tone through the same 80 ms window the detector scores:
+    #
+    #     rms dBFS   median -38.2   p90 -35.8   max -34.5
+    #     noise floor settles at -40.5
+    #
+    # -60 dBFS was never measured here. At -40.5 the old constants charged
+    # +0.156, putting the bar at 0.856 -- while a genuine "ola fantasma" scores
+    # 0.7677. The house was mathematically unable to hear itself: the threshold
+    # sat above anything the model produces for real speech. Not a tuning
+    # nuance, a dead microphone.
+    #
+    # quiet_db is -38, NOT -42, and the difference is worth the whole fix.
+    # Calibration is only as good as the WORST room condition, not the average
+    # one: -42 pays +0.015 in the median window and +0.071 at the loudest
+    # 3.2% of them, which put the bar at 0.771 -- above the 0.7677 that real
+    # speech scores. That passes most of the time, which is the worst possible
+    # outcome: it looks fixed right up until it isn't. At -38 the whole measured
+    # range clears (0.700 median -> 0.734 loudest) and a genuinely loud room at
+    # -20 still earns the full 0.90 bump that keeps the 03:41 false positive
+    # (0.80 in an empty house) out.
+    #
+    # The overlap is real and is NOT solved here: in a quiet room this bar sits
+    # at the 0.70 baseline, and that is the configuration in which an empty
+    # house once produced 0.80. Speech and noise overlap in this room, so no
+    # static threshold separates them; this fix removes the misses, and the
+    # false-alarm exposure is left exactly where it already was, not made worse.
+    # Env-overridable now, because this is a property of the room and the
+    # microphone, not of the software.
     noise_adaptive: bool = True
-    noise_quiet_db: float = -60.0
-    noise_loud_db: float = -35.0
+    noise_quiet_db: float = -38.0
+    noise_loud_db: float = -20.0
     noise_max_bump: float = 0.20
 
 
@@ -625,6 +662,33 @@ class Config:
         cfg.hotword.cooldown_seconds = float(
             os.getenv("WAKEWORD_COOLDOWN_SECONDS", str(cfg.hotword.cooldown_seconds))
         )
+        # The noise floor calibration is a property of the ROOM and the mic, so
+        # it lives in .env. It used to be unreachable from .env, which is how a
+        # -60 dBFS figure nobody measured on this hardware survived in code.
+        cfg.hotword.noise_adaptive = os.getenv(
+            "NOISE_ADAPTIVE", str(cfg.hotword.noise_adaptive)
+        ).strip().lower() not in ("0", "false", "no")
+        cfg.hotword.noise_quiet_db = float(
+            os.getenv("NOISE_QUIET_DB", str(cfg.hotword.noise_quiet_db))
+        )
+        cfg.hotword.noise_loud_db = float(
+            os.getenv("NOISE_LOUD_DB", str(cfg.hotword.noise_loud_db))
+        )
+        cfg.hotword.noise_max_bump = float(
+            os.getenv("NOISE_MAX_BUMP", str(cfg.hotword.noise_max_bump))
+        )
+        # A malformed calibration is worse than none: quiet_db above loud_db
+        # makes the span negative and the penalty meaningless, so it is reported
+        # rather than silently accepted -- the same reasoning as the
+        # WAKEWORD_CONFIDENCE_PER_MODEL entries above.
+        if cfg.hotword.noise_quiet_db >= cfg.hotword.noise_loud_db:
+            warnings.warn(
+                f"NOISE_QUIET_DB ({cfg.hotword.noise_quiet_db}) is not below "
+                f"NOISE_LOUD_DB ({cfg.hotword.noise_loud_db}): the noise penalty "
+                f"will be meaningless and the wake word may never fire.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         # Per-model overrides: "ola_fantasma:0.70,hey_fantasma:0.50".
         # Malformed entries are ignored rather than fatal, so one typo cannot
         # take the whole assistant down; the global threshold still applies.

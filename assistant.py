@@ -509,21 +509,32 @@ class PhantasmaPipeline:
             if now - getattr(self, "_last_score_log", 0.0) > 5.0:
                 ranked_all = sorted(scores.items(), key=lambda kv: -kv[1])
                 top_name, top_score = ranked_all[0] if ranked_all else ("n/a", 0.0)
-                # The threshold in force for THAT model, from the detector
-                # itself -- not a constant, and not a second read of the
-                # environment. Same source as the decision it explains.
-                per_model = getattr(self.hotword, "_thresholds", {}) or {}
-                threshold = per_model.get(
-                    top_name, getattr(self.hotword, "threshold", 0.5)
-                )
+                # The threshold in force for THAT model -- from the detector,
+                # and through `effective_threshold`, which is what actually
+                # decides. Not a constant, and not a second read of the
+                # environment.
+                #
+                # This used to read the BASE threshold, and the comment above
+                # claimed the two could not drift apart. They can, by up to
+                # max_bump: measured 2026-10-04, the journal printed
+                # "Wake scores: ola_fantasma=0.7677" -- logged as interesting
+                # because 0.7677 is near 0.70 -- while the bar that rejected it
+                # was 0.856. The log said the wake word was close; it was not
+                # close to anything. Anyone reading it, including me, would
+                # conclude the model was weak rather than the room loud.
+                threshold = self.hotword.effective_threshold(top_name)
+                top_base = getattr(self.hotword, "threshold", 0.5)
                 last_top = getattr(self, "_last_top_score", 0.0)
                 if _wake_score_is_worth_logging(top_score, last_top, threshold):
                     self._last_score_log = now
                     self._last_top_score = top_score
                     ranked = ranked_all[:2]
+                    noise = getattr(self.hotword, "noise_state", lambda: "")()
                     logger.info(
                         "🔬 Wake scores: "
                         + (" ".join(f"{n}={v:.4f}" for n, v in ranked) or "n/a")
+                        + f" | bar {threshold:.3f} (base {top_base:.3f})"
+                        + (f" | {noise}" if noise else "")
                     )
             if detected:
                 # Night mode is not "speak quietly": it means the assistant is

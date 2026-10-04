@@ -289,6 +289,11 @@ class TestNightActivation:
 
         calls = []
 
+        # The 03:41 event as the docstring above states it: 0.80 against a 0.70
+        # bar, in a quiet house. A quiet room pays no noise penalty, so the bar
+        # in force is the base threshold -- which is what the double reports.
+        bar = 0.70
+
         class _Hotword:
             def process(self, frame):
                 return (detected, model if detected else None)
@@ -298,6 +303,18 @@ class TestNightActivation:
 
             def reset(self):
                 calls.append("reset")
+
+            # The real HotwordDetector has this since 2026-10-04, and the
+            # score-logging branch now goes through it rather than reading
+            # `_thresholds` behind its back. Without it this double raised
+            # AttributeError on a method the production collaborator really
+            # has -- a stub that lied about the interface, not a test that
+            # asserted the wrong thing.
+            def effective_threshold(self, name):
+                return bar
+
+            def noise_state(self):
+                return ""
 
         class _Vad:
             def reset(self):

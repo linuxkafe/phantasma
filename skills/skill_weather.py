@@ -145,7 +145,7 @@ def handle(user_prompt_lower, user_prompt_full):
                 main = f"{day_name.capitalize()} em {target_city_norm.title()}: {w_desc}, entre {t_min}° e {t_max}°."
 
             # Unificação de Ar e UV na resposta geral
-            ar_uv = f" A qualidade do ar está {aqi_desc} e o UV está {uv_desc} ({m.get('uv_index')})."
+            ar_uv = _air_and_uv_sentence(m, aqi_desc, uv_desc)
             
             res = f"{resp_prefix}{main}{ar_uv}"
             if is_night: 
@@ -156,6 +156,48 @@ def handle(user_prompt_lower, user_prompt_full):
     except Exception as e:
         print(f"ERRO skill_weather: {e}")
         return "As nuvens estão mudas. Não consegui aceder ao IPMA."
+
+def _uv_clock(observed_at):
+    """Render the source's observation hour, or None if we do not know it.
+
+    Open-Meteo reports uv_index on an hourly interval, and in this room on
+    2026-10-04 the same day ran 0.1 -> 0.55 -> 1.6 -> 2.85 -> 3.45 -> 2.6 ->
+    4.35 -> 3.45 -> 2.25 -> 0.0 between 08:00 and 19:00. A figure that swings by
+    four points is only meaningful with the hour it belongs to.
+    """
+    if not observed_at:
+        return None
+    try:
+        return int(str(observed_at)[11:13])
+    except (TypeError, ValueError):
+        return None
+
+
+def _air_and_uv_sentence(snapshot, aqi_desc, uv_desc):
+    """Say what was measured AND when.
+
+    The 2026-10-04 bug: the sentence read "o UV está moderado (3.45)" with the
+    bare present tense, so a reading the cache had been holding since 12:00 was
+    spoken as the current state. Nothing was numerically false -- 3.45 is a real
+    Open-Meteo value, it just belongs to an hour that had ended. The number was
+    right and the claim about it was not.
+    """
+    uv = snapshot.get('uv_index')
+    hour = _uv_clock(snapshot.get('uv_observed_at'))
+    if uv is None:
+        return f" A qualidade do ar está {aqi_desc} e o UV está {uv_desc}."
+    if hour is None:
+        # Claiming the present without knowing when the reading was taken is
+        # the exact defect this function exists to remove.
+        return (
+            f" A qualidade do ar está {aqi_desc} e o UV é de {uv} "
+            f"({uv_desc}), sem hora de observação conhecida."
+        )
+    return (
+        f" A qualidade do ar está {aqi_desc} e o UV está {uv_desc} "
+        f"({uv}, medido às {hour}h)."
+    )
+
 
 def _refresh_weather_cache() -> bool:
     """Fetch IPMA + Open-Meteo and atomically write CACHE_FILE.
@@ -176,6 +218,7 @@ def _refresh_weather_cache() -> bool:
             lat, lon = today.get('latitude'), today.get('longitude')
             aqi = None
             uv = None
+            uv_observed_at = None
             try:
                 om = client.get(
                     "https://air-quality-api.open-meteo.com/v1/air-quality",
@@ -188,6 +231,12 @@ def _refresh_weather_cache() -> bool:
                 # answer, never on the screen.
                 aqi = current.get('us_aqi')
                 uv = current.get('uv_index')
+                uv_observed_at = current.get('time')
+                # The source's OWN observation hour, not our fetch time.
+                # Open-Meteo serves uv_index at `interval: 3600`, so the number
+                # describes one hour and stays put until the next one; recording
+                # only `fetched_at` cannot tell a fresh reading from one the
+                # cache has been holding for half an hour.
             except Exception:
                 # AQI is optional; forecast is the hard requirement
                 pass
@@ -197,6 +246,7 @@ def _refresh_weather_cache() -> bool:
                 "moon_phase": _get_moon_phase(),
                   "aqi": aqi,
                   "uv_index": uv,
+                  "uv_observed_at": uv_observed_at,
                 "fetched_at": datetime.now().isoformat(),
                 "stale": False,
             }
