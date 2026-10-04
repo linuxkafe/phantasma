@@ -86,7 +86,12 @@ SYNC_DIRS=(src tests skills prompts public scripts)
   # gated above for being byte-identical between the trees, because they carry
   # host values that belong in .env; syncing them here would overwrite prod's
   # copies instead of failing the gate.
-  TOP_LEVEL_SYNC=(assistant.py tools.py data_utils.py pyproject.toml)
+  # text_norm.py (2026-10-04) is here for the same reason as data_utils.py:
+  # imported at RUNTIME by assistant.py and by four skills, so a missing copy
+  # in prod is a module that does not import and a house that answers nothing.
+  # Omitted from this list on 2026-10-04 and caught by the prod-venv import
+  # gate below, which is that gate doing its job rather than a false alarm.
+  TOP_LEVEL_SYNC=(assistant.py tools.py data_utils.py text_norm.py pyproject.toml)
 
 # SKILL_REVIEW was populated on 2026-09-27 with skill_tuya.py and
 # skill_weather.py: prod held behaviour dev lacked (a weather cache, and a

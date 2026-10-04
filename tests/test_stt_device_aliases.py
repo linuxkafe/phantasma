@@ -21,18 +21,26 @@ Two repairs, and only one of them is a repair of the model:
 import pytest
 
 import skills.skill_tuya as tuya
-from config import config
 from src.pipeline.stt import _canonical_device_names
 from text_norm import fold
 
 
 @pytest.fixture
 def house(monkeypatch):
-    monkeypatch.setattr(config, "TUYA_DEVICES", {
+    """Patch the MODULE attribute, which is where the registry actually lives.
+
+    The first version of this fixture patched `config.TUYA_DEVICES` on the
+    dataclass instance. That attribute does not exist in production, so the code
+    found nothing, the alias pass returned None, and every test passed against a
+    path that could never run. Green because it agreed with the bug.
+    """
+    devices = {
         "Exaustor do WC": {}, "Exaustor da Sala": {},
         "Luz do Quarto": {}, "Desumidificador do Armário": {},
-    }, raising=False)
-    return config
+    }
+    import config as config_module
+    monkeypatch.setattr(config_module, "TUYA_DEVICES", devices, raising=False)
+    return devices
 
 
 def test_the_accent_alone_is_enough_because_the_noun_is_a_prefix(house):
@@ -69,7 +77,8 @@ def test_a_room_is_not_turned_into_a_device(house):
 
 
 def test_a_device_this_house_does_not_have_is_not_invented(house, monkeypatch):
-    monkeypatch.setattr(config, "TUYA_DEVICES", {"Luz do Quarto": {}},
+    import config as config_module
+    monkeypatch.setattr(config_module, "TUYA_DEVICES", {"Luz do Quarto": {}},
                         raising=False)
     assert _canonical_device_names("liga o exaustor") is None, (
         "a casa passou a concordar sobre um dispositivo que nao tem"
@@ -77,7 +86,8 @@ def test_a_device_this_house_does_not_have_is_not_invented(house, monkeypatch):
 
 
 def test_nothing_is_rewritten_when_no_devices_are_registered(monkeypatch):
-    monkeypatch.setattr(config, "TUYA_DEVICES", {}, raising=False)
+    import config as config_module
+    monkeypatch.setattr(config_module, "TUYA_DEVICES", {}, raising=False)
     assert _canonical_device_names("Liga o exaustório.") is None
 
 
@@ -85,16 +95,28 @@ def test_a_question_with_no_device_word_is_untouched(house):
     assert _canonical_device_names("como está o tempo em Lisboa") is None
 
 
-def test_the_full_path_from_transcription_to_the_switch(house):
-    """The wiring, not the helper.
+def test_the_full_path_from_transcription_to_recognition(house):
+    """The wiring, not the helper -- and only as far as a unit test can go.
 
     Two independent repairs meet here: the alias makes the word legible, and the
-    skill folds accents so it can read it. Testing either alone would have
-    passed while the command still went nowhere.
+    skill folds accents so it can read it. Testing either alone passes while the
+    command still goes nowhere.
+
+    It stops at RECOGNITION on purpose. Switching the relay needs real Tuya
+    credentials and real hardware; asserting "2 dispositivos ligados" here was
+    asserting a fact about the world that the unit test cannot establish, and it
+    passed for a while only because the device dict it was given was not the one
+    the code reads. The switch itself is verified on target, not here.
     """
     spoken = "Liga o exaustório."
     fixed = _canonical_device_names(spoken) or spoken
-    assert tuya.handle(fold(fixed), fixed) == "2 dispositivos ligados."
+    assert fixed == "Liga o exaustor."
+
+    prompt = fold(fixed)
+    assert "exaustor" in prompt
+    assert tuya._matches_a_device_noun(prompt, fold("Exaustor do WC")), (
+        "a skill não reconhece o dispositivo que a transcrição produziu"
+    )
 
 
 def test_the_initial_prompt_is_actually_passed_to_the_decoder():

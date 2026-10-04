@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+import config as config_module
 from config import config
 from src.pipeline.utils import Result, logger
 from text_norm import DEVICE_VARIANTS, fold
@@ -222,7 +223,18 @@ def _canonical_device_names(text: str) -> Optional[str]:
     """
     if not text:
         return None
-    devices = getattr(config, "TUYA_DEVICES", None) or {}
+    # BOTH places, and the module is the one that matters.
+    #
+    # `skill_tuya` reads `config.TUYA_DEVICES` off the MODULE; the Config
+    # dataclass has no such attribute. Reading only the instance made this
+    # return None in production while the unit test stayed green, because the
+    # test patched the instance -- the attribute that does not exist there.
+    # A test that agrees with the bug is worse than no test.
+    devices = (
+        getattr(config_module, "TUYA_DEVICES", None)
+        or getattr(config, "TUYA_DEVICES", None)
+        or {}
+    )
     if not devices:
         return None
 
