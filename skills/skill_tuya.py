@@ -1,19 +1,20 @@
-import config
-from pathlib import Path
-import time
 import json
+import logging
 import os
 import socket
-import sys
-import threading
 import tempfile
-import logging
+import threading
+import time
+from pathlib import Path
+
+import config
+from text_norm import contains_word, devices_in, fold
 
 logger = logging.getLogger("phantasma.tuya")
 
 try:
     import tinytuya
-    from tinytuya import OutletDevice, Device 
+    from tinytuya import Device, OutletDevice
 except ImportError:
     print("AVISO: Biblioteca 'tinytuya' não encontrada.")
     class Device: pass
@@ -36,7 +37,7 @@ LAST_POLL = {}
 # timestamp cooldown alone is not enough to prevent overlapping polls.
 _INFLIGHT = set()
 _INFLIGHT_LOCK = threading.Lock()
-VERBOSE_LOGGING = False 
+VERBOSE_LOGGING = False
 
 ACTIONS_ON = ["liga", "ligar", "acende", "acender", "ativa"]
 ACTIONS_OFF = ["desliga", "desligar", "apaga", "apagar", "desativa"]
@@ -87,8 +88,18 @@ def _matches_a_device_noun(prompt_lower, nickname_lower):
 
     Returns False for anything that is not a device type, which is what stops a
     room word from standing in for one.
+
+    Folded, on both sides. `DEVICE_NOUNS` carries "lâmpada" and a nickname
+    carries "Armário", and comparing those against unaccented text meant two
+    spelled devices could never be named. A variant map as well, so "ventoinha"
+    and "fan" reach the extractor: neither contains "exaustor", so substring
+    matching alone will never do it however the accent is folded.
     """
-    return any(noun in prompt_lower and noun in nickname_lower
+    if devices_in(prompt_lower):
+        named = devices_in(prompt_lower)
+        if any(d in fold(nickname_lower) for d in named):
+            return True
+    return any(fold(noun) in prompt_lower and fold(noun) in nickname_lower
                for noun in DEVICE_NOUNS)
 VERSIONS_TO_TRY = [3.3, 3.1, 3.4, 3.5]
 
@@ -154,7 +165,7 @@ def _get_device_name_by_ip(ip):
 
 def _poll_device_task(name, details, force=False):
     ip = details.get('ip')
-    if not ip or ip.endswith('x'): return 
+    if not ip or ip.endswith('x'): return
     global LAST_POLL
     if not force and (time.time() - LAST_POLL.get(name, 0) < POLL_COOLDOWN): return
     # One poll in flight per device. LAST_POLL records the START of a poll, not
@@ -323,6 +334,13 @@ def get_status_for_device(nickname):
 def handle(user_prompt_lower, user_prompt_full):
     if not hasattr(config, 'TUYA_DEVICES'): return None
 
+    # Fold ONCE, here, and compare everything below against the folded text.
+    # Every comparison in this function used the raw lowercased prompt with the
+    # accents intact, which is why "liga o exaustório" reached nothing while two
+    # exhaustors sat configured: the accent is how the word sounds, and no
+    # amount of correct spelling on the owner's part survives `in`.
+    user_prompt_lower = fold(user_prompt_full or user_prompt_lower)
+
     # Lógica de prioridade: Desliga > Liga
     action = None
     if any(x in user_prompt_lower for x in ACTIONS_OFF): action = "off"
@@ -333,17 +351,17 @@ def handle(user_prompt_lower, user_prompt_full):
     targets = []
     # 1. Procurar alcunha direta (Exata)
     for nick, conf in config.TUYA_DEVICES.items():
-        if nick.lower() in user_prompt_lower:
+        if contains_word(user_prompt_lower, nick):
             targets.append((nick, conf))
-    
+
     # 2. Lógica inteligente para Sensores e Locais
     if not targets:
         locations = ["sala", "quarto", "wc", "cozinha", "entrada"]
         mentioned_loc = next((loc for loc in locations if loc in user_prompt_lower), None)
         is_sensor_query = any(x in user_prompt_lower for x in ["temperatura", "humidade"])
-        
+
         for nick, conf in config.TUYA_DEVICES.items():
-            nick_l = nick.lower()
+            nick_l = fold(nick)
             if mentioned_loc and mentioned_loc in nick_l:
                 if is_sensor_query and "sensor" in nick_l:
                     targets.append((nick, conf)); break
@@ -353,9 +371,9 @@ def handle(user_prompt_lower, user_prompt_full):
     # 3. Lógica Genérica (Fallback): "Liga o exaustor" -> Liga TODOS os exaustores
     if not targets:
         for noun in BASE_NOUNS:
-            if noun in user_prompt_lower:
+            if fold(noun) in user_prompt_lower:
                 for nick, conf in config.TUYA_DEVICES.items():
-                    if noun in nick.lower(): targets.append((nick, conf))
+                    if fold(noun) in fold(nick): targets.append((nick, conf))
                 if targets: break
 
     # A thermometer is not something you switch. Both branches above can land
@@ -401,19 +419,19 @@ def handle(user_prompt_lower, user_prompt_full):
             d = OutletDevice(conf['id'], conf['ip'], conf['key'])
             d.set_version(3.3); d.set_socketTimeout(2)
             idx = 20 if any(x in nick.lower() for x in ["luz", "lâmpada", "candeeiro"]) else 1
-            
+
             # Executa sem esperar retorno (nowait=True não retorna bool útil)
             d.set_value(idx, action == "on", nowait=True)
-            
+
             # Se não houve exceção, contamos como sucesso
             success += 1
             print(f"[Tuya] {nick} -> {action}")
-        except Exception as e: 
+        except Exception as e:
             print(f"[Tuya] Erro ao controlar {nick}: {e}")
             continue
 
     action_pt = "ligado" if action == "on" else "desligado"
-    
+
     if len(targets) > 1:
         return f"{success} dispositivos {action_pt}s."
     elif len(targets) == 1:

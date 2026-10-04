@@ -1168,3 +1168,95 @@ colocado acima do passo do FlyBrain. O brain via só a primeira vez que algo era
 perguntado — e há um comentário em `_respond_with_llm_body` a dizer exactamente
 isso. A leitura da cache do modelo desceu para dentro do body, depois do `step`.
 Nenhum teste precisou ser afrouxado; o passo tinha de voltar a acontecer.
+
+---
+
+## 2026-10-04 — O exaustor que o dono tinha e a casa não ouvia
+
+O dono disse «liga o exautor». A resposta foi «não sei como ligar o exaustório».
+O log tem a história inteira em três linhas:
+
+```
+STT transcribed: 'Liga o exaustório....'
+A pesquisar na web: 'Liga o exaustório.'
+IA: Não sei como ligar um exaustório...
+```
+
+`Exaustor do WC` e `Exaustor da Sala` estavam configurados durante todo o tempo.
+
+## Duas causas, e a segunda é a que interessa
+
+**O prompt existia e não era lido.** `WHISPER_INITIAL_PROMPT` está no `.env` de
+prod desde antes deste código existir, e continha já a frase certa —
+
+```
+Comandos frequentes: ... Liga o exaustor. Desliga o exaustor. ...
+```
+
+— três linhas acima da falha. `src/pipeline/stt.py` nunca passou o argumento ao
+`transcribe`. Uma definição escrita e não lida é indistinguível de não a ter.
+Passa a ser passado, e é isto que o dono pediu: o modelo deixa de adivinhar a
+palavra quando lhe dizem a palavra.
+
+**Um prompt é um viés, não uma promessa.** `initial_prompt` inclina o decoder;
+não o restringe. Por isso há uma segunda passagem, determinística: cada palavra
+que o dono pode ser mal ouvido dizer é reescrita para o substantivo canónico, e
+só para substantivos de dispositivos que esta casa tem. Reescrever um nome que
+não existe seria inventar vocabulário — e inventar vocabulário é como uma casa
+acaba a concordar com convicção sobre um aparelho que não existe.
+
+O acento sozinho chegava: dobrado, `exaustorio` **contém** `exaustor` como
+prefixo. A palavra que o dono disse e a palavra que o código tem são a mesma
+palavra, escritas de duas maneiras.
+
+## Quatro normalizações, agora uma
+
+`skill_chacon` e `skill_tasmota` dobravam acentos (NFD→ASCII). `skill_tuya` não
+dobrava nada, e o `loader` dobrava os gatilhos mas não as frases dentro de
+`handle`. Passou a existir `text_norm.py`, com o vocabulário de dispositivos e
+`devices_in()` — o mapeamento vai de variante para dispositivo, porque
+`ventoinha` não contém `exaustor` e nenhum dobramento de acentos a alcança.
+
+`skill_tuya` dobra o prompt uma vez, à entrada de `handle`, e compara tudo
+contra o texto dobrado. Sem isso: dois dispositivos com acentos nos apelidos
+(`Armário`, `lâmpada`) eram inalcançáveis por quem os escreve bem.
+
+## Duas coisas que eu fiz mal, e as duas mudaram o resultado
+
+**Fui ao sítio errado.** O dono pediu o modelo de voz-para-texto e eu comecei por
+consertar o `skill_tuya`. O que corrigi era um bug verdadeiro e continua a
+valer como defesa, mas a correcção que pediu é a do STT, e foi a segunda.
+
+**Escrevi o substituto errado.** A primeira versão da passagem determinística
+reescrevia o substantivo para o apelido completo: «liga o exaustor do wc» saía
+«liga o Exaustor do WC do wc», e um pedido a todos os exaustores tornava-se um
+pedido a um só. Só se resolve o substantivo; qual aparelho responde é trabalho
+da skill.
+
+Também há um teste que testa uma coisa que não é a que interessa: afirmava que
+cada variante *contém* o substantivo. Não contém — `ventoinha` não contém
+`exaustor` — e nunca contém. Passou a afirmar a propriedade que importa, que é
+que o dono chega ao dispositivo.
+
+## Um comando de dispositivo não é uma pergunta para a web
+
+A terceira linha do log é a mais grave das três: a casa **pesquisou na internet**
+«Liga o exaustório». Isto não está corrigido. Um comando que nenhuma skill
+reconhece cai no modelo, e o modelo procura. Qualquer frase imperativa que falhe
+o reconhecimento tem este destino. Corrigi-o no ROADMAP como pendente em vez de
+o dar por resolvido: é uma decisão de desenho (que frases são comando, e o que
+fazer com elas quando não há skill) e não é minha para escolher.
+
+---
+
+## 2026-10-04 — Risco aceite, não resolvido
+
+O `qwen3:8b` responde a uma pergunta filosófica com um ensaio sobre capitalismo
+tardio, mantém os deslizes para português do Brasil («sua», «está») e leva
+42-65 s a responder. O dono já foi informado e **aceitou este estado**: a
+qualidade da resposta não é um defeito a corrigir, é uma escolha do modelo que
+fez com o que sabia.
+
+Fica registado como aceito, e não como resolvido, para que ninguém daqui a seis
+meses o leia como uma decisão tomada sem o proprietor saber. Medido na casa, via
+`/comando`: 116,9 s na primeira resposta e 0,05 s na segunda, com a mesma cache.

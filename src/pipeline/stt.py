@@ -22,6 +22,7 @@ VAD is deliberately off. A wake word is the opening of a longer utterance, and
 silence-splitting would keep the wake word and drop the request.
 """
 
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -30,6 +31,7 @@ import numpy as np
 
 from config import config
 from src.pipeline.utils import Result, logger
+from text_norm import DEVICE_VARIANTS, fold
 
 # int8 is the point of the swap. float32 on this host was 2.4-3.7x slower.
 _DEFAULT_COMPUTE_TYPE = "int8"
@@ -133,6 +135,23 @@ class WhisperSTT:
             # faster-whisper returns a lazy generator: the inference happens
             # when it is consumed, so it must be consumed INSIDE the timing
             # below. Timing the call alone measures nothing (see SD-OPS-204).
+            # The device vocabulary, handed to the DECODER.
+            #
+            # `WHISPER_INITIAL_PROMPT` has been set in prod's .env since before
+            # this code existed, and it was never passed here: measured on
+            # 2026-10-04, the owner said "liga o exaustor", Whisper returned
+            # "Liga o exaustório", and `skill_tuya` looked for "exaustor" in it
+            # and found nothing. The prompt already said "Liga o exaustor."
+            # three lines above the failure. A setting that is written down and
+            # not read is indistinguishable from not having it.
+            #
+            # This is a bias, not a guarantee, which is why the deterministic
+            # alias pass below follows it.
+            decode_kwargs = {}
+            initial_prompt = getattr(config, "whisper_initial_prompt", "") or ""
+            if initial_prompt.strip():
+                decode_kwargs["initial_prompt"] = initial_prompt
+
             segments, info = engine.transcribe(
                 audio_float,
                 language=lang,
@@ -141,6 +160,7 @@ class WhisperSTT:
                 # Never split on silence: the utterance starts with the wake
                 # word, so VAD would keep the wake word and drop the request.
                 vad_filter=False,
+                **decode_kwargs,
             )
             # Split, not join: real segments already carry a trailing space,
             # and joining with " " as well produces a double space in every
@@ -160,6 +180,18 @@ class WhisperSTT:
                     logger.info(f"STT phonetic fix applied: '{text}' -> '{lower_text}'")
                     text = lower_text
 
+            # The guarantee, where the prompt is only the bias.
+            #
+            # `initial_prompt` nudges the decoder towards the words it was given
+            # and does not guarantee any of them. So every alias the owner can be
+            # misheard as is rewritten to the name the device registry actually
+            # holds -- and only aliases of names this house HAS. Rewriting a word
+            # the house owns no device for would be inventing vocabulary.
+            canonical = _canonical_device_names(text)
+            if canonical:
+                logger.info("STT device alias applied: %s", canonical)
+                text = canonical
+
             duration_ms = (time.perf_counter() - start) * 1000
             detected = getattr(info, "language", None) or lang or "unknown"
             logger.info(
@@ -172,6 +204,51 @@ class WhisperSTT:
             duration_ms = (time.perf_counter() - start) * 1000
             logger.error(f"Transcription error: {e}")
             return Result.fail(str(e), duration_ms=duration_ms)
+
+
+def _canonical_device_names(text: str) -> Optional[str]:
+    """Rewrite misheard device names to the ones the registry holds.
+
+    Word by word, so the accents everywhere else in the sentence survive: only
+    the token that names a device is replaced. Folding the whole line would
+    "fix" the extractor and mangle the rest of what the owner said.
+
+    Scoped to devices this house actually owns. Rewriting a name nobody has would
+    be inventing vocabulary, and inventing vocabulary is how a house ends up
+    confidently agreeing about a device that does not exist.
+
+    Returns None when nothing changed, so the caller can tell "no alias" from
+    "rewrote it to itself".
+    """
+    if not text:
+        return None
+    devices = getattr(config, "TUYA_DEVICES", None) or {}
+    if not devices:
+        return None
+
+    # folded variant -> the canonical NOUN, not the registered nickname.
+    #
+    # Rewriting "o exaustor" into "o Exaustor do WC" would duplicate whatever
+    # room the owner already said -- "liga o exaustor do wc" becomes "liga o
+    # Exaustor do WC do wc" -- and it would silently pin the command to one
+    # device when the owner named a type. Which device answers is the skill's
+    # job, from its own nickname and fallback logic; this pass only makes the
+    # WORD legible.
+    mapping = {}
+    for device, variants in DEVICE_VARIANTS.items():
+        if not any(fold(device) in fold(d) for d in devices):
+            continue  # this house owns no such device
+        for variant in variants:
+            mapping.setdefault(fold(variant), device)
+
+    if not mapping:
+        return None
+
+    def _replace(match):
+        return mapping.get(fold(match.group(0)), match.group(0))
+
+    out = re.sub(r"[^\W\d_]+", _replace, text, flags=re.UNICODE)
+    return out if out != text else None
 
 
 def decode_bytes(data: bytes) -> np.ndarray:
