@@ -202,42 +202,159 @@ def purge_poisoned_memories():
 
 
 # --- CACHE (RESPOSTAS RÁPIDAS) ---
-def get_cached_response(prompt):
-    """Tenta recuperar uma resposta exata da cache (válida por 24h)."""
+#
+# 2026-10-04. Esta cache era SÓ LEITURA: `save_cached_response` não era chamada
+# em lado nenhum do código, em dev nem em prod, e a tabela `cache` tinha 0
+# linhas. O docstring do `assistant.py` prometia "Cache -> RAG + SearXNG ->
+# Ollama" e a leitura existia; a escrita é que não. Resultado: o dono perguntou
+# "qual o teu limite para a estupidez humana?" uma vez, voltou a perguntar pelo
+# Discord, e a casa gastou 42-65 s a gerar outra vez uma resposta que já tinha.
+# Um cache que nunca enche nunca acerta, e o sintoma -- "devia ter pegado na
+# cache" -- parece um problema de acerto quando é de escrita.
+#
+# A chave é o texto normalizado, não o texto cru. A mesma pergunta chega por
+# voz ("qual o teu limite...?") e por Discord com o mesmo texto, mas divergia
+# em whitespace e pontuação, e o `WHERE prompt = ?` exacto nunca as juntava.
+
+CACHE_KIND_CONVERSATION = "conversation"
+CACHE_KIND_LIVE = "live"
+
+# Uma resposta de conversa pode ser servida durante um dia. Uma leitura de
+# sensor não: o UV de Lisboa correu 0.1 -> 4.35 -> 0.0 no mesmo dia de
+# 2026-10-04, e é precisamente uma leitura dessas que a cache devolvia como
+# se fosse o presente. 15 min e o máximo que uma leitura viva aguenta antes de
+# ser mentira.
+CACHE_TTL_HOURS = {CACHE_KIND_CONVERSATION: 24.0, CACHE_KIND_LIVE: 0.25}
+
+_CACHE_READ_WARNED = False
+
+
+def _cache_normalise(prompt):
+    """Fold the differences that are not differences in meaning.
+
+    Case, surrounding whitespace, and terminal punctuation. Anything more
+    aggressive would merge two genuinely different questions, and a wrong
+    cache hit is worse than a slow answer: the house would confidently repeat
+    an answer to a question nobody asked.
+    """
+    return " ".join((prompt or "").strip().rstrip(".!?").split()).lower()
+
+
+def _ensure_cache_schema(cursor):
+    """Idempotent migration for the `kind` column.
+
+    The cache table predates the split between conversation and live readings.
+    ALTER TABLE has no IF NOT EXISTS in SQLite, so the PRAGMA check is what
+    makes this safe to run on every start -- and it has to be safe on every
+    start, because a half-applied migration would take the whole cache down
+    with it.
+    """
+    cursor.execute(
+        "SELECT name FROM pragma_table_info('cache') WHERE name = 'kind'"
+    )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "ALTER TABLE cache ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation'"
+        )
+        # Explicit. This runs on the READ path, and a caller that opens a
+        # transaction and closes the connection without committing leaves the
+        # migration to the rollback -- which would make the column missing on
+        # every run while looking like it had worked.
+        cursor.connection.commit()
+
+
+def get_cached_response(prompt, kinds=None):
+    """Recover an exact prior answer, if it is still inside its own TTL.
+
+    Args:
+        prompt: user text, in any capitalisation or punctuation. The key is
+            the normalised form, so the same question by voice and by Discord
+            hits the same row.
+        kinds: only accept these kinds. This is a SAFETY valve, not a filter:
+            the caller passes `("live",)` to replay a reading while refusing to
+            replay anything else, because a device command cached under the same
+            key would otherwise be answered without being performed.
+
+    Returns:
+        The cached response, or None. None means "not usable" -- either never
+        stored or past its kind's TTL. An expired row is left in place and just
+        not returned, so the next occurrence overwrites it instead of the table
+        growing without bound.
+    """
+    key = _cache_normalise(prompt)
+    if not key:
+        return None
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT response, timestamp FROM cache WHERE prompt = ?", (prompt,)
-        )
+        _ensure_cache_schema(cursor)
+        if kinds:
+            marks = ",".join("?" * len(kinds))
+            cursor.execute(
+                f"SELECT response, timestamp, kind FROM cache WHERE prompt = ? "
+                f"AND kind IN ({marks})",
+                (key, *kinds),
+            )
+        else:
+            cursor.execute(
+                "SELECT response, timestamp, kind FROM cache WHERE prompt = ?",
+                (key,),
+            )
         row = cursor.fetchone()
         conn.close()
 
-        if row:
-            response, ts = row
-            # Validade de 24 horas para evitar respostas obsoletas
-            try:
-                if datetime.now() - datetime.fromisoformat(ts) < timedelta(hours=24):
-                    return response
-            except ValueError:
+        if not row:
+            return None
+        response, ts, kind = row
+        ttl = CACHE_TTL_HOURS.get(kind, CACHE_TTL_HOURS[CACHE_KIND_CONVERSATION])
+        try:
+            if datetime.now() - datetime.fromisoformat(ts) < timedelta(hours=ttl):
                 return response
+        except ValueError:
+            # An unparseable timestamp used to return the answer forever, which
+            # is the one outcome a cache must never produce: if we cannot tell
+            # how old it is, we cannot claim it is fresh.
+            return None
         return None
     except Exception as e:
-        print(f"AVISO: Erro ao ler cache: {e}")
+        # Reported once per process, and loudly. The failure mode here is not a
+        # wrong answer, it is NO answers ever cached -- which looks exactly like
+        # "the cache has a bad key" and sends you looking in the wrong place.
+        # That is what happened for as long as this function only read from a
+        # table nothing wrote to.
+        global _CACHE_READ_WARNED
+        if not _CACHE_READ_WARNED:
+            _CACHE_READ_WARNED = True
+            print(f"AVISO: cache de respostas inoperacional: {e}")
         return None
 
 
-def save_cached_response(prompt, response):
-    """Guarda uma resposta na cache para uso futuro."""
-    if not prompt or not response:
+def save_cached_response(prompt, response, kind=CACHE_KIND_CONVERSATION):
+    """Keep an answer for the next identical question.
+
+    Both branches are cached, as of 2026-10-04: answers that went through the
+    model AND answers a skill produced on its own. The direct-skill branch had
+    no cache at all, which is why asking the same thing twice by voice and then
+    by Discord paid full price twice.
+
+    `kind` decides the TTL, not whether to store. `live` is for anything
+    derived from a sensor, a forecast or a thermostat.
+    """
+    key = _cache_normalise(prompt)
+    if not key or not response:
         return
+    if kind not in CACHE_TTL_HOURS:
+        # An unknown kind would silently inherit the 24 h conversation TTL, and
+        # a reading of tomorrow's weather is exactly what must not get that.
+        kind = CACHE_KIND_LIVE
     try:
         conn = sqlite3.connect(config.DB_PATH)
         cursor = conn.cursor()
+        _ensure_cache_schema(cursor)
         cursor.execute(
-            "INSERT OR REPLACE INTO cache (prompt, response, timestamp) "
-            "VALUES (?, ?, ?)",
-            (prompt, response, datetime.now().isoformat()),
+            "INSERT OR REPLACE INTO cache (prompt, response, timestamp, kind) "
+            "VALUES (?, ?, ?, ?)",
+            (key, response, datetime.now().isoformat(), kind),
         )
         conn.commit()
         conn.close()

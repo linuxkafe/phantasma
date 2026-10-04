@@ -20,14 +20,26 @@ from unittest.mock import patch
 
 import pytest
 
+import config
 from assistant import PhantasmaPipeline
 
 WEATHER = "Hoje no Porto: estado incerto, entre 17° e 27°."
 
 
 @pytest.fixture
-def pipeline():
-    """A pipeline with only the two collaborators under test replaced."""
+def pipeline(tmp_path, monkeypatch):
+    """A pipeline with only the two collaborators under test replaced.
+
+    Each test gets its OWN cache. `respond_to_text` consults the response
+    cache before it runs any skill (added 2026-10-04, so that the skill branch
+    is cached too), and this fixture used to share the real brain.db with every
+    other test in the run. Once anything wrote an answer for these prompts, the
+    later tests were served from the cache and never reached the skill at all --
+    so "a skill tem de correr primeiro" failed for a reason that had nothing to
+    do with the skill. Shared global state, not a broken assertion.
+    """
+    db = tmp_path / "skill_llm_test.db"
+    monkeypatch.setattr(config, "DB_PATH", str(db))
     with patch.object(PhantasmaPipeline, "__init__", lambda self: None):
         p = PhantasmaPipeline()
     p._skill_result = WEATHER

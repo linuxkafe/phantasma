@@ -27,7 +27,13 @@ import numpy as np
 
 import config as config_module
 from config import config
-from data_utils import get_cached_response, retrieve_from_rag
+from data_utils import (
+    CACHE_KIND_CONVERSATION,
+    CACHE_KIND_LIVE,
+    get_cached_response,
+    retrieve_from_rag,
+    save_cached_response,
+)
 from skills import SkillContext, SkillLoader
 from src.brain.fly_brain import FlyBrain
 from src.brain.persistence import FlyBrainStore
@@ -42,6 +48,17 @@ from src.pipeline.stt import transcribe as stt_transcribe
 from src.pipeline.utils import Result, log_stage, logger
 from src.settings_store import get_persona
 from tools import search_with_searxng
+
+# Skills whose answer is a statement about the world, not an instruction to
+# change it. Only these may be cached and replayed. Everything else -- the
+# relays, the gas valve, the music, the cameras -- has to actually run, because
+# the answer is a claim about something physical and replaying it would make the
+# house assert something it did not do.
+_READ_ONLY_SKILLS = frozenset({
+    "skill_weather",
+    "skill_calculator",
+    "skill_system_stats",
+})
 
 # What the Phantom says when it hears its own name. Synthesised on first
 # use and served from the TTS cache after that.
@@ -621,6 +638,25 @@ class PhantasmaPipeline:
         Returns:
             Response text, or None if no skill handled it and LLM failed.
         """
+        # Read through the cache before running anything, but ONLY for
+        # readings (`live`). Two reasons this is not a blanket early return:
+        #
+        # 1. An ACTION must never be served from a cache. "acende a luz do
+        #    balcao" is handled by a skill too, and replying from the cache
+        #    would claim the light is on without ever touching the relay. That
+        #    is a lie about a physical fact, and it is a much worse failure
+        #    than a slow answer -- so actions are neither read nor written
+        #    here, and only READ-ONLY skills are written.
+        #
+        # 2. The model's cache read stays inside _respond_with_llm_body,
+        #    after the FlyBrain step, because the brain must see every turn
+        #    including repeats. An early return here would have skipped it,
+        #    and the suite caught exactly that.
+        cached = get_cached_response(text, kinds=(CACHE_KIND_LIVE,))
+        if cached:
+            logger.info("Cache hit (reading) for %r", text[:60])
+            return cached
+
         # Check skills first (intercept ++/-- and weather/tuya before LLM)
         skill_response = self._execute_with_paused_shared_audio(text)
         if skill_response is not None:
@@ -644,11 +680,52 @@ class PhantasmaPipeline:
                 logger.info(
                     "Skill devolveu dados para uma opiniao: %s", skill_response
                 )
-                return self._respond_with_llm(text, skill_data=skill_response)
-            logger.info(f"Skill '{text}' handled: {skill_response}")
+                answer = self._respond_with_llm(text, skill_data=skill_response)
+                # `live`, not `conversation`, and the earlier reasoning here was
+                # wrong: "the reading is already baked into the text" is exactly
+                # the problem. A day-old opinion about the weather QUOTES a
+                # day-old reading, and the owner has already been burned twice
+                # today by a number that no longer described the world. The
+                # model's eloquence does not make the sensor reading inside it
+                # any fresher.
+                self._cache_answer(text, answer, CACHE_KIND_LIVE)
+                return answer
+            logger.info("Skill '%s' handled: %s", text, skill_response)
+            # `live`, and the distinction is the whole reason the cache is not
+            # simply "always 24h": this string is a sensor reading. The UV of
+            # Lisbon ran 0.1 -> 4.35 -> 0.0 in one day, and serving yesterday's
+            # number as the present is the bug the owner reported twice today.
+            #
+            # Only for skills that merely READ. See the note at the top of this
+            # method: a skill that switches something must run every time.
+            #
+            # Two getattrs, not one: `getattr(self._skill_loader, ...)` evaluates
+            # the attribute first and raises on a pipeline built without a
+            # loader, which is how the test doubles are built.
+            loader = getattr(self, "_skill_loader", None)
+            if getattr(loader, "last_skill_name", None) in _READ_ONLY_SKILLS:
+                self._cache_answer(text, skill_response, CACHE_KIND_LIVE)
             return skill_response
 
-        return self._respond_with_llm(text)
+        answer = self._respond_with_llm(text)
+        self._cache_answer(text, answer, CACHE_KIND_CONVERSATION)
+        return answer
+
+    def _cache_answer(self, question, answer, kind):
+        """Store an answer, and never let the cache break the house.
+
+        A cache is an optimisation. If the write fails -- read-only filesystem,
+        a locked database, a schema that did not migrate -- the user must still
+        get their answer, so every failure here is logged and swallowed. The
+        previous failure mode here was not an exception: it was silence, with a
+        function nobody called.
+        """
+        if not answer:
+            return
+        try:
+            save_cached_response(question, answer, kind=kind)
+        except Exception as e:
+            logger.warning("Could not cache the answer to %r: %s", question[:60], e)
 
     def _execute_with_paused_shared_audio(self, text: str) -> Optional[str]:
         """Run a skill while the shared hotword capture is paused.

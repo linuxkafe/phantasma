@@ -1106,3 +1106,65 @@ vez a verificação ficou por fazer e a conclusão errada foi para o registo.
 tinha o `config.py` antigo. Dev estava certo — é uma alteração de código, não um
 valor de host a vazar — por isso `--force-host`, e a calibração ficou também no
 `.env` de prod, que é onde pertence.
+
+---
+
+## 2026-10-04 — A cache que nunca encheu
+
+O dono perguntou *"qual o teu limite para a estupidez humana?"* uma vez, voltou a
+perguntar pelo Discord, e a casa gastou 42-65 s de `qwen3:8b` a gerar outra vez
+uma resposta que já tinha.
+
+Três defeitos independentes, e nenhum deles era o que a queixa sugeria:
+
+**A escrita não existia.** `save_cached_response` estava definida e não era
+chamada em lado nenhum — nem em dev, nem em prod. A tabela `cache` tinha 0
+linhas. O docstring do `assistant.py` prometia `Cache -> RAG + SearXNG -> Ollama`
+e a *leitura* estava lá; faltava a escrita. Uma cache que nunca enche nunca
+acerta, e o sintoma — «devia ter pegado na cache» — parece um problema de chave
+quando é um problema de escrita.
+
+**A chave era o texto cru.** `WHERE prompt = ?` exacto não juntava a mesma
+pergunta vinda por voz com a vinda pelo Discord se divergisse em whitespace ou
+pontuação. Agora a chave é o texto normalizado (caixa, espaços, pontuação final)
+— e nada mais agressivo, porque um acerto errado é pior que uma resposta lenta: a
+casa repetiria com confiança uma resposta a uma pergunta que ninguém fez.
+
+**A leitura fazia uma escrita.** A migração do `kind` corre no caminho de
+leitura, e foi `cursor.connection.commit()` explícito que a tornou fiável. Sem
+isso, uma transacção aberta e fechada sem commit deixa a migração ao rollback, e
+a coluna falta em cada arranque com ar de ter funcionado.
+
+Uma correcção minha que quase publico como verdade: cheguei a reportar que a base
+de prod era *readonly* e que por isso a cache não podia escrever. Falso — o erro
+era meu, do `seyon`, sobre um ficheiro do `phantasma`. Verificado como o serviço,
+a migração aplica e a escrita funciona. Quase registei uma causa inventada porque
+a mensagem de erro coincidia com a que eu esperava.
+
+### Duas durações de vida, porque «sempre» não basta
+
+O dono pediu cache sempre, nos dois ramos. Feito — com uma distinção que o
+projecto exige e que ele não pediu, mas cujo custo de ignorar já se conhece.
+
+| ramo | kind | TTL | porquê |
+|---|---|---|---|
+| conversa (o modelo respondeu sozinho) | `conversation` | 24 h | uma resposta sobre uma ideia não envelhece |
+| opinião sobre uma leitura | `live` | 15 min | uma opinião em cache 24 h **cita** a leitura de 24 h atrás |
+| lookup directo de skill de leitura | `live` | 15 min | idem |
+| acção (relé, gás, música, câmara) | — | — | **nunca entra na cache** |
+
+A acção é o caso onde «caching sempre» é um disparate. `skill_chacon` responde a
+«acende a luz do balcão»; responder a isso de uma cache é afirmar que a luz está
+acesa sem nunca tocar no relé. Não é uma resposta errada, é uma mentira sobre um
+facto físico. Só `_READ_ONLY_SKILLS` (weather, calculator, system_stats) escreve,
+e a leitura antecipada só aceita linhas `live`.
+
+Isto é uma excepção deliberada ao pedido do dono, e por isso fica escrita aqui.
+
+### Um teste que falhou sozinho
+
+`test_respond_to_text_llm_fallback` passou a falhar com o `return` de cache
+colocado acima do passo do FlyBrain. O brain via só a primeira vez que algo era
+perguntado — e há um comentário em `_respond_with_llm_body` a dizer exactamente
+isso. A leitura da cache do modelo desceu para dentro do body, depois do `step`.
+Nenhum teste precisou ser afrouxado; o passo tinha de voltar a acontecer.

@@ -169,6 +169,9 @@ class SkillLoader:
         # Skills ask "which skill is this?" without knowing about the loader.
         self.context.resolve_skill = self.resolve_skill_name
         self.skills: List[Skill] = []
+        # Set by execute_skill to the skill that actually answered, None when
+        # nothing matched. Read by the pipeline to decide cacheability.
+        self.last_skill_name: Optional[str] = None
         self._loaded_modules: dict[str, Any] = {}
         # Project root is parent of skills_dir (for imports like src.brain)
         self.project_root = self.skills_dir.parent
@@ -340,5 +343,12 @@ class SkillLoader:
                 logger.error(f"Skill {skill.NAME} failed: {e}")
                 continue
             if response:
+                # Which skill answered is not a detail. The caller uses it to
+                # decide whether the answer may be cached and replayed: a
+                # reading can be served again, "a luz está ligada" cannot be
+                # served again without touching the relay, and the difference
+                # is the difference between a cache and a lie.
+                self.last_skill_name = skill.NAME
                 return response
+        self.last_skill_name = None
         return None
