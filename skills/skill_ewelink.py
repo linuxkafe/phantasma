@@ -165,12 +165,28 @@ async def _execute_control_action(action, target_id):
             await client.http.session.close()
             return {"success": False, "error": "Dispositivo não encontrado."}
 
-        # 1. Envia comando para a Cloud
-        if action == "on": await device.on()
-        elif action == "off": await device.off()
+        # 1. Envia comando para a Cloud e captura resultado
+        result = None
+        if action == "on":
+            result = await device.on()
+        elif action == "off":
+            result = await device.off()
 
         # 2. Fecha conexão
         await client.http.session.close()
+
+        # 3. Verifica se o comando foi bem-sucedido
+        success = True
+        if result is not None:
+            # ewelink pode retornar bool ou dict com success
+            if isinstance(result, bool):
+                success = result
+            elif isinstance(result, dict):
+                success = result.get('success', result.get('error') is None)
+
+        if not success:
+            await client.http.session.close()
+            return {"success": False, "error": "Comando falhou no dispositivo"}
 
         # 3. ATUALIZAÇÃO OTIMISTA (CRÍTICO PARA A UI)
         # Escreve logo no ficheiro cache que o estado mudou, sem esperar pelo poll
