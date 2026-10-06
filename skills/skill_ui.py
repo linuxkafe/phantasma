@@ -3361,6 +3361,66 @@ def handle_request():
                 power.setAttribute('data-empty', '1');
                 div.append(icon, switchLabel, label, power); container.appendChild(div);
                 ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, labelTextEl: labelTextEl, power: power });
+
+                /* Animação de corrente a fluir para o carregador do carro quando > 2W.
+                   Adiciona um SVG animado junto ao ícone que mostra partículas a fluir
+                   da esquerda para a direita quando power_w > 2. */
+                if (device.toLowerCase().includes('carregador') || device.toLowerCase().includes('carro')) {
+                    const flowSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                    flowSvg.setAttribute('class', 'current-flow');
+                    flowSvg.setAttribute('viewBox', '0 0 40 20');
+                    flowSvg.style.cssText = 'position:absolute;left:100%;top:50%;transform:translateY(-50%);width:24px;height:12px;opacity:0;pointer-events:none;transition:opacity 0.3s;';
+                    flowSvg.innerHTML = `
+                        <defs>
+                            <linearGradient id="current-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" stop-color="#ffb74d" stop-opacity="0.9"/>
+                                <stop offset="100%" stop-color="#ff9800" stop-opacity="0.6"/>
+                            </linearGradient>
+                        </defs>
+                        <g class="current-particles">
+                            <circle cx="4" cy="10" r="2" fill="url(#current-gradient)">
+                                <animate attributeName="cx" values="4;36" dur="1.2s" repeatCount="indefinite" calcMode="linear"/>
+                                <animate attributeName="opacity" values="0;1;0" dur="1.2s" repeatCount="indefinite" calcMode="linear"/>
+                            </circle>
+                            <circle cx="4" cy="10" r="2" fill="url(#current-gradient)">
+                                <animate attributeName="cx" values="4;36" dur="1.2s" repeatCount="indefinite" calcMode="linear" begin="0.4s"/>
+                                <animate attributeName="opacity" values="0;1;0" dur="1.2s" repeatCount="indefinite" calcMode="linear" begin="0.4s"/>
+                            </circle>
+                            <circle cx="4" cy="10" r="2" fill="url(#current-gradient)">
+                                <animate attributeName="cx" values="4;36" dur="1.2s" repeatCount="indefinite" calcMode="linear" begin="0.8s"/>
+                                <animate attributeName="opacity" values="0;1;0" dur="1.2s" repeatCount="indefinite" calcMode="linear" begin="0.8s"/>
+                            </circle>
+                        </g>
+                    `;
+                    icon.appendChild(flowSvg);
+                }
+                const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
+                const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
+                input.onchange = () => {
+                    handleDeviceAction(device, input.checked ? 'ligar' : 'desligar', div);
+                    div.dataset.state = input.checked ? 'on' : 'off';
+                    if(input.checked) div.classList.add('active'); else div.classList.remove('active');
+                };
+                const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
+                /* Two elements, because a box cannot clip and scroll itself:
+                   `.device-label` is the fixed-width window and
+                   `.device-label-text` is the mover its animation translates.
+                   Keeping them apart also keeps textContent == the full name,
+                   which is what the title and the tests read. */
+                const label = document.createElement('span'); label.className = 'device-label';
+                const labelTextEl = document.createElement('span'); labelTextEl.className = 'device-label-text';
+                labelTextEl.textContent = device;
+                label.appendChild(labelTextEl);
+                /* Watts get their own line instead of overwriting the name. The
+                   label used to become "210 W" whenever the device drew power,
+                   which meant the desumidifier -- the single most expensive thing
+                   in the house -- was the one tile that never said what it was.
+                   A reading is not a name, and a name that changes with the
+                   load cannot be scanned. */
+                const power = document.createElement('span'); power.className = 'device-power';
+                power.setAttribute('data-empty', '1');
+                div.append(icon, switchLabel, label, power); container.appendChild(div);
+                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, labelTextEl: labelTextEl, power: power });
             }
 
             /* The full name gets the space it needs, in motion.
