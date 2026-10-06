@@ -430,9 +430,6 @@ class Config:
     shelly_gas_url: str = ""
     miio_devices: dict = field(default_factory=dict)
     tuya_devices: dict = field(default_factory=dict)
-    cloogy_username: str = ""
-    cloogy_password: str = ""
-    cloogy_devices: dict = field(default_factory=dict)
     ewelink_username: str = ""
     ewelink_password: str = ""
     ewelink_region: str = "eu"
@@ -783,15 +780,6 @@ class Config:
 
             cfg.tuya_devices = json.loads(tuya_json)
 
-        # Cloogy
-        cfg.cloogy_username = os.getenv("CLOOGY_USERNAME", "")
-        cfg.cloogy_password = os.getenv("CLOOGY_PASSWORD", "")
-        cloogy_json = os.getenv("CLOOGY_DEVICES_JSON")
-        if cloogy_json:
-            import json
-
-            cfg.cloogy_devices = json.loads(cloogy_json)
-
         # Ewelink
         cfg.ewelink_username = os.getenv("EWELINK_USERNAME", "")
         cfg.ewelink_password = os.getenv("EWELINK_PASSWORD", "")
@@ -963,9 +951,6 @@ GEMINI_API_KEY = config.gemini_api_key
 SHELLY_GAS_URL = config.shelly_gas_url
 MIIO_DEVICES = config.miio_devices
 TUYA_DEVICES = config.tuya_devices
-CLOOGY_USERNAME = config.cloogy_username
-CLOOGY_PASSWORD = config.cloogy_password
-CLOOGY_DEVICES = config.cloogy_devices
 EWELINK_USERNAME = config.ewelink_username
 EWELINK_PASSWORD = config.ewelink_password
 EWELINK_REGION = config.ewelink_region
@@ -1041,9 +1026,6 @@ __all__ = [
     "SHELLY_GAS_URL",
     "MIIO_DEVICES",
     "TUYA_DEVICES",
-    "CLOOGY_USERNAME",
-    "CLOOGY_PASSWORD",
-    "CLOOGY_DEVICES",
     "EWELINK_USERNAME",
     "EWELINK_PASSWORD",
     "EWELINK_REGION",

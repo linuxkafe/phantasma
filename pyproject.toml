@@ -34,8 +34,14 @@ dependencies = [
     "librosa",
     "discord",
     "dio-chacon-wifi-api",
+    # Zigbee2MQTT 2.x has no REST API -- /api is a WebSocket and everything
+    # else is the frontend SPA -- so MQTT is the only integration surface it
+    # offers. Measured against 2.14.2, not read off a 1.x doc. mosquitto is
+    # not optional alongside this: Z2M exits with "MQTT failed to connect"
+    # before it ever opens the serial port.
+    "paho-mqtt>=2,<3",
 ]
-optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff", "mypy"], dotenv = ["python-dotenv"]}
+optional-dependencies = {dev = ["pytest", "pytest-cov", "ruff", "mypy", "pytest-xdist>=3.6", "playwright"], dotenv = ["python-dotenv"]}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -92,3 +98,27 @@ ignore_missing_imports = true
 # guard on purpose -- moving them to the top creates the import cycle the late
 # import avoids.
 "tests/conftest.py" = ["E402"]
+
+# Running the suite in parallel -- measured 2026-10-05, NOT enabled by default.
+#
+# Why the deploy took 11 minutes: the prod suite runs before every restart, and
+# 172 of its ~1700 tests drive a real browser, at ~3.3 s each against ~0.2 s for
+# a normal test. That was ~570 s of the 665 s. Measured, recorded in
+# docs/QUALITY_GATES.md. `--cov` on by default also costs ~15 s.
+#
+# `pytest-xdist` is a declared dev dependency and the suite CAN be run parallel:
+#     pytest -n 4          # measured 260 s vs 665 s sequential, 2.6x
+#     pytest -n 0          # sequential, for debugging a single test
+#
+# It is deliberately NOT in addopts. Measured, four runs at `-n 4`:
+#     1702 passed / 1701 passed + 1 error / 1701 passed + 1 failed / 1702 passed
+# Two of four failed. The cause is shared SQLite: the browser and admin tests
+# open session databases that several workers can touch, so under contention a
+# test can lose a race. That is not a reason to distrust xdist -- it is a reason
+# not to make the deploy gate depend on it. A deploy that fails on a flaky
+# parallel run costs more time than the parallelism saves, and it fails on the
+# WRONG signal: a green change looks red because of resource contention.
+#
+# So parallelism is opt-in (`-n 4`), available and measured, never forced. If
+# the shared-session-state tests are made per-worker isolated, this can be
+# revisited -- but that is a separate piece of work, not a pyproject line.

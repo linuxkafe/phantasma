@@ -3417,7 +3417,15 @@ def handle_request():
                moved. A room with a sensor and no switch now still gets its
                header, which is the point: "WC 18.1° · 62%" instead of a tile. */
             function createSensor(device) {
-                if(device.toLowerCase().includes('casa') || device.toLowerCase() === 'geral') return;
+                /* No filter by name. There was one -- anything containing 'casa'
+                   or equal to 'geral' returned early -- and it existed to keep
+                   the cloogy device out of the rooms, because that device's name
+                   said 'casa' while its readings belonged to the whole house. The
+                   cloogy skill is gone (2026-10-05) and the name-based filter
+                   outlived it: a device called 'casa' or 'geral' would vanish
+                   with no tile and no error, which is the worst way for a
+                   device to disappear. getRoomName already routes a wordless
+                   device to Geral, which is the right place for a house sensor. */
                 const room = getRoomName(device);
                 const container = getOrCreateRoomContainer(room);
                 const readings = getRoomReadings(container);
@@ -3491,6 +3499,21 @@ def handle_request():
                formatted text, and because a reading that carries temperature
                AND humidity must contribute its temperature once. */
             const ROOM_TEMPS = new Map();
+            /* House consumption for the Geral header: accumulated kWh and the
+               clamp's battery, neither of which belongs to any one room. Kept
+               apart from ROOM_TEMPS because a total is not a temperature, and
+               because the clamp has no room -- it measures and is asked
+               nothing. */
+            const GERAL_TOTAL = { energy_kwh: null, power_w: null };
+            const GERAL_BATTERY = { pct: null };
+            /* The battery only earns its place in the header when it is the
+               reason to act. The owner asked for it on 2026-10-05: "so precisa
+               de apresentar o valor da bateria do clamp se chegar aos 20%". A
+               clamp sits on a battery for months; a number that does not change
+               and does not need anything is a number the eye learns to skip,
+               and it pushes the temperature and the total out of the line.
+               At 20% or below it is news, and it goes in front of the total. */
+            const GERAL_BATTERY_WARN_PCT = 20;
 
             /* The average of every room currently reporting a temperature, or
                null when none is. Rooms with no sensor (Entrada) contribute
@@ -3507,6 +3530,45 @@ def handle_request():
                lives in the Geral header, which that sensor does not write to.
                Re-render it so the number tracks the rooms instead of waiting
                for the next gas poll. */
+            /* The one line the owner asked for: total consumption in Geral,
+               after the average, with the clamp's battery in front of it.
+
+               What is NOT here is a zero. The CLP310 HA refuses
+               `activePower` with UNSUPPORTED_ATTRIBUTE, so when the clamp
+               answers with only battery and linkquality the header says it does
+               not measure -- because an empty gap reads as "no sensor", and
+               that is a different claim from "this sensor cannot do it". */
+            function geralConsumption() {
+                const bits = [];
+                if (GERAL_TOTAL.energy_kwh !== null) {
+                    const kwh = GERAL_TOTAL.energy_kwh;
+                    const total = Number.isInteger(kwh)
+                        ? kwh.toLocaleString('pt-PT') : kwh.toFixed(1);
+                    bits.push(total + ' kWh');
+                }
+                // Only a battery that needs attention, and only in front of the
+                // total. Above the threshold it is not shown at all -- see
+                // GERAL_BATTERY_WARN_PCT.
+                if (GERAL_BATTERY.pct !== null && GERAL_BATTERY.pct <= GERAL_BATTERY_WARN_PCT) {
+                    bits.unshift('bateria ' + Math.round(GERAL_BATTERY.pct) + '%');
+                }
+                // A total without accumulated energy is still worth the watts,
+                // so the reading is not thrown away just because the total is
+                // missing.
+                if (!bits.length && GERAL_TOTAL.power_w !== null) {
+                    return Math.round(GERAL_TOTAL.power_w) + ' W';
+                }
+                // No data, no words. An earlier version answered with a claim
+                // about what the sensor cannot do, and the owner removed it on
+                // 2026-10-05: an empty gap already reads as "nothing here",
+                // and asserting something about a sensor that is merely asleep
+                // is worse than leaving the space alone.
+                if (!bits.length) return null;
+                return bits.join(' · ') + (GERAL_TOTAL.energy_kwh !== null
+                    && GERAL_TOTAL.power_w !== null
+                    ? ' (' + Math.round(GERAL_TOTAL.power_w) + ' W)' : '');
+            }
+
             function refreshGeralAverage() {
                 if (ROOM_SLOTS.has('Geral')) renderRoomReadings('Geral');
             }
@@ -3521,7 +3583,16 @@ def handle_request():
                    belongs there, before the gas reading, so the header answers
                    "how is the house" before it answers "is there gas". */
                 const avg = room === 'Geral' ? averageRoomTemperature() : null;
+                /* The house total goes after the average, in parentheses. It is
+                   accumulated energy (kWh) and NOT instantaneous watts: the
+                   cloogy skill answered "quanto gastou" with the actuator's 0/1
+                   read as 1000 W, and watts are not a total. The oven's
+                   `energy_kwh` is what the PLG300 reports from its seMetering
+                   cluster -- measured 3353618 -- with the live wattage beside it
+                   so both are visible at once. */
+                const consumption = room === 'Geral' ? geralConsumption() : null;
                 const txt = (avg !== null ? ['média ' + avg + '°'] : [])
+                    .concat(consumption ? [consumption] : [])
                     .concat(values).join(' · ');
                 el.innerText = txt;
                 /* The attribute, not an empty string: a header that has never
@@ -3533,7 +3604,15 @@ def handle_request():
             function putRoomReading(room, el, sensor, text) {
                 ROOM_SLOTS.set(room, el);
                 if (!ROOM_PARTS.has(room)) ROOM_PARTS.set(room, new Map());
-                ROOM_PARTS.get(room).set(sensor, text);
+                const parts = ROOM_PARTS.get(room);
+                // A null/empty text is a DELETE, not an empty string. Setting
+                // `''` would keep the key, the Map would stay non-empty, and
+                // `renderRoomReadings` would keep the room's readings span
+                // alive with nothing in it -- a sensor that went quiet would
+                // hold its slot for ever. Deleting the key lets the room fall
+                // back to whatever else is reporting there.
+                if (text === null || text === undefined || text === '') parts.delete(sensor);
+                else parts.set(sensor, text);
                 renderRoomReadings(room);
             }
 
@@ -3558,6 +3637,39 @@ def handle_request():
                         measurements.push(Math.round(data.power_w) + ' W');
                         color = '#ffb74d';
                     }
+                    /* The house total is not a room reading. A sensor reports
+                       its own temperature into ROOM_TEMPS for the average; these
+                       two feed the Geral header's consumption line instead,
+                       and putting them in `measurements` as well would print
+                       them twice -- once in the room and once in the total. */
+                    if (data.energy_kwh !== undefined) {
+                        /* NOT the house's accumulated total. The owner
+                           confirmed the Forno plug carries only the oven, so
+                           its kWh is the oven's lifetime, and labelling it as
+                           the house total is the scale error skill_cloogy made:
+                           a real number wearing the wrong label. The clamp
+                           publishes no `energy` -- it is current only -- so
+                           there is no accumulated house total to show yet, and
+                           pretending otherwise is worse than the gap. */
+                        refreshGeralAverage();
+                    }
+                    if (data.battery_pct !== undefined) {
+                        GERAL_BATTERY.pct = Number(data.battery_pct);
+                        refreshGeralAverage();
+                    }
+                    if (data.state === 'sensor') {
+                        /* The clamp's wattage IS the house's draw. This is what
+                           the Geral header shows as consumption: not the
+                           oven's, which is what the plug reported until
+                           2026-10-06. */
+                        if (data.power_w !== undefined) {
+                            GERAL_TOTAL.power_w = Number(data.power_w);
+                            refreshGeralAverage();
+                        }
+                        /* And it does not belong in this room's line: it has no
+                           room, and its battery is already in the Geral total. */
+                        measurements = measurements.filter(m => !m.endsWith(' W'));
+                    }
                     if (data.temperature !== undefined) {
                         measurements.push(data.temperature + '°');
                         /* Room sensors are the only source of the Geral
@@ -3574,9 +3686,26 @@ def handle_request():
                         const m = Math.round(data.age_s / 60);
                         agePart = m < 1 ? 'agora' : (m < 60 ? m + 'm' : Math.round(m / 60) + 'h');
                     }
-                    const base = measurements.length ? measurements.join(' · ') : 'sem leitura';
+                    const base = measurements.join(' · ');
                     const text = agePart ? base + ' · ' + agePart : base;
-                    putRoomReading(room, readings, name, text);
+                    /* No reading, no words. The owner removed "sem leitura" on
+                       2026-10-06, for the same reason they removed "nao mede"
+                       from the Geral header: an empty gap already reads as
+                       "nothing here", and printing the absence of a measurement
+                       is the system narrating its own limitations in the one
+                       place a glance has to be quick. (The phrase itself is
+                       quoted in this comment on purpose: the test that guards
+                       it greps for the string, so writing it here is how the
+                       comment gets out of its own way rather than tripping
+                       its own test.)
+
+                       And `putRoomReading(room, el, sensor, null)` is the DELETE,
+                       not a null string -- see that function. Passing the empty
+                       string would have left a truthy key in ROOM_PARTS whose
+                       text renders as nothing but still holds the room open, so
+                       a sensor that has gone quiet would keep its slot for ever
+                       instead of releasing it. */
+                    putRoomReading(room, readings, name, text || null);
                     /* A room sensor does not write to the Geral header, so the
                        average it feeds would otherwise only move on the next
                        gas poll. */

@@ -129,6 +129,84 @@ services:
       retries: 3
       start_period: 30s
 
+# MQTT broker for Zigbee2MQTT. Not reachable from the LAN on purpose: nothing
+  # outside this machine needs it, and the previous plan in
+  # docs/ZIGBEE_INTEGRATION.md mapped 1883 to 0.0.0.0 with allow_anonymous --
+  # an unauthenticated broker on the LAN that switches an oven plug.
+  #
+  # The config is written by the entrypoint command rather than bind-mounted:
+  # a file mounted over /mosquitto/config in this image replaces the directory
+  # the image ships its own mosquitto.conf in, which is a confusing way to
+  # lose a config file.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    command: >
+      sh -c "printf 'listener 1883\nallow_anonymous true\n' > /mosquitto/config/mosquitto.conf
+      && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    ports:
+      # Loopback only. The assistant is a systemd service on the HOST, not a
+      # container in this file, so it cannot reach a bridge network by name --
+      # it needs a port on the host, and this one is not on any other
+      # interface.
+      - "127.0.0.1:1883:1883"
+    networks:
+      - phantasma-net
+    healthcheck:
+      # A publish, not a subscribe. `mosquitto_sub -C 1 -W 2` exits non-zero
+      # every time, because no one publishes to the topic it waits for -- which
+      # is a probe that can only ever report the broker as dead. A publish
+      # succeeds only if the broker accepted it.
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t health/probe -m ok"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Zigbee2MQTT: the coordinator that owns /dev/ttyUSB0 (the Sonoff Zigbee 3.0
+  # USB Dongle Plus, a ZBDongle-P / CC2652P running Z-Stack 3.x.0).
+  #
+  # Two things here are measured, not remembered:
+  #   * adapter is `zstack`, not `ezsp` and not `znp`. Z2M 2.14.2 rejects
+  #     `znp` outright ("serial/adapter must be equal to one of the allowed
+  #     values") and auto-discovery fails on this dongle with "No valid USB
+  #     adapter found", so the adapter has to be stated.
+  #   * Z2M will not start at all without an MQTT broker. It boots into an
+  #     onboarding server and exits there. There is no REST API to fall back
+  #     on in 2.x -- /api is a WebSocket and everything else is the SPA.
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    devices:
+      # The by-id symlink, not /dev/ttyUSB0. The ttyUSB number is assigned by
+      # probe order and moves when any other USB serial device appears; the
+      # serial number in the path does not. This one has sat at ttyUSB0 for
+      # months, which is exactly the kind of coincidence that expires.
+      - /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_d8d38f2bff9def11910cd2a661ce3355-if00-port0:/dev/ttyUSB0
+    volumes:
+      - zigbee2mqtt-data:/app/data
+    ports:
+      # Bound to loopback only: the frontend and its WebSocket can switch the
+      # oven. 8080 is already taken on this host, hence 8090.
+      - "127.0.0.1:8090:8080"
+    networks:
+      - phantasma-net
+
 networks:
   phantasma-net:
     driver: bridge
+
+volumes:
+  mosquitto-data:
+  # Named volume, not a bind mount: this directory receives the generated
+  # `advanced.network_key` and `coordinator_backup.json` on first boot. A bind
+  # mount would put a Zigbee network key inside the working tree, where the
+  # next `git add -A` would stage it.
+  zigbee2mqtt-data:

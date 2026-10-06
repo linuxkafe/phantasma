@@ -22,6 +22,8 @@ gastar seja o que for.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -241,18 +243,29 @@ def loader():
     """
     from skills.loader import SkillLoader
 
-    saved = (
-        getattr(config, "CLOOGY_DEVICES", None),
-        getattr(config, "TUYA_DEVICES", None),
+    # Zigbee reads its device map from the environment, not from config, so the
+    # fixture has to set the environment rather than an attribute. It used to
+    # set `config.CLOOGY_DEVICES` to give the cloogy skill its nicknames; that
+    # skill was removed on 2026-10-05 and Zigbee replaced it.
+    saved_env = os.environ.get("ZIGBEE_DEVICES_JSON")
+    os.environ["ZIGBEE_DEVICES_JSON"] = json.dumps(
+        {
+            "forno": {"friendly_name": "forno", "kind": "plug"},
+            "casa": {"friendly_name": "casa", "kind": "clamp"},
+        }
     )
-    config.CLOOGY_DEVICES = {"forno": "a", "casa": "b"}
+    saved = getattr(config, "TUYA_DEVICES", None)
     config.TUYA_DEVICES = {"luz": "x"}
     try:
         loader_ = SkillLoader("skills")
         loader_.load_all()
         yield loader_
     finally:
-        config.CLOOGY_DEVICES, config.TUYA_DEVICES = saved
+        config.TUYA_DEVICES = saved
+        if saved_env is None:
+            os.environ.pop("ZIGBEE_DEVICES_JSON", None)
+        else:
+            os.environ["ZIGBEE_DEVICES_JSON"] = saved_env
 
 
 # The owner chose (a): narrow the triggers that collided, rather than loosen the
@@ -270,7 +283,6 @@ def loader():
         "quanto esta no wc",
         "quanto marca o sensor",
         "leitura do forno",
-        "lista do cloogy",
     ],
 )
 def test_the_owner_still_reaches_the_meters(loader, prompt):
@@ -284,11 +296,33 @@ def test_the_owner_still_reaches_the_meters(loader, prompt):
     half of the pair exists to catch, and `quanto esta` is spelled without the
     accent on purpose: `matches` does not fold accents and the text comes from
     the STT.
+
+    The assertion was `{"skill_cloogy", "skill_tuya"} & matched` when the Cloogy
+    skill was still installed. It is now `skill_zigbee` in its place: "quanto
+    gastou a casa" and "quanto consumiu a casa" reach the Zigbee clamp, which is
+    the only meter left in the house. `skill_cloogy` was removed on 2026-10-05
+    and `"lista do cloogy"` left this list with it -- asking for the Cloogy list
+    now correctly matches nothing, because there is no such skill to answer.
     """
     matched = loader.resolve_matching_skills(prompt.lower())
-    assert {"skill_cloogy", "skill_tuya"} & set(matched), (
+    # "zigbee", not "skill_zigbee": the loader names a class-based skill after
+    # its NAME attribute, and only a legacy one after its module.
+    assert {"zigbee", "skill_tuya"} & set(matched), (
         f"{prompt!r} deixou de chegar aos medidores: casou {matched}"
     )
+
+
+def test_nothing_claims_the_dead_cloogy_skill(loader):
+    """`skill_cloogy` was removed; nothing may answer for it.
+
+    Its triggers ("cloogy", "kiome", "lista do cloogy") are gone with it, and a
+    prompt naming it must fall through rather than be captured by some other
+    skill that happens to share a word. Capturing it would produce a confident
+    answer about a service that is no longer there.
+    """
+    for prompt in ("lista do cloogy", "estado do cloogy", "quanto gastou o cloogy"):
+        matched = loader.resolve_matching_skills(prompt.lower())
+        assert "skill_cloogy" not in matched, matched
 
 
 @pytest.mark.parametrize(

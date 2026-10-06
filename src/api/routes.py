@@ -549,11 +549,26 @@ def create_app(pipeline=None) -> Flask:
                     toggles.append(n)
             for n in keys("miio_devices") + keys("ewelink_devices"):
                 toggles.append(n)
-            for n in keys("cloogy_devices"):
-                if "casa" in n.lower():
-                    status.append(n)
-                else:
-                    toggles.append(n)
+            # Zigbee devices are read from ZIGBEE_DEVICES_JSON, not from config:
+            # the skill keeps that mapping in the environment on purpose, so
+            # adding a device does not fork config.py (which is byte-gated
+            # against production). A clamp is a reading, a plug is a toggle --
+            # the same split `cloogy_devices` used, and the reason it is
+            # reproduced rather than guessed per device.
+            import json as _json
+            import os as _os
+
+            _zigbee_raw = _os.getenv("ZIGBEE_DEVICES_JSON", "").strip()
+            if _zigbee_raw:
+                try:
+                    for _nick, _spec in (_json.loads(_zigbee_raw) or {}).items():
+                        _kind = _spec.get("kind") if isinstance(_spec, dict) else "plug"
+                        if _kind == "clamp":
+                            status.append(_nick)
+                        else:
+                            toggles.append(_nick)
+                except (ValueError, AttributeError):
+                    logger.warning("ZIGBEE_DEVICES_JSON is not valid JSON; no Zigbee tiles")
             if hasattr(config, "shelly_gas_url") and config.shelly_gas_url:
                 status.append("Sensor de Gás")
             # Chacon plug is not a cloud device: it has no entry in any *_devices

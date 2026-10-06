@@ -98,3 +98,14 @@ pHantasma.egg-info/
 # /opt/phantasma/public/ in production and nowhere else in the repo; see
 # docs/ROADMAP.md for the missing install step.
 public/vendor/
+
+# Zigbee2MQTT runtime data: the generated `advanced.network_key` and
+# `coordinator_backup.json`. Both live in a named volume, not the tree, but a
+# bind mount would put a Zigbee network key where the next `git add -A` would
+# stage it -- the same failure as a Tuya key in git.
+/zigbee2mqtt/*
+# ...except the external converters, which are source: a human wrote them, they
+# are the only thing that makes an unsupported device work, and they do not
+# exist anywhere else if they are not in the repo. `/zigbee2mqtt/converters/`
+# is the seed that `scripts/setup_zigbee.sh` copies into the volume.
+/zigbee2mqtt/converters/

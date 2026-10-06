@@ -1269,3 +1269,214 @@ fez com o que sabia.
 Fica registado como aceito, e não como resolvido, para que ninguém daqui a seis
 meses o leia como uma decisão tomada sem o proprietor saber. Medido na casa, via
 `/comando`: 116,9 s na primeira resposta e 0,05 s na segunda, com a mesma cache.
+
+---
+
+## 2026-10-05 — Zigbee local: o plano tinha três erros, e eu recomendei o pior
+
+O dono plugou um Sonoff Zigbee 3.0 USB Dongle Plus para aceder aos dispositivos
+Zigbee que estavam pendentes no Cloogy. `docs/ZIGBEE_INTEGRATION.md` já existia
+desde antes e descrevia como hacerlo.
+
+**Recomendei "Z2M REST API, sem Mosquitto"** como a opção mais simples: menos um
+container, zero dependências Python novas, `httpx` já declarado. Foi a minha
+recomendação preferida das três que pus à escolha.
+
+**Não existe.** Em Zigbee2MQTT 2.x, `/api` é um WebSocket e o resto é a SPA do
+frontend — `GET /api`, `/api/bridge/info` e `/api/bridge/devices` devolvem a
+página de erro do frontend com HTTP 404. E o Mosquitto não é opcional: o Z2M
+sai com `MQTT failed to connect` **antes de abrir a porta série**. A opção que
+chamei de mais simples era a única que não existia, e a opção que rejeitei como
+pesada era a correcta.
+
+O plano antigo também estava errado em `adapter: ezsp` (é `zstack`; `znp` é
+recusado, e a auto-detecção falha com `No valid USB adapter found`) e em
+`onboarding: false` no ficheiro, que não evita o servidor de onboarding — só o
+`POST /submit` o faz, e é por isso que existe `scripts/setup_zigbee.sh`.
+
+### O que fica feito
+
+- Coordinator no ar: `ZStack3x0 revision 20210708`, sobrevive a reinício.
+- `mosquitto` + `zigbee2mqtt` em `docker-compose.yml`, ambos ligadas só a
+  `127.0.0.1`. O plano antigo publicava `1883` em `0.0.0.0` com
+  `allow_anonymous` — broker sem autenticação em toda a rede, com poder de
+  ligar o forno.
+- `paho-mqtt` declarado em `pyproject.toml` (a cicatriz do `faster_whisper`:
+  uma dependência importada e não declarada falha no gate do `deploy.sh`).
+- `skills/skill_zigbee.py`, `PRIORITY=70`, class-based — porque
+  `LegacySkillAdapter` **ignora** `PRIORITY` ao nível do módulo, medido.
+- 21 testes, `make test` 1693 passed, `make lint` limpo.
+
+### O que está por fazer, e é do dono
+
+**Emparelhar.** Um dispositivo Zigbee pertence a um coordinator só, e os dois
+continuam no hub do Cloogy. Desemparelhar é físico (botão ~10 s) e não é
+reversível na prática. `scripts/setup_zigbee.sh --permit-join on`, emparelhar,
+`--permit-join off`.
+
+**Risco aceite, registado:** a skill pode **ligar o forno por voz**. A
+`skill_cloogy` recusava deliberadamente actuar sobre o atuador; deixar de recusar
+tira uma interlock que era da cloud, não nossa. Com STT imperfeito e um comando
+não supervisado, é risco de incêndio. O dono foi avisado e escolheu
+ON/OFF. Fica escrito para que ninguém daqui a seis meses leia isto como uma
+decisão tomada sem o proprietor saber.
+
+**O clamp é um caso aberto.** "Consumo Total"
+(`00:12:4B:00:02:04:EB:88`) está `IsCommunicating: false` desde o re-pair de
+Nov-2025 e devolve 0.0 W. Entra na configuração à mesma, porque o owner quer
+emparelhá-lo — mas emparelhar um device que esteve 10 meses calado pode não dar
+em nada, e só se descobre depois de o ter desligado do Cloogy.
+
+### Regra que sai daqui
+
+Um plano de integração escrito contra a documentação de **outra versão** do
+software instalado não é evidência. O `enum` do schema e os logs de arranque do
+próprio container diziam mais do que a página de docs, e as três Premissas do
+plano estavam todas erradas. A recomendação que escrevi para o dono foi
+refutada pela máquina no mesmo dia em que a fiz — e a máquina tinha razão.
+
+---
+
+## 2026-10-05 (2.ª parte) — A janela de emparelhamento media o que eu lhe pedia, não o que a doc dizia
+
+Continuação do trabalho acima, na segunda sessão. O que havia para fazer era
+simples: juntar o forno. Não foi.
+
+**A unidade do `permit_join` é SEGUNDOS.** A documentação do Zigbee2MQTT diz
+"minutes". Em `zigbee-herdsman/controller.js:283` está
+`assert(time <= 254, "...more than 254 seconds.")` e logo a seguir
+`const timeMs = time * 1000`. O script herdou "minutes" da doc e mandou `25` —
+uma janela de **25 segundos**. O Z2M respondeu `{"status":"ok"}` e o script
+imprimiu "JOIN WINDOW OPEN for 25 minutes". Sem sinal de erro em lado nenhum.
+
+O diagnóstico visível era "o dispositivo não se junta", que aponta para
+hardware, alcance e factory reset — e a causa era uma janela um sexto do
+pedido. O `--permit-join on` era precisamente o comando que alguém usaria para
+tentar de novo, e voltava a dar `ok`.
+
+O teto é 254 s (4 min 14 s), porque é um uint8. O script converte de minutos e
+**recusa** o que não cabe, com `exit 2` e explicação, em vez de deixar o
+container morrer dentro de um assert.
+
+### Três bugs meus, todos do mesmo tipo
+
+O padrão desta sessão é que **a verificação respondia ao que eu perguntava** em
+vez de ao que era verdade:
+
+| Bug | Medido |
+|---|---|
+| `set -o pipefail` + `grep -q` | `exit 0` sem, **`exit 255`** com. Coordinator em pé há horas lido como "não arrancou" |
+| `case *"|None")` nunca fazia `break` | `False\|None` é uma resposta legítima; o caminho de fechar nunca casava e loopava até ao timeout |
+| `--check` lia `devices` | Em 2.x os devices vivem em `config.devices`. Disse `devices joined: 0` com um device emparelhado a reportar |
+
+O terceiro é o que mais custou: **`bridge/health` tem `devices` e
+`bridge/info` também, mas com sentidos diferentes** — e o que eu lia no `info`
+não existia. Um relatório que diz "0 emparelhados" quando há um device a
+reportar é pior do que não dizer nada, porque parece uma medição.
+
+### O clamp juntou, e não mede
+
+`0x00124b000204eb88` — `Clamp CLP310 HA` / `VirtualPowerSolutions` — juntou-se
+à primeira, interviewado, 36 mensagens. E recusa `power` e `voltage` com
+`UNSUPPORTED_ATTRIBUTE` no endpoint 8. Responde a `battery` (62%) e
+`linkquality` (129).
+
+**Emparelhar com sucesso e obter a leitura que motivou a acção são duas
+propriedades diferentes, e só a primeira aparece no log.** O Z2M ainda promete
+`power_8` na definição gerada automaticamente — uma propriedade que o device
+recusa quando pedida.
+
+  Isto expôs dois defeitos meus na skill, ambos do mesmo feitio — respondiam ao
+que eu perguntava, não ao que era verdade:
+- lia só `power`, e o Z2M publica medição **por endpoint** (`power_8`);
+- mandava `/get` sem payload, que o Z2M tratava como falha total porque um
+  atributo recusado invalida o pedido inteiro. `/get {"battery":"",
+  "linkquality":""}` responde.
+
+Resultado depois de corrigir: *"O consumo comunica (62% de bateria, sinal 126),
+mas não devolveu potência nem estado."* Um clamp que mede nada tem de dizer que
+não mede. **Não devolve 0 W.**
+
+E o dashboard passou a dizer `state: sensor` para o clamp, em vez de `off`. Não
+há relé: traduzir um sensor para `off` porque não mandou `state` é a mesma
+mudança de grandeza que o `skill_cloogy` cometia ao ler um atuador como wattagem
+— fabricar um valor a partir de uma ausência.
+
+### Em aberto
+
+**O forno continua por emparelhar** (`00:12:4B:00:02:37:71:D1`). E há aqui uma
+confusão que vale registar: **power cycle não é factory reset**. Desligar e
+voltar a ligar o plug faz o reboot no *mesmo* Zigbee network em que já está
+emparelhado — o hub do Cloogy. Para o coordinator novo o ver, tem de esquecer a
+rede antiga (press-and-hold ~10 s até o LED piscar) e só depois power-cycle.
+
+**Consumo via Zigbee local não está disponível** com este clamp. Quem continua a
+ler é o `skill_cloogy`, por cloud, com as leituras que já vinham a 0.0 W. Tarefa
+aberta, e não se disfarça: a skill não anuncia potência que o device não mandou.
+
+---
+
+## 2026-10-05 (3.ª parte) — O forno não aparece, e seis janelas não explicam porquê
+
+Continuação. O clamp juntou (e tem nome: `Consumo Energia`). O forno — plug
+`PLG300`, IEEE `00:12:4B:00:02:37:71:D1` — **nunca** fez announce em nenhuma
+janela, nem no canal 11 nem no 15.
+
+### O que está provado
+
+| | |
+|---|---|
+| Dongle, coordinator, porta série | **funcionam** — o clamp emparelhou três vezes com a mesma configuração |
+| Só um container tem o device | verificado nos 9 containers; só o `/zigbee2mqtt` tem `/dev/serial/by-id/...` |
+| Plug saiu da rede do Cloogy | `DataCollectionStatus` 2 → 0 no device 58521 |
+| Plug procura rede nova | **desconhecido** — nunca houve um único `device_announce` |
+| Canal | era 11, mudou para 15 (o que o Z2M desaconselha). **Não era o canal** |
+
+### O que o `PLG300` é, e por que importa
+
+Todos os resultados para "PLG300" são o **Appleton PLG-300**, um tampão de
+condute de ferro fundido à prova de explosão — não é um smart plug. O `PLG300` é
+o SKU da Cloogy para o plug que eles vendem: **marca branca, sem manual
+público, sem documentação de LED, sem procedimento de reset publicado.**
+
+Daí uma conclusão que só apareceu depois de seis tentativas: **este plug pode não
+ter forma de procurar uma rede nova.** Todos os smart plugs documentados exigem
+um botão — "5 toques", "10 s", "3 s" — e o reset por corte de alimentação que
+fizemos é o fallback dos que não têm botão nenhum. Se o firmware deste só procura
+rede num gatilho físico que não existe, nenhuma power cycle o vai trazer.
+
+### O caminho que sobrou
+
+A API do Cloogy tem o reset de origem:
+
+```
+DELETE /device/58521 → 400 "Only uninstalled devices can be deleted"
+```
+
+O endpoint existe e exige o device **desinstalado** primeiro. Desinstalar pela
+app Cloogy (ou por esta API, se houver o passo anterior) é o reset de origem de
+um plug sem botão, porque o comando vai pela cloud até ao hub — que tem de estar
+ligado.
+
+**Isto inverte o que assumi desde o início.** Tratei o Cloogy como o problema a
+migrar *de*. Se o plug não tem outro gatilho, o Cloogy é o que **manda** no
+reset, e desligar o hub tira justamente o caminho que falta. Foi por isso que
+perguntei logo se o hub estava desligado.
+
+### Estado final desta parte
+
+- Coordinator: `ZStack3x0 rev 20210708`, canal 15, `pan_id 21256`.
+- `Consumo Energia` (`0x00124b000204eb88`) emparelhado. Responde `battery` e
+  `linkquality`; **`power` e `voltage` recusados** com `UNSUPPORTED_ATTRIBUTE`.
+  Consumo via Zigbee local continua indisponível — quem lê é o `skill_cloogy`,
+  por cloud, com leituras que já vinham a 0.0 W.
+- Forno: **pendente**. Sem announce em 6 janelas, 2 canais, proximidade
+  confirmada e reset por corte de alimentação tentado.
+
+### Regra que sai daqui
+
+Seis tentativas com o mesmo resultado não são seis tentativas — são uma, e a
+sexta custou o mesmo que a primeira. O momento para parar a repetir não é o
+esforço, é a **ausência de um mecanismo novo**: quando o que se varia não muda o
+que se observa, a variation deixou de ser o instrumento. Passar a varyar a
+hipótese (canal) foi correcto; voltar a variar o gesto (power cycle) não era.

@@ -478,15 +478,48 @@ def test_a_normal_answer_gets_the_normal_face(page):
     assert got == "normal", f"a normal answer shows {got!r}, expected 'normal'"
 
 
-def test_the_avatar_is_legible_at_the_size_the_chat_uses(page):
-    """22px is what `.ia-avatar` renders. Below that the face stops being a
-    face, and that is a measured fact rather than an opinion."""
-    box = page.evaluate(
+def _box_once(page):
+    return page.evaluate(
         """() => {
             const el = document.querySelector('ghost-avatar');
+            if (!el) return null;
             const r = el.getBoundingClientRect();
             return {w: r.width, h: r.height};
         }"""
+    )
+
+
+def test_the_avatar_is_legible_at_the_size_the_chat_uses(page):
+    """22px is what `.ia-avatar` renders. Below that the face stops being a
+    face, and that is a measured fact rather than an opinion."""
+    # The fixture waits 400 ms after `openChat()` and that is a guess about how
+    # long the sheet takes to become visible. It is a guess that fails on its
+    # own terms: the chat is a drawer, so before it is laid out the avatar is
+    # `display:none` and `getBoundingClientRect()` returns 0x0 -- and this test
+    # then blames the design for a timing problem. That is not rare, it is
+    # intermittent, and it has failed the deploy gate twice on 2026-10-05 while
+    # passing in isolation, which is the signature of a race rather than a
+    # regression.
+    #
+    # So wait for the thing being measured instead of a duration: a real box.
+    # The 22 px assertion is untouched, and a genuinely too-small avatar still
+    # fails -- it just fails with a number that means something.
+    try:
+        page.wait_for_function(
+            """() => {
+                const el = document.querySelector('ghost-avatar');
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            }""",
+            timeout=5000,
+        )
+    except Exception:
+        pass  # fall through: the assertion below reports the real measurement
+
+    box = _box_once(page)
+    assert box is not None and box["w"] > 0 and box["h"] > 0, (
+        f"the avatar has no box to measure: {box}"
     )
     assert box["w"] >= 22 and box["h"] >= 22, (
         f"the avatar renders at {box['w']}x{box['h']}px, which is below the 22px "
