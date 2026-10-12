@@ -75,6 +75,27 @@ services:
       - ./ollama-data:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0
+      # The runner was starting at n_ctx=4096 while the application asks for
+      # 8192 (`options: {"num_ctx": 8192}` in src/pipeline/llm.py and
+      # assistant.py). Measured on the loaded model: `n_slots = 1,
+      # n_ctx_slot = 4096`. Asking a runner for more context than it was given
+      # is a request it cannot honour without reloading, so the fix belongs
+      # here, where the runner is actually configured -- not only in the
+      # request.
+      #
+      # Memory: KV cache for qwen3:8b is ~144 KB/token, so this is roughly
+      # +590 MB over 4096 (1.18 GB at 8192). The 10G limit below still fits
+      # with the 5.6 GB the model itself occupies.
+      #
+      # NOT set from .env on purpose. This is the container's own setting, not
+      # a per-host value the application reads, and CLAUDE.md's rule is that a
+      # host value belongs in the environment rather than in code. Note the
+      # separate duplication this does NOT fix: `.env` carries
+      # OLLAMA_CONTEXT_SIZE=4096, which config.py reads into cfg.llm.context_size
+      # and which src/pipeline/llm.py then IGNORES in favour of a hardcoded
+      # 8192. That value is now in three places. Worth collapsing later; not
+      # in scope here.
+      - OLLAMA_CONTEXT_LENGTH=8192
     ports:
       - "11434:11434"
     networks:
