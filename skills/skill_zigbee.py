@@ -715,15 +715,24 @@ class ZigbeeSkill(Skill):
             return {"state": "unreachable"}
 
         out: Dict[str, Any] = {}
-        # `power` first for the reason given in _describe: with the PLG300
-        # converter the device publishes `power` as the live reading and
-        # `power_8` as a stale leftover, and preferring the latter showed the
-        # dashboard 93 W on an oven that was off and drawing zero.
-        power = payload.get("power")
-        if power is None:
-            power = payload.get("power_8")
-        if power is not None:
-            out["power_w"] = round(float(power), 1)
+
+        # Forno uses the house clamp for power measurement (same source as consumo).
+        # The plug reports on/off state, but power comes from the clamp via V×I.
+        # Skip the power/power_8 logic for forno to avoid stale raw values.
+        if target == "forno":
+            watts = _clamp_watts(payload)
+            if watts is not None:
+                out["power_w"] = round(watts, 1)
+        else:
+            # `power` first for the reason given in _describe: with the PLG300
+            # converter the device publishes `power` as the live reading and
+            # `power_8` as a stale leftover, and preferring the latter showed the
+            # dashboard 93 W on an oven that was off and drawing zero.
+            power = payload.get("power")
+            if power is None:
+                power = payload.get("power_8")
+            if power is not None:
+                out["power_w"] = round(float(power), 1)
 
         # Accumulated energy, in kWh. The PLG300 reports `energy` from its
         # seMetering cluster and it responds to a direct read (measured 3353618).

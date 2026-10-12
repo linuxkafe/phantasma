@@ -31,19 +31,41 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from skills import skill_zigbee as sz  # noqa: E402
 from skills.base import SkillContext  # noqa: E402
 
-DEVICES = {"forno": {"friendly_name": "forno", "kind": "plug"}}
+# Dois dispositivos, porque ha dois papeis e a distincao e o ponto da skill:
+# um clamp MEDE e nao comuta, uma ficha COMUTA.
+#
+# "forno" e o clamp: e o sensor de consumo que a casa tem. Os testes que ligam e
+# desligam usam `LIGAVEL` porque, desde que o forno passou a clamp, publish() nao
+# era chamado e a skill respondia "e um sensor, nao comuta" -- o que satisfazia
+# varias asercoes sem as testar. Foi assim que `test_desligar_is_not_ligar`, que
+# existe para apanhar um pedido de desligar que chegue a ligar, passou a verde
+# sem publicar seja o que for.
+DEVICES = {"forno": {"friendly_name": "forno", "kind": "clamp"}}
+
+# Uma ficha que comuta. "aquecedor" nao esta nos DEVICE_NOUNS da skill_tuya
+# (luz, tomada, ficha, forno, carregador, sensor, ...) de proposito: um nome que
+# exista nas duas skills volta a Raise ao teste de prioridade logo abaixo, e esse
+# empate era dependente da ordem alfabetica do directório.
+LIGAVEL = {"aquecedor": {"friendly_name": "aquecedor", "kind": "plug"}}
+
+DEVICES_AMBAS = {**DEVICES, **LIGAVEL}
 
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    """Um device configurado, broker unreachable, e sem cliente herdado.
+    """A casa tal como esta: um clamp que mede e uma ficha que comuta, broker
+    unreachable, e sem cliente herdado.
+
+    Sao os DOIS devices porque a distincao entre eles e o que a skill sabe
+    fazer. Com so o clamp, qualquer teste que liga e desliga recebia "e um
+    sensor, nao comuta" e publicava nada -- e passava, sem ter testado nada.
 
     O broker e deixado em porta fechada de proposito: quase todos os testes
     precisam que a ligacao falhe, e um broker de verdade a transformar o
     "nao configured" num "funciona" consoante a ordem de execucao seria um
     teste que mente sobre o sistema.
     """
-    monkeypatch.setenv("ZIGBEE_DEVICES_JSON", json.dumps(DEVICES))
+    monkeypatch.setenv("ZIGBEE_DEVICES_JSON", json.dumps(DEVICES_AMBAS))
     monkeypatch.setenv("MQTT_HOST", "127.0.0.1")
     monkeypatch.setenv("MQTT_PORT", "1")  # nada escuta aqui
     monkeypatch.setattr(sz, "_client", None)
@@ -151,7 +173,7 @@ def test_broker_down_is_never_reported_as_a_state():
     sem informacao ou com uma informacao errada; a segunda faz-se agir sobre
     ela.
     """
-    out = skill().handle("estado do forno")
+    out = skill().handle("estado do aquecedor")
     assert out is not None
     assert "desligado" not in out.lower()
     assert "nao" in out.lower() or "configurados" in out.lower()
@@ -177,7 +199,7 @@ def test_reports_the_state_the_device_gave_not_the_one_requested(monkeypatch):
         "_state_for",
         lambda *a, **k: {"state": "OFF", "_seen_at": __import__("time").time()},
     )
-    out = skill().handle("liga o forno")
+    out = skill().handle("liga o aquecedor")
     assert out is not None
     assert "desligado" in out.lower()
 
@@ -186,7 +208,7 @@ def test_command_without_a_reply_says_so(monkeypatch):
     """Aceitou, publicou, e o device nao disse nada. Nao se anuncia sucesso."""
     monkeypatch.setattr(sz, "_publish", lambda *a: True)
     monkeypatch.setattr(sz, "_state_for", lambda *a, **k: None)
-    out = skill().handle("liga o forno")
+    out = skill().handle("liga o aquecedor")
     assert out is not None
     assert "desligado" not in out.lower() and "ligado" not in out.lower()
 
@@ -203,7 +225,7 @@ def test_desligar_is_not_ligar(monkeypatch):
     monkeypatch.setattr(sz, "_publish", lambda friendly, state: published.append(state) or True)
     monkeypatch.setattr(sz, "_state_for", lambda *a, **k: {"state": "OFF"})
 
-    skill().handle("desliga o forno")
+    skill().handle("desliga o aquecedor")
 
     assert published == ["OFF"], f"published {published} for 'desliga'"
 
@@ -213,7 +235,7 @@ def test_ligar_publishes_on(monkeypatch):
     monkeypatch.setattr(sz, "_publish", lambda friendly, state: published.append(state) or True)
     monkeypatch.setattr(sz, "_state_for", lambda *a, **k: {"state": "ON"})
 
-    skill().handle("liga o forno")
+    skill().handle("liga o aquecedor")
 
     assert published == ["ON"], f"published {published} for 'liga'"
 
@@ -319,7 +341,7 @@ def test_dashboard_says_unreachable_rather_than_inventing_a_state():
 
 def test_dashboard_reports_on_off(monkeypatch):
     monkeypatch.setattr(sz, "_state_for", lambda *a, **k: {"state": "ON", "power": 42.0})
-    out = skill().get_status_for_device("forno")
+    out = skill().get_status_for_device("aquecedor")
     assert out["state"] == "on"
     assert out["power_w"] == 42.0
 
@@ -328,7 +350,7 @@ def test_dashboard_unknown_state_is_not_on_or_off(monkeypatch):
     """`unavailable` nao e `off`. Traduzir um para o outro faz o painel
     prometer um estado que o device nao deu."""
     monkeypatch.setattr(sz, "_state_for", lambda *a, **k: {"state": "unavailable"})
-    assert skill().get_status_for_device("forno")["state"] == "unknown"
+    assert skill().get_status_for_device("aquecedor")["state"] == "unknown"
 
 
 # --- topicos -------------------------------------------------------------
@@ -426,10 +448,17 @@ def test_house_alias_reaches_the_clamp_with_no_nickname_in_the_prompt(monkeypatc
 def test_house_alias_never_lands_on_a_plug(monkeypatch):
     """`total` must not switch a relay.
 
-    "quanto gastou o total" resolving onto the oven would publish an ON for a
+    "quanto gastou o total" resolving onto a ficha would publish an ON for a
     question about spending.
+
+    O device e `LIGAVEL`, que e uma ficha a serio. Usar `DEVICES` aqui dava a
+    ilusao de testar o oposto do que testa: `DEVICES` passou a ser um clamp, e
+    um clamp e precisamente o device que a alcunha DEVE escolher. Com essa
+    fixture a asercao verificava que a alcunha nao alcanca uma ficha -- uma
+    coisa que ja era verdade porque nao havia ficha nenhuma. O teste que
+    interessa e o inverso, e esta a trinta linhas: a alcunha alcanca o sensor.
     """
-    monkeypatch.setenv("ZIGBEE_DEVICES_JSON", json.dumps(DEVICES))  # plug only
+    monkeypatch.setenv("ZIGBEE_DEVICES_JSON", json.dumps(LIGAVEL))
     s = skill()
     assert s._house_alias_target("quanto gastou o total") is None
 
