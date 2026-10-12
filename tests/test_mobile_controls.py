@@ -336,11 +336,46 @@ def test_the_states_are_already_there_when_the_page_has_loaded(page):
 
 
 def test_the_device_icons_are_svg_and_not_emoji(page):
-    svgs = page.evaluate("() => document.querySelectorAll('.device-icon svg').length")
-    tiles = page.evaluate("() => document.querySelectorAll('.device-icon').length")
-    assert svgs == tiles and tiles > 0, (
-        f"{svgs} SVGs for {tiles} icon slots: the rest are text. `innerText` on "
-        f"an SVG string renders the markup as visible code inside the tile"
+    """Every icon slot holds a real SVG. None of them is text.
+
+    This used to assert `svgs == tiles`, an exact count, as a proxy for "every
+    slot has an SVG". The count stopped being true on 2026-10-06 (commit
+    6c14574): the car charger's current-flow animation appends a SECOND `<svg>`
+    into the same `.device-icon`, which is deliberate, so the equality failed
+    with 9 SVGs for 8 slots while every slot was in fact drawing correctly.
+
+    So the invariant is now stated directly instead of through a proxy, and it
+    is STRICTER on the thing that actually matters: it checks every single slot
+    individually rather than trusting that a matching total implies none is
+    empty. Two slots each holding two SVGs, and one holding none, used to add
+    up to the same total as one-per-slot; this cannot.
+    """
+    report = page.evaluate(
+        """() => {
+            const slots = [...document.querySelectorAll('.device-icon')];
+            return {
+                tiles: slots.length,
+                withSvg: slots.filter(s => s.querySelector('svg')).length,
+                withText: slots.filter(s => (s.textContent || '').trim()).length,
+                empty: slots.filter(s => !s.querySelector('svg')).length,
+            };
+        }"""
+    )
+    assert report["tiles"] > 0, "no device icons rendered at all"
+    assert report["empty"] == 0, (
+        f"{report['empty']} of {report['tiles']} icon slots hold no SVG. "
+        f"`innerText` on an SVG string renders the markup as visible code "
+        f"inside the tile"
+    )
+    assert report["withSvg"] == report["tiles"], (
+        f"only {report['withSvg']} of {report['tiles']} icon slots hold an SVG"
+    )
+    # The other half of the original complaint: a slot must not be TEXT. An SVG
+    # is markup, not characters, so textContent inside a slot means the string
+    # was inserted somewhere it paints.
+    assert report["withText"] == 0, (
+        f"{report['withText']} of {report['tiles']} icon slots contain text: "
+        f"an SVG string has been inserted as characters somewhere"
     )
 
 
@@ -357,9 +392,26 @@ def test_an_svg_icon_is_actually_sized(page):
 
 
 def test_the_brand_svg_is_not_zero(page):
+    """The intent is unchanged -- the brand ghost must have a real box -- but
+    the QUERY had to change, because the drawing moved.
+
+    The bar ghost became the <ghost-avatar> component on 2026-10-07 so its face
+    can follow the last reply. That component draws into a shadow root, and a
+    light-DOM `querySelector` does not pierce shadow DOM, so the old selector
+    finds nothing and reports `None`. Asserting on it would have been asserting
+    that the brand has no shadow root, which is not what this test is about.
+
+    So it measures the same invariant at the element that now carries the
+    drawing: the component, and the SVG inside its own shadow root. The
+    threshold is unchanged at >4px, because a genuinely zero-sized brand is
+    still the bug this was written to catch -- and that failure mode is
+    invisible, because it looks exactly like a failed image load."""
     box = page.evaluate(
-        """() => {const s=document.querySelector('#brand-logo svg'); if(!s) return null;
-            const r=s.getBoundingClientRect();
+        """() => {const el = document.querySelector('#brand-logo ghost-avatar');
+            if (!el || !el.shadowRoot) return null;
+            const s = el.shadowRoot.querySelector('svg');
+            if (!s) return null;
+            const r = s.getBoundingClientRect();
             return [Math.round(r.width), Math.round(r.height)];}"""
     )
     assert box and box[0] > 4, f"the brand SVG measured {box}"

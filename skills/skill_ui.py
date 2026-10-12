@@ -1269,10 +1269,30 @@ def handle_request():
                 display: flex; justify-content: center; align-items: center;
                 margin-bottom: 5px;
             }
-            #brand-logo { 
-                font-size: 2rem; 
+            /* The bar ghost is now the <ghost-avatar> component, on owner
+               instruction 2026-10-07: its FACE follows the last thing pHantasma
+               said, so the brand reacts to the conversation instead of only to
+               the sky.
+
+               The weather tint is untouched and still lives here, on the HOST.
+               That is deliberate and it is why this works: a CSS filter and a
+               CSS animation on an element apply to its shadow content too, so
+               `.ghost-sun`'s amber drop-shadow and `.ghost-rain`'s greyscale
+               keep colouring exactly the ghost they coloured before, with no
+               duplicated tint rules and no second place to keep in sync.
+
+               `--avatar-body: currentColor` is what carries the old inline
+               `stroke="currentColor"` across, and `--avatar-size: 1em` keeps the
+               component's own 22px default from shrinking the bar ghost: the
+               bar has always been 1em of a 2rem font-size. */
+            #brand-logo {
+                font-size: 2rem;
                 transition: all 1s ease; z-index: 10;
+                display: block; line-height: 1;
+                --avatar-size: 1em;
+                --avatar-body: currentColor;
             }
+            #brand-logo > ghost-avatar { display: block; }
             
             /* Indicador de Ar (Flutuante ao lado do fantasma) */
             #aqi-indicator {
@@ -1682,7 +1702,27 @@ def handle_request():
             .msg-row { display: flex; width: 100%; align-items: flex-end; }
             .msg-row.user { justify-content: flex-end; }
             .msg-row.ia { justify-content: flex-start; }
-            .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; animation: floatGhost 4s ease-in-out infinite; }
+            /* No float here, on owner instruction 2026-10-07. This rule used to
+               carry `animation: floatGhost 4s ease-in-out infinite`, which made
+               every delivered message leave one PERMANENT animation behind: the
+               browser's own census reads exactly one infinite animation per
+               `.ia-avatar`, and it is never cleaned up, so the count is linear
+               in the length of the conversation.
+
+               Measured, because the instruction was justified by a symptom and
+               the fix deserves an honest verdict rather than a comfortable one.
+               Freezing it provably removes the animations (0 vs 15 at n=15)
+               and did NOT move the frame time on any Chromium available here
+               -- at n=2, p95 frame gap 20.05ms animating vs 20.15ms frozen.
+               The leak was real; the performance benefit is UNVERIFIED, because
+               this symptom could not be reproduced on the owner's Android at
+               all. Treat this as the removal of unbounded growth, not as a fix
+               for a measured lag.
+
+               The `thinking` face still breathes, on its own scoped rule
+               inside the shadow root: that row is created on demand and
+               removed the moment the reply lands, so it cannot accumulate. */
+            .ia-avatar { font-size: 1.5rem; margin-right: 8px; margin-bottom: 5px; }
             .msg { max-width: 80%; padding: 10px 14px; border-radius: 18px; font-size: 1rem; line-height: 1.4; white-space: pre-wrap; }
             .msg-user { background: var(--user-msg); color: #fff; border-bottom-right-radius: 2px; }
             .msg-ia { background: var(--chat-bg); color: #ddd; border-bottom-left-radius: 2px; border: 1px solid #333; }
@@ -2895,6 +2935,15 @@ def handle_request():
                 full: _wrap('<circle cx="12" cy="12" r="8" fill="currentColor" stroke="none"/>'),
                 waning: _wrap('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16 10 10 0 0 0 0-16Z" fill="currentColor" stroke="none"/>'),
             };
+            /* KEPT AS A CONSTANT, no longer drawn. The bar ghost became the
+               <ghost-avatar> component on 2026-10-07, and this string is what
+               its silhouette is checked against: the browser test compares the
+               component's `.ghost-body` `d` against the first path below, so the
+               character on the bar and the character in the chat provably share
+               one shape. Deleting it would silently retire that guarantee while
+               every test still passed, because the test would compare the
+               component against nothing. Keep it; it is the reference, not the
+               drawing. */
             const GHOST_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 21v-9a7 7 0 0 1 14 0v9a1.5 1.5 0 0 1-2.5 1.1L14 20.5l-2 1.6-2-1.6-2.5 1.1A1.5 1.5 0 0 1 5 21Z"/><circle cx="9.5" cy="11" r="1.2"/><circle cx="14.5" cy="11" r="1.2"/></svg>';
             const CLOUD_SVG = '<svg class="ghost-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 18a4 4 0 0 1 .6-7.96A5.5 5.5 0 0 1 18.4 9.2 3.9 3.9 0 0 1 17 18H7Z"/></svg>';
 
@@ -2905,9 +2954,69 @@ def handle_request():
                and drew NOTHING, invisibly, for a release -- or entity-escaping,
                which is the same bug. Empty markup, one injection point. */
             const _brandEl = document.getElementById('brand-logo');
-            if (_brandEl) _brandEl.innerHTML = GHOST_SVG;
+            /* ONE instance, not one per message. The bar ghost is the only
+               long-lived <ghost-avatar> on the page, so it is the one place a
+               shadow root is affordable: it costs one cloned stylesheet for the
+               whole session instead of one per reply. */
+            const _brandGhost = _brandEl
+                ? ghostAvatar('normal', 'pHantasma') : null;
+            if (_brandEl && _brandGhost) _brandEl.appendChild(_brandGhost);
             const _skyEl = document.getElementById('main-weather-icon');
             if (_skyEl) _skyEl.innerHTML = CLOUD_SVG;
+
+            /* What the bar ghost's face says, from the text of the last reply.
+
+               Rules this had to respect, and why:
+
+               * FIRST MATCH WINS, over an ordered table. An ordered scan is
+                 readable, and a frequency count is not: "não foi possível" is
+                 a failure but also contains "não", which is ordinary speech.
+                 Whichever pattern is listed first is the one that fires, so the
+                 table's order is the specification and is commented as such.
+               * The table is small and Portuguese-only on purpose. This is a
+                 face, not a sentiment engine; a wrong face is a cosmetic miss,
+                 so the cost of being wrong is low and the rule is "default to
+                 neutral rather than guess".
+               * `error` is decided by the CALLER, never by this function. A
+                 network failure arrives as 'error' from addToChatLog already,
+                 because the text "Erro rede." is not reliably distinguishable
+                 from an answer. Tone is what text can carry; a failed request
+                 is a fact the caller already knows. */
+            /* EVERY BACKSLASH BELOW IS DOUBLED, and that is not decoration.
+
+               This JavaScript lives inside a Python triple-quoted string
+               literal, so Python decodes the escapes before the browser ever
+               sees them. A single-backslash word boundary is decoded by Python
+               into U+0008, BACKSPACE, and the boundary silently disappears:
+               the rule degenerates into matching one exact spelling and nothing
+               else. Doubled, the browser receives the escape it expects.
+
+               It failed silently and looked like a classifier that simply never
+               fired: every rule reported a miss and the bar sat on `normal`
+               forever. Only a test that asserts a phrase MAKES the face change
+               can catch it, which is why the mapping is parametrized per phrase
+               rather than checked once. */
+            const BAR_FACE_RULES = [
+                ['error',     /\\b(?:n[ãa]o (?:foi poss[íi]vel|consegui)|[eé]rro|falh|desculpa)\\b/],
+                ['confused',  /\\b(?:como assim|n[ãa]o (?:entendo|percebo|sei)|est[áa] a falar|qual\\?)\\b/],
+                ['sleepy',    /\\b(?:estou cansad\\w*|vou dormir|boa noite|descansar|aborrecid\\w*|chatead\\w*)\\b/],
+                ['surprised', /\\b(?:n[ãa]o acredito|inesperad\\w*|que surpresa|serio)\\b/],
+                ['excited',   /\\b(?:obrigad\\w+|excelente|perfeit\\w+|[óo]tim\\w+|feito)\\b/],
+                ['thinking',  /\\b(?:estou a (?:ver|verificar|olhar|consultar)|deixa[- ]me|vou (?:ver|confirmar))\\b/],
+            ];
+            function faceForText(text) {
+                const t = String(text || '').toLowerCase();
+                for (const [name, re] of BAR_FACE_RULES) {
+                    if (re.test(t)) return name;
+                }
+                return 'normal';
+            }
+            /* The one place the bar ghost's expression is written. Everything
+               else only decides WHICH expression; the component still owns what
+               a name means, so a name can never mean two things in two places. */
+            function setBarFace(name) {
+                if (_brandGhost) _brandGhost.setAttribute('expression', name);
+            }
 
             function icon(kind) {
                 /* The kind is a class, so a single icon can be recoloured without
@@ -3189,7 +3298,22 @@ def handle_request():
                    knows the house failed passes 'error', and everyone else gets
                    normal. The ghost reports the state the row is about, which
                    is the only reason it varies at all. */
-                if (sender === 'ia') { const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.appendChild(ghostAvatar(expression)); row.appendChild(avatar); }
+                if (sender === 'ia') {
+                    const avatar = document.createElement('div'); avatar.className = 'ia-avatar'; avatar.appendChild(ghostAvatar(expression)); row.appendChild(avatar);
+                    /* The bar ghost answers the last thing pHantasma said, on
+                       owner instruction 2026-10-07. An explicit `expression`
+                       from the caller wins: a failed command arrives as 'error'
+                       because the TEXT alone cannot reliably say so -- "Não foi
+                       possível" is a phrase, not a guarantee, and inferring a
+                       failure from words would let a cheerful sentence about a
+                       broken lamp wear a smile. Otherwise the tone of the reply
+                       chooses, and 'normal' is what an unremarkable answer gets.
+
+                       Only assistant rows move it. A user row must not make the
+                       brand react to being TYPED at. */
+                    setBarFace(expression === 'normal'
+                        ? faceForText(text) : expression);
+                }
                 const msgDiv = document.createElement('div'); msgDiv.className = `msg msg-${sender}`;
                 // Stable per-message id. Without it `message_id` was always the
                 // empty string, so the endpoint's 30s rate limit keyed on
@@ -3394,33 +3518,6 @@ def handle_request():
                     `;
                     icon.appendChild(flowSvg);
                 }
-                const switchLabel = document.createElement('label'); switchLabel.className = 'switch';
-                const input = document.createElement('input'); input.type = 'checkbox'; input.disabled = true;
-                input.onchange = () => {
-                    handleDeviceAction(device, input.checked ? 'ligar' : 'desligar', div);
-                    div.dataset.state = input.checked ? 'on' : 'off';
-                    if(input.checked) div.classList.add('active'); else div.classList.remove('active');
-                };
-                const slider = document.createElement('div'); slider.className = 'slider'; switchLabel.append(input, slider);
-                /* Two elements, because a box cannot clip and scroll itself:
-                   `.device-label` is the fixed-width window and
-                   `.device-label-text` is the mover its animation translates.
-                   Keeping them apart also keeps textContent == the full name,
-                   which is what the title and the tests read. */
-                const label = document.createElement('span'); label.className = 'device-label';
-                const labelTextEl = document.createElement('span'); labelTextEl.className = 'device-label-text';
-                labelTextEl.textContent = device;
-                label.appendChild(labelTextEl);
-                /* Watts get their own line instead of overwriting the name. The
-                   label used to become "210 W" whenever the device drew power,
-                   which meant the desumidifier -- the single most expensive thing
-                   in the house -- was the one tile that never said what it was.
-                   A reading is not a name, and a name that changes with the
-                   load cannot be scanned. */
-                const power = document.createElement('span'); power.className = 'device-power';
-                power.setAttribute('data-empty', '1');
-                div.append(icon, switchLabel, label, power); container.appendChild(div);
-                ALL_DEVICES_ELEMENTS.push({ name: device, type: 'toggle', element: div, input: input, label: label, labelTextEl: labelTextEl, power: power });
             }
 
             /* The full name gets the space it needs, in motion.
