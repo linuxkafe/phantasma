@@ -429,6 +429,11 @@ class Config:
     schedules_path: str = ""
     # How often the scheduler thread looks for something due.
     scheduler_poll_seconds: float = 15.0
+    # T071. The per-user wake-word enrolment registry, where trained models are
+    # installed, and where clips wait between being recorded and being bundled.
+    wakeword_registry_path: str = ""
+    wakeword_models_dir: str = ""
+    wakeword_staging_dir: str = ""
     searxng_url: str = "http://127.0.0.1:8081"
 
     # External service credentials (loaded from env)
@@ -599,6 +604,18 @@ class Config:
         cfg.cache_dir = cfg.db_path(cfg.cache_dir)
         cfg.public_dir = cfg.db_path(cfg.public_dir)
         cfg.schedules_path = cfg.db_path(cfg.schedules_path)
+        cfg.wakeword_registry_path = cfg.db_path(cfg.wakeword_registry_path)
+        cfg.wakeword_models_dir = cfg.db_path(cfg.wakeword_models_dir)
+        cfg.wakeword_staging_dir = cfg.db_path(cfg.wakeword_staging_dir)
+        # T071. Staging holds recorded voice between capture and export, so it
+        # is under data/ and never inside models/: a half-finished enrolment
+        # must not be picked up by WAKEWORD_MODELS at startup.
+        cfg.wakeword_registry_path = os.getenv(
+            "WAKEWORD_REGISTRY_PATH", str(base / "data" / "wakewords.json"))
+        cfg.wakeword_models_dir = os.getenv(
+            "WAKEWORD_MODELS_DIR", str(base / "models" / "users"))
+        cfg.wakeword_staging_dir = os.getenv(
+            "WAKEWORD_STAGING_DIR", str(base / "data" / "wakeword-staging"))
         # audio_utils.py reads this via getattr(config, "TTS_CACHE_DIR", ...).
         # The attribute did not exist, so the getattr always fell through to
         # its hardcoded /opt/phantasma fallback and the indirection was inert.
@@ -667,6 +684,32 @@ class Config:
         models_env = os.getenv("WAKEWORD_MODELS")
         if models_env:
             cfg.hotword.models = [m.strip() for m in models_env.split(",")]
+
+        # T071: append the per-user models that were actually trained and are
+        # actually on disk. APPENDED, not substituted -- `WAKEWORD_MODELS` in
+        # .env is the host's explicit list and keeps winning; enrolment adds a
+        # voice to it rather than editing the owner's configuration.
+        #
+        # Only paths that exist are added, because `HotwordDetector` raises
+        # RuntimeError on a model it cannot load and that takes the whole
+        # assistant down at startup. An enrolment that was started and never
+        # finished therefore cannot brick the house.
+        #
+        # Never reached when the registry file does not exist yet, which is the
+        # first-boot case.
+        try:
+            from src.wakeword.registry import WakeWordRegistry
+
+            for model_path in WakeWordRegistry(cfg.wakeword_registry_path).model_paths():
+                if model_path not in cfg.hotword.models:
+                    cfg.hotword.models.append(model_path)
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            # A missing or corrupt registry must leave the wake words exactly
+            # as they were, not take the assistant down with it.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "Nao li o registo de palavras de acordar: %s", exc)
         cfg.hotword.threshold = float(os.getenv("WAKEWORD_CONFIDENCE", str(cfg.hotword.threshold)))
         cfg.hotword.persistence = int(
             os.getenv("WAKEWORD_PERSISTENCE", str(cfg.hotword.persistence))
@@ -928,6 +971,13 @@ CONFIG_DB_PATH = config.config_db_path
 # T070. Absolute, resolved once in from_env(), so no caller re-derives it.
 SCHEDULES_PATH = config.schedules_path or str(BASE_DIR / "data" / "schedules.json")
 SCHEDULER_POLL_SECONDS = config.scheduler_poll_seconds
+# T071. Absolute, resolved once, like every other path above.
+WAKEWORD_REGISTRY_PATH = (config.wakeword_registry_path
+                          or str(BASE_DIR / "data" / "wakewords.json"))
+WAKEWORD_MODELS_DIR = (config.wakeword_models_dir
+                       or str(BASE_DIR / "models" / "users"))
+WAKEWORD_STAGING_DIR = (config.wakeword_staging_dir
+                        or str(BASE_DIR / "data" / "wakeword-staging"))
 TTS_MODEL_PATH = BASE_DIR / config.tts.voice_model_path
 SKILLS_DIR = config.skills_dir
 TTS_CACHE_DIR = config.tts_cache_dir

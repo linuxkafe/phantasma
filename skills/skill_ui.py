@@ -811,6 +811,12 @@ def register_routes(app):
     app.add_url_rule('/', 'ui', _ui_page)
     app.add_url_rule('/api/voz', 'ui.voice', voice_endpoint, methods=["POST"])
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
+
+    # T071: the enrolment wizard. Registered from here so it inherits the same
+    # app, the same auth stack and the same lifecycle as `/`.
+    from src.api import wakeword_wizard
+
+    wakeword_wizard.register(app)
     app.add_url_rule('/api/schedules', 'ui.schedules', schedules_api,
                      methods=["GET"])
     app.add_url_rule('/api/schedules/<task_id>/cancel',
@@ -882,6 +888,271 @@ def schedule_cancel_api(task_id):
     if not runner.store.cancel(task_id):
         return jsonify({"error": "agendamento inexistente"}), 404
     return jsonify({"ok": True, "schedules": _schedules_json()})
+
+
+
+# --- T071: o wizard de palavra de acordar ------------------------------------
+#
+# One page, three jobs, and a sentence on it that most wizards would leave out.
+#
+# This page RECORDS. It does not train. The owner was told on 2026-10-13 that
+# the training runs in the openWakeWord Google Colab and that this is a
+# deliberate exception to the offline-first non-goal recorded in CLAUDE.md, and
+# chose it knowingly. The page says so out loud, because the alternative -- a
+# page that quietly uploads a recording to Google's infrastructure -- is the
+# thing the project's own rules exist to prevent.
+#
+# And it says what this cannot do: a wake-word model answers "someone said the
+# phrase", not "who said it". The microphone hears whoever is in the room.
+
+_WAKEWORD_CSS = """
+    body { font-family: Inter, -apple-system, system-ui, sans-serif;
+           background: #0a0a0a; color: #fafafa; margin: 0; padding: 1.5rem; }
+    main { max-width: 46rem; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.05rem; margin: 2rem 0 .5rem; }
+    .muted { color: #a3a3a3; font-size: .9rem; line-height: 1.5; }
+    .warn { border: 1px solid #f59e0b; border-radius: 8px; padding: .75rem 1rem;
+            margin: 1rem 0; font-size: .88rem; line-height: 1.5; }
+    .card { border: 1px solid #262626; border-radius: 10px; padding: 1rem;
+            margin: 1rem 0; background: #171717; }
+    label { display: block; font-size: .85rem; margin: .6rem 0 .2rem;
+            color: #d4d4d4; }
+    input, select { width: 100%; box-sizing: border-box; padding: .55rem;
+                    background: #0a0a0a; color: #fafafa; font-size: 1rem;
+                    border: 1px solid #262626; border-radius: 8px; }
+    button { font-size: 1rem; padding: .7rem 1.2rem; border-radius: 10px;
+             border: 1px solid #262626; background: #171717; color: #fafafa;
+             cursor: pointer; min-height: 48px; }
+    button.rec { background: #7f1d1d; border-color: #b91c1c; }
+    button.primary { background: #166534; border-color: #22c55e; }
+    .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+    .counts { font-variant-numeric: tabular-nums; }
+    .bad { color: #fca5a5; font-size: .85rem; margin-top: .35rem; }
+    .good { color: #86efac; font-size: .85rem; margin-top: .35rem; }
+    .status { font-size: .9rem; margin-top: .5rem; }
+    ul.plain { list-style: none; padding: 0; }
+    ul.plain li { border-top: 1px solid #262626; padding: .7rem 0;
+                  font-size: .9rem; }
+    ul.plain li:first-child { border-top: none; }
+    code { background: #171717; padding: .1rem .35rem; border-radius: 4px; }
+"""
+
+_WAKEWORD_JS = """
+    const $ = (id) => document.getElementById(id);
+    let _rec = null, _chunks = [], _stream = null;
+
+    async function loadUsers() {
+        const res = await fetch('/api/wakeword/users');
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = $('users');
+        list.textContent = '';
+        (data.users || []).forEach(u => {
+            const li = document.createElement('li');
+            // textContent throughout: a display name is typed input, and this
+            // page also renders recorded labels.
+            const name = document.createElement('div');
+            name.textContent = u.label;
+            const state = document.createElement('div');
+            state.className = 'muted';
+            // The false-positive rate prints as "unknown" when null and as the
+            // number when measured. It must never print 0 for "not measured" --
+            // that is a measurement the owner never made.
+            const fp = u.false_positive_rate === null || u.false_positive_rate === undefined
+                ? 'desconhecido' : String(u.false_positive_rate);
+            state.textContent =
+                u.trained
+                    ? `modelo instalado (${u.sample_count} amostras, FP: ${fp})`
+                    : `por treinar (${u.staged_positives} positivas, ` +
+                      `${u.staged_negatives} negativos)`;
+            li.append(name, state);
+            list.appendChild(li);
+        });
+        $('loaded').textContent = (data.loaded_models || []).join('\n') || '(nenhum)';
+    }
+
+    async function record(kind) {
+        const label = $('label').value.trim();
+        if (!label) { $('status').textContent = 'Escreve o teu nome primeiro.'; return; }
+        if (!_stream) {
+            _stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+        const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+            .find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m));
+        _chunks = [];
+        _rec = mime ? new MediaRecorder(_stream, { mimeType: mime })
+                    : new MediaRecorder(_stream);
+        _rec.ondataavailable = (e) => { if (e.data && e.data.size) _chunks.push(e.data); };
+        _rec.onstop = send;
+        _rec.start();
+        $('rec').classList.add('rec');
+        $('status').textContent = 'A gravar... solta para gravar, clica para parar.';
+    }
+
+    async function send() {
+        $('rec').classList.remove('rec');
+        const blob = new Blob(_chunks, { type: _rec.mimeType });
+        const buf = await blob.arrayBuffer();
+        let binary = '';
+        const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        const res = await fetch('/api/wakeword/record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                label: $('label').value.trim(),
+                phrase: $('phrase').value.trim(),
+                kind: _pendingKind,
+                audio: btoa(binary)
+            })
+        });
+        const data = await res.json();
+        const note = $('note');
+        if (data.ok) {
+            note.className = 'good';
+            // The server's own words, not a generic "ok". It refused this clip
+            // or accepted it, and it knows why.
+            note.textContent = `aceite (${data.check.duration_s}s, pico ${data.check.peak})`;
+            $('pos').textContent = data.staged_positives;
+            $('neg').textContent = data.staged_negatives;
+        } else {
+            note.className = 'bad';
+            note.textContent = (data.check && data.check.reason) || data.error || 'rejeitado';
+        }
+        loadUsers();
+    }
+
+    let _pendingKind = 'positive';
+    $('rec').onclick = () => {
+        if (_rec && _rec.state === 'recording') { _rec.stop(); return; }
+        _pendingKind = $('kind').value;
+        record(_pendingKind);
+    };
+    $('export').onclick = async () => {
+        const res = await fetch('/api/wakeword/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: $('label').value.trim(),
+                                   phrase: $('phrase').value.trim() })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            $('note').className = 'bad';
+            $('note').textContent = data.reason || 'nao foi possivel exportar';
+            return;
+        }
+        $('note').className = 'good';
+        $('dl').hidden = false;
+        $('dl').href = '/api/wakeword/bundle/' + encodeURIComponent(
+            (data.metadata && data.metadata.user) || 'wakeword');
+        $('note').textContent = 'Bundle pronto. Carrega-o no Colab e segue o LEIA-ME.';
+    };
+    $('import').onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const buf = new Uint8Array(await file.arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i]);
+        const res = await fetch('/api/wakeword/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ label: $('label').value.trim(),
+                                   model: btoa(binary) })
+        });
+        const data = await res.json();
+        $('note').className = data.ok ? 'good' : 'bad';
+        $('note').textContent = data.ok
+            ? `Instalado (${(data.loaded || []).join(', ')}). Reinicia o servico para o usar.`
+            : (data.reason || data.error || 'falhou');
+        loadUsers();
+    };
+    loadUsers();
+"""
+
+
+def wakeword_page():
+    """The wizard. Records, bundles, imports. Never trains."""
+    from markupsafe import escape
+
+    return f"""<!doctype html>
+<html lang="pt"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Palavra de acordar &mdash; pHantasma</title>
+<style>{_WAKEWORD_CSS}</style></head>
+<body><main>
+    <h1>Palavra de acordar na tua voz</h1>
+    <p class="muted">Cada pessoa treina a sua. Isto e <strong>inscricao</strong>,
+       nao identificacao: o modelo responde &ldquo;alguem disse a palavra&rdquo;,
+       nao &ldquo;quem disse&rdquo;. O microfone ouve quem estiver na sala.</p>
+
+    <div class="warn">
+        <strong>Isto sai desta maquina.</strong> As gravacoes que fazes aqui sao
+        carregadas por ti, a mao, no Google Colab do openWakeWord, que e onde o
+        modelo e treinado. E uma excepcao deliberada ao offline-first deste
+        projecto, registada no <code>CLAUDE.md</code>. A inferencia continua
+        local: depois de instalado, o <code>.onnx</code> corre aqui e nao sai mais.
+    </div>
+
+    <div class="card">
+        <label for="label">Quem e</label>
+        <input id="label" placeholder="o teu nome" autocomplete="name">
+        <label for="phrase">Palavra de acordar (opcional)</label>
+        <input id="phrase" placeholder="ex.: ola fantasma">
+
+        <label for="kind">O que vais gravar</label>
+        <select id="kind">
+            <option value="positive">A palavra de acordar</option>
+            <option value="negative">Tudo o resto (fala, musica, ruido)</option>
+        </select>
+
+        <div class="row" style="margin-top:1rem">
+            <button id="rec" type="button">Gravar</button>
+            <span class="counts muted">
+                positivas: <b id="pos">0</b> &middot; negativos: <b id="neg">0</b>
+            </span>
+        </div>
+        <p class="muted" style="margin-top:.5rem">
+            Minimos: 30 positivas e 20 negativos. Os negativos sao o que impede o
+            assistente de acordar sozinho &mdash; grava fala normal, o que se ouve
+            na rua, musica.
+        </p>
+        <p id="status" class="status muted"></p>
+        <p id="note" class="status"></p>
+    </div>
+
+    <h2>Levar para o Colab</h2>
+    <div class="card">
+        <p class="muted">Exporta o pacote, carrega-o no notebook
+        &ldquo;Automatic Model Customization and Training&rdquo; do openWakeWord,
+        treina, descarrega o <code>.onnx</code> e importa-o aqui em baixo. O
+        <code>LEIA-ME</code> do pacote tem os passos e os avisos.</p>
+        <div class="row">
+            <button id="export" type="button" class="primary">Exportar pacote</button>
+            <a id="dl" href="#" hidden download>Descarregar o zip</a>
+        </div>
+    </div>
+
+    <h2>Receber o modelo treinado</h2>
+    <div class="card">
+        <p class="muted">O ficheiro e validado antes de ser instalado: se nao
+        carregar, o modelo anterior fica no sitio.</p>
+        <input id="import" type="file" accept=".onnx">
+        <p class="muted" style="margin-top:.5rem">
+            A taxa de falsos positivos <strong>nao e medida aqui</strong>. Depois
+            de instalado, deixa o assistente numa sala real durante um dia e conta
+            quantas vezes acordou sem ninguem dizer a palavra. Esse numero e o
+            que interessa, e so tu o podes medir.
+        </p>
+    </div>
+
+    <h2>Inscritos</h2>
+    <ul class="plain" id="users"></ul>
+    <h2>Modelos a carregar no arranque</h2>
+    <p class="muted" id="loaded"></p>
+</main>
+<script>{_WAKEWORD_JS}</script>
+</body></html>"""
 
 
 def handle_weather_api():
