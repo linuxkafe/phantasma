@@ -132,7 +132,7 @@ def test_opinion_detection_ignores_diacritics():
     assert A.PhantasmaPipeline._is_opinion("o que achas disto") is True
 
 
-def test_an_opinion_is_never_frozen():
+def test_an_opinion_is_never_frozen(monkeypatch):
     """The temperature rule, stated as the owner's decision.
 
     The owner's answer, when asked how to handle it: "Opinião sobe
@@ -145,8 +145,19 @@ def test_an_opinion_is_never_frozen():
     into `src.brain.model_config.temperature()` so the owner could set it from
     /admin/config. The rule did not change; the spelling did, and a test that
     pins a spelling fails on a refactor and passes on a regression.
+
+    The conversation temperature is PINNED here rather than read. It is the
+    owner's setting, it lives in the config store, and production has it at 0.9
+    because they moved the slider -- which is them using the feature this test
+    documents. Asserting the literal 0.6 meant asserting their unset default,
+    and the test went red the day they did exactly what we asked. What is being
+    tested is that an opinion is not cooled; the number is theirs to choose.
     """
+    import src.brain.model_config as model_config
     from src.brain.model_config import TEMP_CONVERSATION, TEMP_FACTUAL, temperature
+
+    monkeypatch.setattr(model_config, "resolve",
+                        lambda key: type("R", (), {"value": "0.6"})())
 
     # An opinion, which assistant.py resolves as `not (factual or (grounded and
     # not opinion))` -- i.e. factual=False.
@@ -161,11 +172,24 @@ def test_an_opinion_is_never_frozen():
         "a temperatura dos factos mudou. Foi posta a 0.15 porque a 0.6 o modelo "
         "enfeita factos em vez de os relatar."
     )
-    # And the slider's default is the measured conversation value.
-    assert 0.0 < float(TEMP_CONVERSATION and "0.6") <= 1.0
+    # And the rule itself, independent of the pinned number: an opinion is
+    # warmer than a fact, so "opinion" can never be frozen by context.
+    assert temperature(factual=False) > temperature(factual=True), (
+        "uma opinião tem de ser mais quente que um facto; caso contrário o "
+        "contexto passou a congelar perguntas de gosto."
+    )
+    # And the slider's default is a real temperature, not a literal.
+    # TEMP_CONVERSATION is the config KEY, not a number. The line here used to
+    # read `float(TEMP_CONVERSATION and "0.6")`, which evaluates to 0.6 whatever
+    # TEMP_CONVERSATION is -- so it asserted that 0.6 is between 0 and 1 and
+    # proved nothing at all. What is actually worth pinning is that the key
+    # exists, because temperature() resolves through it and a typo there would
+    # silently fall back instead of failing.
+    assert isinstance(TEMP_CONVERSATION, str) and TEMP_CONVERSATION, (
+        "a temperatura de conversa e resolvida por esta chave; uma chave vazia "
+        "ou errada faria o modelo cair no default em silencio."
+    )
 
-
-# --- and the material that is about another subject ------------------------
 
 def test_the_prompt_says_to_ignore_material_about_another_subject():
     """Owner's decision: send it, and tell the model to drop it.

@@ -1,5 +1,6 @@
 """Tests for pHantasma configuration."""
 
+import config as config_module
 from config import Config, config
 
 
@@ -19,6 +20,20 @@ class TestConfig:
         monkeypatch.setenv("ALSA_DEVICE_IN", "hw:1,0")
         monkeypatch.setenv("VAD_AGGRESSIVENESS", "3")
         monkeypatch.setenv("WHISPER_MODEL", "small")
+
+        # `_overlay_owner_settings` copies whitelisted rows out of the LIVE
+        # brain.db into os.environ during from_env(), and it runs AFTER the
+        # setenv calls above. So on production, where that table holds a real
+        # ALSA_DEVICE_IN, the database silently won and this test asserted
+        # against the owner's hardware instead of its own fixture.
+        #
+        # `hw:1,0` is an arbitrary token, not a real device: `arecord -l` on
+        # this host lists only `card 0: USB [Jabra SPEAK 410 USB]`. So there
+        # is nothing in production that this test should match -- the test is
+        # about env vars outranking defaults, and the database is a third
+        # source that has to be switched off for that to be observable.
+        monkeypatch.setattr(config_module, "_overlay_owner_settings",
+                            lambda *a, **k: None)
 
         test_config = Config.from_env()
 
