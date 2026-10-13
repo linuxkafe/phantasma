@@ -1102,8 +1102,26 @@ CONFIG_CONTROLS: dict[str, dict] = {
                                  label="Deteções consecutivas para ativar"),
     "WAKEWORD_COOLDOWN_SECONDS": dict(category="Audio", type="number", min=0, max=10, step=0.5,
                                       label="Intervalo entre ativações (s)"),
-    "WAKEWORD_MODELS": dict(category="Audio", type="text", label="Modelos de ativação",
-                            help="Separados por vírgula (ex.: models/hey_fantasma.onnx,models/ola_fantasma.onnx)."),
+    # This example used to be RELATIVE -- "models/hey_fantasma.onnx,
+    # models/ola_fantasma.onnx" -- and the owner saved exactly that on
+    # 2026-10-13, because they had copied the example rather than invented a
+    # value. The database recorded `updated_by: mail@linuxkafe.com` and the
+    # value matched this string byte for byte.
+    #
+    # Which broke `test_model_paths_are_absolute`, a test that has been in the
+    # suite far longer than this text. So the field was teaching people to enter
+    # the one thing the project forbids: a relative path resolves only because
+    # systemd happens to set WorkingDirectory=/opt/phantasma. Change the unit,
+    # run from a shell, run from a test runner, and the wake words vanish.
+    #
+    # The example is now absolute, and says why. A help string that contradicts
+    # a test is worse than no help string.
+    "WAKEWORD_MODELS": dict(
+        category="Audio", type="text", label="Modelos de ativação",
+        help=("Separados por vírgula, com caminho ABSOLUTO (ex.: "
+              "/opt/phantasma/models/hey_fantasma.onnx). Relativos só funcionam "
+              "se o serviço arrancar de /opt/phantasma — e isso é uma "
+              "coincidência de arranque, não uma configuração.")),
     # The help text here used to read "Toca um som quando o assistente é
     # ativado", which describes the WAKE sound, not a response sound. That is why
     # this read as already handled: there was a switch, it was labelled, and it

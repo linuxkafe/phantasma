@@ -248,6 +248,27 @@ def test_wake_scores_exceed_negative_scores_by_a_wide_margin(detector):
     assert positive > negative * 50, f"positive={positive:.4f} negative={negative:.4f}"
 
 
+def test_the_help_text_does_not_teach_a_relative_path():
+    """The field used to offer `models/hey_fantasma.onnx,...` as its example.
+
+    The owner saved exactly that string on 2026-10-13 -- copied from here -- and
+    it broke the test below. A help string that shows the one form the project
+    forbids is not neutral: it is the most likely single cause of somebody
+    saving a broken value, and it does so while looking helpful.
+    """
+    from src.api.admin import CONFIG_CONTROLS
+
+    help_text = CONFIG_CONTROLS["WAKEWORD_MODELS"]["help"]
+    # No bare relative path anywhere in the example.
+    assert "ex.: models/" not in help_text
+    assert not any(
+        token.startswith("models/")
+        for token in help_text.replace("(", " ").replace(")", " ").split()
+    ), help_text
+    # And it says so in words.
+    assert "ABSOLUTO" in help_text
+
+
 def test_model_paths_are_absolute(detector):
     """Relative model paths resolve only if the process CWD happens to match."""
     for model in config.WAKEWORD_MODELS:
