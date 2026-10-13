@@ -70,8 +70,25 @@
 ## [LOW] Custom Hotword Training
 - Impact: Low
 - Effort: High
-- Status: backlog
-- Description: Train "Ei Fantasma" custom onnx model via Google Colab / local training
+- Status: in-progress (T071)
+- Description: Wizard de **inscricao** por utilizador — cada pessoa treina a
+  palavra de acordar na sua propria voz. Decisao do dono em 2026-10-13: o
+  treino corre no **Google Colab** do openWakeWord, nao localmente. Isto e uma
+  **excepcao deliberada** ao non-goal "Cloud-dependent voice processing", e a
+  unica vez em que dados biometricos do dono cruzam um terceiro. A excepcao
+  esta escrita no `CLAUDE.md` com o custo registado; nao a estender.
+
+  O que continua local: inferencia. O `.onnx` resultante e importado e carregado
+  pelo `HotwordDetector` como hoje.
+
+  **Inscricao, nao identificacao.** O modelo responde "alguem disse a palavra",
+  nao "quem disse". A microphone ouve quem estiver na sala. Per-user significa um
+  modelo por pessoa, nao controlo de acesso.
+
+  **O ponto fraco e conhecido:** o openWakeWord controla falsos positivos com um
+  corpus de fala/ ruido que so existe descarregado. Por isso o wizard inclui um
+  passo de medicao de falsos positivos que o dono corre e le, em vez de eu
+  prometer um numero que nao consigo medir.
 
 ## [LOW] Tuya UDP Daemon
 - Impact: Low

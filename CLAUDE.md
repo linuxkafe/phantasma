@@ -19,6 +19,35 @@ Things this project explicitly does NOT do:
 - Multi-user cloud synchronization
 - GUI-focused development (CLI/API/voice-first)
 
+### Deliberate exception — wake-word TRAINING in Google Colab (2026-10-13, T071)
+
+The rule above is broken in exactly one place, on purpose, and the owner chose
+it after being told the cost.
+
+**What leaves the machine:** the owner's voice recordings. The wizard built in
+T071 records samples in the browser and exports a bundle that the owner uploads
+to the openWakeWord Google Colab notebook, which trains the `.onnx` there and
+hands it back to be imported.
+
+**Why:** the owner wants a wake word in their own voice, per user, and
+accepted that this specific step runs on Google's infrastructure. The wizard
+itself stays local; only the training step is off-host.
+
+**What is still true, and must not be quietly widened:** inference is local and
+stays local. No audio is ever *processed* by a cloud API — it is uploaded once,
+by a human, to a notebook, to produce a model file. Runtime voice processing
+(Whisper STT, Piper TTS, openWakeWord detection) remains 100% on-device.
+
+**Cost recorded, not waved away:** this is the only part of the project where
+the owner's biometric data crosses a third party. If a local trainer is ever
+wanted back, `openwakeword.train.Model.auto_train` is installed with
+`torch 2.14.0+cpu`; it was available and was declined, not overlooked.
+
+**This is enrolment, not identification.** A wake-word model answers "someone
+said the word", not "who said it". The microphone hears whoever is in the room,
+so another person standing next to the owner can wake their model. Per-user
+means one trained model per person — not access control.
+
 ---
 
 ## Critical Files
