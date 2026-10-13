@@ -423,6 +423,12 @@ class Config:
     tts_cache_dir: str = ""
     cache_dir: str = ""
     public_dir: str = ""
+    # Where pending scheduled tasks live (T070). Env-overridable like every
+    # other path here, because the rule in CLAUDE.md is that a host value lives
+    # in the environment and never in a dataclass default.
+    schedules_path: str = ""
+    # How often the scheduler thread looks for something due.
+    scheduler_poll_seconds: float = 15.0
     searxng_url: str = "http://127.0.0.1:8081"
 
     # External service credentials (loaded from env)
@@ -575,6 +581,14 @@ class Config:
         cfg.memory_db_path = os.getenv("MEMORY_DB_PATH", str(base / "data" / "brain.db"))
         cfg.brain_db_path = os.getenv("BRAIN_DB_PATH", str(base / "data" / "brain.db"))
         cfg.config_db_path = os.getenv("CONFIG_DB_PATH", str(base / "data" / "config.db"))
+        # T070. A schedule the assistant forgets on restart is worse than none,
+        # because the owner was told it was set -- so it is on disk, not in
+        # memory, and the runner re-reads it at boot.
+        cfg.schedules_path = os.getenv("SCHEDULES_PATH",
+                                       str(base / "data" / "schedules.json"))
+        cfg.scheduler_poll_seconds = float(
+            os.getenv("SCHEDULER_POLL_SECONDS", str(cfg.scheduler_poll_seconds))
+        )
         # Resolve to absolute here, once, so no downstream module is tempted to
         # re-derive a path. See Config.db_path() for the two silent failures
         # this prevents.
@@ -584,6 +598,7 @@ class Config:
         cfg.tts_cache_dir = cfg.db_path(cfg.tts_cache_dir)
         cfg.cache_dir = cfg.db_path(cfg.cache_dir)
         cfg.public_dir = cfg.db_path(cfg.public_dir)
+        cfg.schedules_path = cfg.db_path(cfg.schedules_path)
         # audio_utils.py reads this via getattr(config, "TTS_CACHE_DIR", ...).
         # The attribute did not exist, so the getattr always fell through to
         # its hardcoded /opt/phantasma fallback and the indirection was inert.
@@ -910,6 +925,9 @@ DB_PATH = (
 MEMORY_DB_PATH = config.memory_db_path
 BRAIN_DB_PATH = config.brain_db_path
 CONFIG_DB_PATH = config.config_db_path
+# T070. Absolute, resolved once in from_env(), so no caller re-derives it.
+SCHEDULES_PATH = config.schedules_path or str(BASE_DIR / "data" / "schedules.json")
+SCHEDULER_POLL_SECONDS = config.scheduler_poll_seconds
 TTS_MODEL_PATH = BASE_DIR / config.tts.voice_model_path
 SKILLS_DIR = config.skills_dir
 TTS_CACHE_DIR = config.tts_cache_dir

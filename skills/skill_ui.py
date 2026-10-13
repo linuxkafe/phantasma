@@ -811,6 +811,11 @@ def register_routes(app):
     app.add_url_rule('/', 'ui', _ui_page)
     app.add_url_rule('/api/voz', 'ui.voice', voice_endpoint, methods=["POST"])
     app.add_url_rule('/api/weather', 'weather_api', handle_weather_api)
+    app.add_url_rule('/api/schedules', 'ui.schedules', schedules_api,
+                     methods=["GET"])
+    app.add_url_rule('/api/schedules/<task_id>/cancel',
+                     'ui.schedule_cancel', schedule_cancel_api,
+                     methods=["POST"])
     app.add_url_rule('/login', 'ui_login', login_page, methods=["GET", "POST"])
     app.add_url_rule('/logout', 'ui_logout', logout_page, methods=["GET", "POST"])
     app.add_url_rule('/recuperar', 'ui.forgot', forgot_password, methods=["GET", "POST"])
@@ -818,6 +823,66 @@ def register_routes(app):
     app.add_url_rule('/verificar-dispositivo', 'ui.verify_new_device',
                      verify_new_device, methods=["GET", "POST"])
     app.add_url_rule('/perfil', 'ui.profile', profile_page, methods=["GET", "POST"])
+
+
+# --- T070: agendamentos ------------------------------------------------------
+#
+# Two endpoints, and one deliberate omission: there is no POST to CREATE. The
+# owner creates tasks by speaking or typing, and adding a web form would be a
+# third way to express the same sentence with its own parsing and its own
+# disagreement about what "as 8" means at 21:00.
+
+def _schedules_json() -> list:
+    """Pending tasks as plain dicts, soonest first.
+
+    An empty list rather than an error when the runner is absent: the page
+    renders the same way whether nothing is scheduled or the service has not
+    finished booting, and the two are not distinguishable to the owner. The
+    card is hidden until this answers, so "not yet answered" and "answered
+    empty" are visibly different states.
+    """
+    from src.scheduler.runner import get_shared_runner
+
+    runner = get_shared_runner()
+    if runner is None:
+        return []
+    return [{"id": t.id, "action": t.action, "fire_at": t.fire_at,
+             "when": t.when().isoformat(timespec="minutes"),
+             "label": t.when().strftime("%H:%M"),
+             "source": t.source}
+            for t in runner.store.pending()]
+
+
+def schedules_api():
+    from src.api import ui_auth
+
+    if not ui_auth.is_authenticated():
+        return jsonify({"error": "nao autenticado"}), 401
+    return jsonify({"schedules": _schedules_json()})
+
+
+def schedule_cancel_api(task_id):
+    """Cancel one task.
+
+    Answers 404 for an unknown id rather than a silent 200. The button was
+    pressed against a card the page drew earlier; if the task already fired or
+    was cancelled from the phone, the owner needs to be told the thing they
+    tapped is gone, not shown a success that removed nothing.
+    """
+    from src.api import ui_auth
+
+    if not ui_auth.is_authenticated():
+        return jsonify({"error": "nao autenticado"}), 401
+
+    from src.scheduler.runner import get_shared_runner
+
+    runner = get_shared_runner()
+    if runner is None:
+        return jsonify({"error": "agendador indisponivel"}), 503
+    if not runner.store.cancel(task_id):
+        return jsonify({"error": "agendamento inexistente"}), 404
+    return jsonify({"ok": True, "schedules": _schedules_json()})
+
 
 def handle_weather_api():
     if not os.path.exists(WEATHER_CACHE_FILE): return jsonify({"error": "No cache data"})
@@ -2398,6 +2463,46 @@ def handle_request():
                     #voice-btn-chat.recording { border-color: #ef4444; color: #ef4444; }
                     #voice-btn-chat[disabled] { opacity: 0.4; cursor: not-allowed; }
                 }
+            /* --- T070: agendamentos -------------------------------------------------
+               The card is the only way to cancel a task without speaking, so it
+               must work on a phone with a browser and no microphone permission.
+
+               `hidden` until the fetch resolves, because an empty card that
+               flashes "Nada agendado" on every page load reads as an answer,
+               and it is not one until /api/schedules has been asked. */
+            #schedules-card {
+                margin: 0 16px 16px; padding: 12px 14px;
+                border: 1px solid var(--border, rgba(127,127,127,.25));
+                border-radius: 12px; background: var(--surface, transparent);
+            }
+            #schedules-card[hidden] { display: none; }
+            #schedules-head {
+                display: flex; align-items: center; justify-content: space-between;
+                gap: 8px; margin-bottom: 8px;
+            }
+            #schedules-title { font-size: .95rem; font-weight: 600; margin: 0; }
+            #schedules-list { list-style: none; margin: 0; padding: 0;
+                              display: flex; flex-direction: column; gap: 8px; }
+            #schedules-list li {
+                display: flex; align-items: center; justify-content: space-between;
+                gap: 10px; padding: 8px 0;
+                border-top: 1px solid rgba(127,127,127,.15);
+            }
+            #schedules-list li:first-child { border-top: none; }
+            .sched-when { font-variant-numeric: tabular-nums; font-weight: 600;
+                          white-space: nowrap; }
+            .sched-what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+            /* 44x44 is the touch target floor. A 24px "x" is the reason a card
+               that looks cancelable turns out not to be on a phone. */
+            .sched-cancel {
+                min-width: 44px; min-height: 44px; padding: 0 12px;
+                border: 1px solid rgba(127,127,127,.4); border-radius: 10px;
+                background: transparent; color: inherit; cursor: pointer;
+                font-size: .85rem;
+            }
+            .sched-cancel:hover { background: rgba(127,127,127,.12); }
+            #schedules-empty { margin: 0; font-size: .85rem; opacity: .7; }
+
               </style>
     </head>
     <body>
@@ -2476,6 +2581,17 @@ def handle_request():
                    __ADMIN_LINKS__
           </div>
 
+
+
+        <!-- T070: what is scheduled. Hidden until /api/schedules answers, so
+             an empty card never flashes "Nada agendado" as if it were known. -->
+        <section id="schedules-card" hidden aria-labelledby="schedules-title">
+            <div id="schedules-head">
+                <h2 id="schedules-title">Agendado</h2>
+            </div>
+            <ul id="schedules-list"></ul>
+            <p id="schedules-empty">Nada agendado.</p>
+        </section>
 
 
         <div id="main">
@@ -4456,7 +4572,82 @@ def handle_request():
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatCommand(); }
                 setTimeout(() => { chatInput.style.height = 'auto'; chatInput.style.height = chatInput.scrollHeight + 'px'; }, 0);
             };
-            loadDevicesStructure(); loadHelp(); addToChatLog("Nas sombras, aguardo...", "ia");
+            // --- T070: agendamentos -------------------------------------
+            // Built with createElement + textContent, never innerHTML. The
+            // action text comes from what the owner said, so putting it in
+            // innerHTML would make the page execute whatever the STT heard.
+            function renderSchedules(items) {
+                const card = document.getElementById('schedules-card');
+                const list = document.getElementById('schedules-list');
+                const empty = document.getElementById('schedules-empty');
+                if (!card || !list) return;
+                list.textContent = '';
+                items.forEach(function (task) {
+                    const li = document.createElement('li');
+
+                    const when = document.createElement('span');
+                    when.className = 'sched-when';
+                    when.textContent = task.label;
+
+                    const what = document.createElement('span');
+                    what.className = 'sched-what';
+                    what.textContent = task.action;
+
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'sched-cancel';
+                    btn.textContent = 'Cancelar';
+                    btn.setAttribute('aria-label', 'Cancelar: ' + task.action);
+                    btn.onclick = async function () {
+                        btn.disabled = true;
+                        try {
+                            const res = await fetch(
+                                '/api/schedules/' + encodeURIComponent(task.id)
+                                + '/cancel', { method: 'POST' });
+                            const data = await res.json();
+                            if (!res.ok) {
+                                // 404 means it already fired or was cancelled
+                                // elsewhere. Say so rather than leaving a card
+                                // that looks live and is not.
+                                alert(data.error || 'Ja nao esta agendado.');
+                                loadSchedules();
+                                return;
+                            }
+                            renderSchedules(data.schedules || []);
+                        } catch (e) {
+                            btn.disabled = false;
+                            alert('Falha de rede ao cancelar.');
+                        }
+                    };
+
+                    li.append(when, what, btn);
+                    list.appendChild(li);
+                });
+                empty.hidden = items.length > 0;
+                // Shown only once there is an answer. Before the fetch
+                // resolves the card stays hidden, so an empty list is never
+                // mistaken for "you have nothing scheduled".
+                card.hidden = false;
+            }
+
+            async function loadSchedules() {
+                try {
+                    const res = await fetch('/api/schedules');
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    renderSchedules(data.schedules || []);
+                } catch (e) { /* offline: leave the card hidden, not lying */ }
+            }
+
+            // A task created from the voice or cancelled from the phone never
+            // reloads this document, so without a poll the card shows whatever
+            // was true when the page happened to open. A card that lists a
+            // task which already fired is worse than no card: the owner will
+            // wait for it. One small local GET a minute is the cheapest way to
+            // keep it honest.
+            setInterval(loadSchedules, 60000);
+
+            loadDevicesStructure(); loadHelp(); loadSchedules(); addToChatLog("Nas sombras, aguardo...", "ia");
             /* After the device tiles are in the DOM, not before -- measuring
                scrollHeight on an empty container would always report "fits". */
             setTimeout(updateDeviceScrollHint, 300);

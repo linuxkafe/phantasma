@@ -46,6 +46,8 @@ from src.pipeline.audio import (
 )
 from src.pipeline.stt import transcribe as stt_transcribe
 from src.pipeline.utils import Result, log_stage, logger
+from src.scheduler import SchedulerRunner, ScheduleStore
+from src.scheduler.runner import register_shared_runner
 from src.settings_store import get_persona
 from tools import search_with_searxng
 
@@ -291,6 +293,28 @@ class PhantasmaPipeline:
         self._skill_loader.load_all()
         # Start legacy daemon skills (discord, weather, system_stats, tuya, ...)
         self._skill_loader.start_daemons()
+
+        # T070 -- deferred tasks.
+        #
+        # The store is on disk before the pipeline can answer anything, because
+        # a task the assistant forgets on the next restart is worse than a task
+        # it never accepted: the owner was told it was set.
+        #
+        # The executor is `respond_to_text` deliberately. A scheduled "liga a
+        # luz do balcao" therefore goes through the SAME skill ordering a live
+        # one does, which matters because four skills claim that nickname and
+        # the owner validated that order in production. Resolving the device
+        # here instead would be a second copy of the priority rules, and it
+        # would drift within a week.
+        self._actuator_lock = threading.RLock()
+        self._scheduler_store = ScheduleStore(config_module.SCHEDULES_PATH)
+        self._scheduler = SchedulerRunner(
+            self._scheduler_store,
+            executor=self._run_scheduled,
+            speaker=self._speak,
+            poll_seconds=config_module.SCHEDULER_POLL_SECONDS,
+        )
+        register_shared_runner(self._scheduler)
         self._collecting_feedback = False
         self._feedback_start_time: Optional[float] = None
         self._feedback_window_seconds = config_module.FEEDBACK_WINDOW_SECONDS
@@ -1067,6 +1091,24 @@ class PhantasmaPipeline:
             return raw
         return "\n".join(lines)
 
+    def _run_scheduled(self, text: str) -> Optional[str]:
+        """Run a scheduled sentence, holding the actuator lock for the whole thing.
+
+        The scheduler thread is the first caller that runs a skill from
+        somewhere other than the voice loop, so it is the first place the
+        "switch a device, then say something" pair could be interleaved with a
+        live utterance doing the same two steps. Holding the lock across BOTH
+        halves is what makes the pair atomic; locking only the execution would
+        let the scheduler switch a light in the gap before the voice loop
+        announces something else.
+
+        Returns the skill's answer, or None if nothing claimed the sentence --
+        which the runner treats as a failure worth announcing, because silence
+        reads to the owner as "the light came on".
+        """
+        with self._actuator_lock:
+            return self.respond_to_text(text)
+
     def _speak(self, text: str, use_cache: bool = True):
         """Speak, with the microphone held shut for as long as we are talking.
 
@@ -1088,6 +1130,31 @@ class PhantasmaPipeline:
             logger.info("Quiet hours: not spoken, answer below\n%s", text)
             return Result.ok(None)
 
+        # T070: speaking is the one section that must not be interleaved.
+        # `_speak` stops the shared capture, plays, sleeps for the tail, and
+        # restarts it. Two of those running at once means one of them restarts
+        # a capture the other is about to use, and the mic ends up deaf --
+        # which is the failure this method's docstring already describes, just
+        # reached by two threads instead of by our own voice.
+        #
+        # Re-entrant, because the scheduler holds this lock across its own
+        # execute-then-speak and then calls this.
+        actuator = getattr(self, "_actuator_lock", None)
+        if actuator is not None:
+            actuator.acquire()
+        try:
+            return self._speak_locked(text, use_cache=use_cache)
+        finally:
+            if actuator is not None:
+                actuator.release()
+
+    def _speak_locked(self, text: str, use_cache: bool = True):
+        """The body of `_speak`, with the actuator lock already held.
+
+        The quiet-hours check stays in the caller rather than being repeated
+        here: there is no point holding the actuator lock only to discover that
+        nothing is going to be played.
+        """
         if self.audio_capture:
             self.audio_capture.stop()
         self._speaking = True
@@ -1583,6 +1650,12 @@ class PhantasmaPipeline:
         self._running = True
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker_thread.start()
+        # Started with the pipeline, not with the API server. The scheduler is
+        # there to make something happen whether or not anybody has a browser
+        # open, and the API is a separate concern that can fail on its own.
+        scheduler = getattr(self, "_scheduler", None)
+        if scheduler is not None:
+            scheduler.start()
 
         logger.info("Phantasma pipeline started")
         return Result.ok(None)
@@ -1599,6 +1672,10 @@ class PhantasmaPipeline:
             return Result.ok(None)
 
         self._running = False
+
+        scheduler = getattr(self, "_scheduler", None)
+        if scheduler is not None:
+            scheduler.stop()
 
         if self._worker_thread:
             self._worker_thread.join(timeout=2.0)
