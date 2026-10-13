@@ -976,6 +976,8 @@ _WAKEWORD_JS = """
         const label = $('label').value.trim();
         if (!label) { $('status').textContent = 'Escreve o teu nome primeiro.'; return; }
         if (!_stream) {
+            // No try/catch: the rejection has to reach the caller so the button
+            // can say WHY it did nothing.
             _stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         }
         const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
@@ -987,7 +989,7 @@ _WAKEWORD_JS = """
         _rec.onstop = send;
         _rec.start();
         $('rec').classList.add('rec');
-        $('status').textContent = 'A gravar... solta para gravar, clica para parar.';
+        $('status').textContent = 'A gravar. Clica outra vez para parar.';
     }
 
     async function send() {
@@ -1024,10 +1026,38 @@ _WAKEWORD_JS = """
     }
 
     let _pendingKind = 'positive';
-    $('rec').onclick = () => {
+    /* A button that ignores you and shows no state is indistinguishable from
+       a broken one. This one did exactly that: `navigator.mediaDevices` only
+       exists in a secure context (https, localhost, 127.0.0.1), and reached by
+       LAN IP this page is plain http -- so `getUserMedia` was a property of
+       undefined, the promise rejected, nothing was caught, and nothing was
+       drawn. The same guard `voiceBegin` already uses at skill_ui.py:5110.
+
+       So: check first, say what is wrong, and point at the terminal wizard,
+       which needs neither a browser nor https. */
+    function micUnavailable(reason) {
+        $('rec').disabled = true;
+        $('rec').textContent = 'Gravacao indisponivel';
+        $('status').className = 'bad';
+        $('status').textContent = reason;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia
+        || typeof window.MediaRecorder === 'undefined') {
+        micUnavailable(
+            'Este navegador nao da microfone a esta pagina. Abrir o pHantasma ' +
+            'por https (ou em localhost) resolve. Sem https, usa o terminal: ' +
+            'python3 -m src.wakeword.cli record "' + $('label').value.trim() + '"');
+    }
+
+    $('rec').onclick = async () => {
         if (_rec && _rec.state === 'recording') { _rec.stop(); return; }
         _pendingKind = $('kind').value;
-        record(_pendingKind);
+        $('note').textContent = '';
+        try {
+            await record(_pendingKind);
+        } catch (e) {
+            micUnavailable('Nao consegui abrir o microfone: ' + e);
+        }
     };
     $('export').onclick = async () => {
         const res = await fetch('/api/wakeword/export', {
@@ -1116,6 +1146,14 @@ def wakeword_page():
             Minimos: 30 positivas e 20 negativos. Os negativos sao o que impede o
             assistente de acordar sozinho &mdash; grava fala normal, o que se ouve
             na rua, musica.
+        </p>
+        <p class="muted" style="margin-top:.5rem">
+            <strong>Sem microfone aqui?</strong> O mesmo wizard corre no terminal,
+            que nao precisa de navegador nem de https, e grava pelo microfone que
+            o assistente ja usa:
+            <code>python3 -m src.wakeword.cli record "O teu nome"</code>
+            (com o servico parado), depois <code>export</code>, e no fim
+            <code>import</code>.
         </p>
         <p id="status" class="status muted"></p>
         <p id="note" class="status"></p>

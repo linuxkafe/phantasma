@@ -336,6 +336,24 @@ class TestThePage:
         assert "inscricao" in page.lower()
         assert "identificacao" in page.lower()
 
+    def test_it_offers_the_terminal_wizard(self, monkeypatch, wizard):
+        """The browser cannot reach the microphone over plain http on the LAN,
+        and that is the normal way this page is opened. The page must say so
+        and name the way that does work, rather than offering a button that
+        silently does nothing."""
+        client, _cfg = wizard
+        page = client.get("/treino").get_data(as_text=True)
+        assert "src.wakeword.cli record" in page
+
+    def test_it_checks_for_a_microphone_before_offering_one(self, monkeypatch, wizard):
+        """The defect that made Gravar look broken: `navigator.mediaDevices` is
+        undefined outside a secure context, `getUserMedia` threw on a property
+        of undefined, nothing was caught and nothing was drawn."""
+        client, _cfg = wizard
+        page = client.get("/treino").get_data(as_text=True)
+        assert "navigator.mediaDevices" in page
+        assert "micUnavailable" in page
+
     def test_it_says_the_false_positive_rate_is_not_measured_here(self, wizard):
         client, _cfg = wizard
         page = client.get("/treino").get_data(as_text=True)
