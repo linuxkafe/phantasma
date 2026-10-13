@@ -102,6 +102,28 @@
 - Status: backlog
 - Description: pytest suite; GitHub Actions CI; make check quality gates
 
+## `--force-host` em config.py — 2026-10-13 (T070 + T071)
+
+`deploy.sh` trata uma divergencia entre `config.py` de dev e de prod como
+falha dura. Aqui dev esta certo e prod estava atrasado, que e o caso que a
+regra "--force-host" existe para cobrir.
+
+O que mudou em `config.py`: T070 acrescentou `schedules_path` e
+`scheduler_poll_seconds`; T071 acrescentou `wakeword_registry_path`,
+`wakeword_models_dir` e `wakeword_staging_dir`, e o arranque passa a juntar ao
+`WAKEWORD_MODELS` os modelos por utilizador que existem em disco.
+
+**Nenhum valor de host.** Todos os campos sao env-overridable pela mesma regra
+que o resto do ficheiro ja usava (`os.getenv` com um default relativo ao
+`BASE_DIR`). Se um destes aparecesse com `/opt/phantasma/...` escrito no
+dataclass, era uma bifurcação e não uma evolução — e seria a coisa errada a
+fazer.
+
+`audio_utils.py` não divergia. `assistant.py` diverge e é sincronizado à
+partida pelo próprio deploy como ponto de entrada do serviço.
+
+---
+
 ## [HIGH] [DISCOVERED 2026-09-30] `/api/command` responde que ejecutou e não executou
 - Impact: High
 - Effort: Medium
