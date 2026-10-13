@@ -337,11 +337,20 @@ class TestSkill:
         parser had no word boundary before "as" inside "das", found no time,
         fell through to matching the word "das" against the pending actions,
         and replied that nothing matched while the task stayed pending."""
+        # Hours that CANNOT collide, whatever the clock says.
+        #
+        # This test used "as 20" and "as 8", and that is a trap: between 08:00
+        # and 19:59 the owner's own rule sends BOTH to 20:00 -- "as 8" becomes
+        # the evening slot -- so "cancela das 20" legitimately removes two and
+        # the assertion fails. It passed only because the suite ran before 08:00,
+        # and it failed in the production run at 09:40. "as 6 da manha" pins
+        # hour 6 whatever the time is, so the two tasks are always distinct.
         self.skill.handle("liga a luz do balcao as 20")
-        self.skill.handle("desliga a luz da sala as 8")
+        self.skill.handle("desliga a luz da sala as 6 da manha")
         reply = self.skill.handle("cancela o agendamento das 20")
         assert "1" in reply
-        assert [t.action for t in self.store.pending()] == ["desliga a luz da sala"]
+        assert [t.action for t in self.store.pending()] == [
+            "desliga a luz da sala"]
 
     def test_cancel_by_words(self):
         self.skill.handle("liga a luz do balcao as 20")
