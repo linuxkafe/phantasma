@@ -23,7 +23,7 @@ import logging
 import os
 
 import numpy as np
-from flask import jsonify, send_file
+from flask import jsonify, make_response, redirect, request, send_file, url_for
 
 from src.wakeword.dataset import Sample, build_bundle, decode_clip
 from src.wakeword.importer import import_model
@@ -289,9 +289,38 @@ def register(app) -> None:
     # --- the page -------------------------------------------------------
 
     def wizard_page():
+        """The wizard page. Gated.
+
+        It rendered 200 to an anonymous caller until 2026-10-13. Every route
+        behind it was already admin-only, so nothing leaked: the page ships no
+        data, and it fetches nothing until its JavaScript calls those gated
+        endpoints. But a page about enrolling voices, reachable by anyone who
+        can reach port 5000, advertises the feature and gives a stranger the
+        shape of the admin surface -- which is disclosure by accident, the same
+        argument `_build_nav_menu` makes about not rendering admin links to
+        non-admins.
+        """
+        from src.api import ui_auth
+
+        if not ui_auth.is_authenticated():
+            try:
+                return redirect(url_for(ui_auth.UI_LOGIN_ROUTE, next=request.path))
+            except Exception:
+                # The login route lives in skill_ui, which registers alongside
+                # this. If it is absent the right answer is still "you are not
+                # signed in" -- a 500 here would turn an auth refusal into an
+                # error page and tell a stranger something about the install.
+                return ("401 Unauthorized", 401)
+        if not ui_auth.is_admin():
+            return jsonify({"error": "so admin"}), 403
+
         from skills.skill_ui import wakeword_page
 
-        return wakeword_page()
+        resp = make_response(wakeword_page())
+        # Same reasoning as `/`: this page must not be served from a stale
+        # cache, or a change to the wizard would not be visible on reload.
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
 
     app.add_url_rule("/treino", "wakeword.page", wizard_page, methods=["GET"])
 

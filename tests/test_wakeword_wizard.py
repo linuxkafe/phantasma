@@ -271,6 +271,48 @@ class TestTheReportedFacts:
         assert self_n["loaded_models"] == []
 
 
+class TestThePageGate:
+    """`/treino` rendered 200 to an anonymous caller until 2026-10-13."""
+
+    def test_anonymous_is_sent_to_login(self, monkeypatch, tmp_path):
+        from flask import Flask
+
+        import config as config_module
+        from src.api import ui_auth
+
+        monkeypatch.setattr(config_module, "WAKEWORD_REGISTRY_PATH",
+                            str(tmp_path / "w.json"))
+        monkeypatch.setattr(ui_auth, "is_authenticated", lambda: False,
+                            raising=False)
+        monkeypatch.setattr(ui_auth, "is_admin", lambda: True, raising=False)
+        app = Flask(__name__)
+        app.config["TESTING"] = True
+        from src.api import wakeword_wizard
+        wakeword_wizard.register(app)
+        response = app.test_client().get("/treino")
+        assert response.status_code in (302, 401, 403)
+        assert b"Palavra de acordar" not in response.data
+
+    def test_a_signed_in_non_admin_is_refused(self, monkeypatch, tmp_path):
+        from flask import Flask
+
+        import config as config_module
+        from src.api import ui_auth
+
+        monkeypatch.setattr(config_module, "WAKEWORD_REGISTRY_PATH",
+                            str(tmp_path / "w.json"))
+        monkeypatch.setattr(ui_auth, "is_authenticated", lambda: True,
+                            raising=False)
+        monkeypatch.setattr(ui_auth, "is_admin", lambda: False, raising=False)
+        app = Flask(__name__)
+        app.config["TESTING"] = True
+        from src.api import wakeword_wizard
+        wakeword_wizard.register(app)
+        response = app.test_client().get("/treino")
+        assert response.status_code == 403
+        assert b"Palavra de acordar" not in response.data
+
+
 class TestThePage:
     def test_it_names_the_exception(self, monkeypatch, wizard):
         """The page must say out loud that recordings leave the machine.

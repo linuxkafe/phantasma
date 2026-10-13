@@ -436,7 +436,21 @@ import urllib.request
 ROLES = {
     "primary": ("OLLAMA_MODEL_PRIMARY", "OLLAMA_HOST_PRIMARY"),
     "fallback": ("OLLAMA_MODEL_FALLBACK", "OLLAMA_HOST_FALLBACK"),
-    "vision": ("OLLAMA_VISION_MODEL", "OLLAMA_HOST_PRIMARY"),
+    # Vision is checked against the FALLBACK host, not the primary, and that is
+    # not a convenience -- it is what the code does.
+    #
+    # `skills/skill_tapo.py` calls the module-level `ollama.generate(...)`, and
+    # the ollama library resolves its host from `OLLAMA_HOST`, which this
+    # project never sets. The default is therefore localhost:11434, exactly
+    # where OLLAMA_HOST_FALLBACK points and exactly where gemma3:4b is
+    # installed (verified: `ollama.generate(model='gemma3:4b', images=[...])`
+    # returned a description).
+    #
+    # Checking vision against OLLAMA_HOST_PRIMARY reported a dead host as a
+    # production fault when vision had been working the whole time. The gate
+    # must describe reality or it is worse than no gate: it trains the reader
+    # to skip it.
+    "vision": ("OLLAMA_VISION_MODEL", "OLLAMA_HOST_FALLBACK"),
 }
 
 
