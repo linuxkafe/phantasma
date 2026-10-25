@@ -58,9 +58,10 @@ PROBE_PROMPT = "di: ok"
 # next to a log line saying 180. A timeout that lies about itself is worse than
 # one that is short, because you stop reading the message.
 #
-# The default is still 45s: it is what surfaced the broken fallback in seconds
-# rather than minutes, and raising it is a deliberate act by whoever sets it.
-PROBE_TIMEOUT_S = float(os.getenv("PROBE_TIMEOUT", "45"))
+# Default raised to 120s: cold starts (model loading) can take >45s on CPU,
+# and a 45s cut-off falsely reported a healthy-but-slow fallback as broken.
+# Raising it further is a deliberate act by whoever sets PROBE_TIMEOUT.
+PROBE_TIMEOUT_S = float(os.getenv("PROBE_TIMEOUT", "120"))
 CONNECT_TIMEOUT_S = float(os.getenv("CONNECT_TIMEOUT", "5"))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
