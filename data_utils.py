@@ -41,7 +41,7 @@ def setup_database():
 # memories in the store were 2170 chars of tagged JSON; retrieval OR-ed their
 # keywords together, so a short question matched half the store and the model
 # answered with whatever ranked first.
-MEMORY_DISTIL_THRESHOLD = 400
+MEMORY_DISTIL_THRESHOLD = 300
 
 
 def _distil_for_memory(text: str) -> str:
@@ -65,17 +65,21 @@ def _distil_for_memory(text: str) -> str:
             messages=[{
                 "role": "user",
                 "content": (
-                    "Reduz este texto a no maximo 3 frases com os factos "
-                    "essenciais que devem ser lembrados. Sem introducoes, "
-                    "sem repeticoes, sem commentarios, sem markdown. Se nao "
-                    "contiver factos a guardar, responde apenas: VAZIO\n\n"
+                    "Extrai os CONCEITOS essenciais deste texto, separados por "
+                    "virgulas, no maximo 8. Sem frases, sem introducoes, sem "
+                    "repeticoes, sem markdown, sem pontuacao final. Apenas os "
+                    "conceitos-chave. Se nao contiver factos a guardar, "
+                    "responde apenas: VAZIO\n\n"
                     f"{text[:6000]}"
                 ),
             }],
-            options={"temperature": 0.1, "num_ctx": 8192},
+            options={"temperature": 0.1, "num_ctx": 8192, "num_predict": 80},
         )
         out = (resp.get("message", {}).get("content") or "").strip()
         if not out or out.upper().startswith("VAZIO"):
+            return ""
+        out = out.strip().rstrip(".;:!?")
+        if not out:
             return ""
         if len(out) >= len(text):
             # The model padded it back to the original size: no gain, so keep

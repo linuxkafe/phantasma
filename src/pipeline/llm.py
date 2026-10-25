@@ -125,7 +125,11 @@ class OllamaLLM:
         errors = []
         for label, client, model, host in attempts:
             try:
-                response = client.chat(model=model, messages=messages, options={"num_ctx": 8192})
+                response = client.chat(
+                    model=model,
+                    messages=messages,
+                    options={"num_ctx": 8192, "num_predict": 250},
+                )
                 text = response.get("message", {}).get("content", "").strip()
                 duration_ms = (time.perf_counter() - start) * 1000
                 if label == "fallback":

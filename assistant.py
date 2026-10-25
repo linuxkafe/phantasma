@@ -1410,6 +1410,7 @@ class PhantasmaPipeline:
             "Português europeu, nunca português do Brasil. Escreve por extenso: não\n"
             "abrevies palavras, e confirma que a tua ortografia saiu correcta mesmo\n"
             "quando a palavra é rara. Não uses cabeçalhos, listas ou marcações.\n"
+            "Sê conciso: responde em no máximo 3 a 4 frases curtas, sem repetir.\n"
         )
         full_prompt = "\n".join(parts) + f"\nUtilizador: {text}"
 
@@ -1493,6 +1494,7 @@ class PhantasmaPipeline:
                         "temperature": temperature,
                         "num_ctx": 8192,
                         "top_p": 0.9,
+                        "num_predict": 200,
                     },
                 )
                 response_text = response.get("message", {}).get("content", "").strip()
