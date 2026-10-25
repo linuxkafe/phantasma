@@ -1446,8 +1446,17 @@ class PhantasmaPipeline:
         primary_model = primary_model or resolve(MODEL_PRIMARY).value
         fallback_model = fallback_model or resolve(MODEL_FALLBACK).value
 
+        # Cache a dead primary host so we do not pay its connect timeout (and
+        # emit a network error) on every single request while it is down.
+        # Re-checked every 5 minutes in case it comes back.
+        import time as _time
+
+        _now = _time.time()
+        _primary_down_until = getattr(PhantasmaPipeline, "_primary_down_until", 0.0)
+        _primary_is_down = _now < _primary_down_until
+
         inference_targets = []
-        if primary_host:
+        if primary_host and not _primary_is_down:
             inference_targets.append((primary_host, primary_model))
         if fallback_host and fallback_host != primary_host:
             inference_targets.append((fallback_host, fallback_model))
@@ -1495,7 +1504,7 @@ class PhantasmaPipeline:
                         "temperature": temperature,
                         "num_ctx": 8192,
                         "top_p": 0.9,
-                        "num_predict": 200,
+                        "num_predict": 40,
                     },
                 )
                 response_text = response.get("message", {}).get("content", "").strip()
@@ -1504,6 +1513,9 @@ class PhantasmaPipeline:
                     return response_text
             except Exception as e:
                 logger.warning(f"Ollama {host} failed: {e}")
+                if host == primary_host:
+                    # Remember that the primary is down for 5 minutes.
+                    PhantasmaPipeline._primary_down_until = _time.time() + 300.0
                 continue
 
         logger.error("All Ollama hosts failed")
