@@ -1489,6 +1489,7 @@ class PhantasmaPipeline:
                 response = client.chat(
                     model=model,
                     messages=self._build_messages(full_prompt),
+                    think=False,
                     options={
                         "repeat_penalty": 1.4,
                         "temperature": temperature,

@@ -73,6 +73,7 @@ def _distil_for_memory(text: str) -> str:
                     f"{text[:6000]}"
                 ),
             }],
+            think=False,
             options={"temperature": 0.1, "num_ctx": 8192, "num_predict": 80},
         )
         out = (resp.get("message", {}).get("content") or "").strip()

@@ -128,6 +128,7 @@ class OllamaLLM:
                 response = client.chat(
                     model=model,
                     messages=messages,
+                    think=False,
                     options={"num_ctx": 8192, "num_predict": 250},
                 )
                 text = response.get("message", {}).get("content", "").strip()

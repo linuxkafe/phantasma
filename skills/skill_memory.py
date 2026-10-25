@@ -21,7 +21,7 @@ def _safe_ollama_chat(prompt):
         if not host: continue
         try:
             client = ollama.Client(host=host, timeout=config.OLLAMA_TIMEOUT)
-            resp = client.chat(model=model, messages=[{'role': 'user', 'content': prompt}])
+            resp = client.chat(model=model, messages=[{'role': 'user', 'content': prompt}], think=False)
             return resp['message']['content']
         except Exception: continue
     return None
