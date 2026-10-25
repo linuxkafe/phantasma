@@ -108,7 +108,7 @@ class OllamaLLM:
 
         messages = [
             {"role": "system", "content": system_prompt or self._system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": (prompt or "") + " /no_think"},
         ]
 
         attempts = [("primary", self.client, self.model, self.host)]
@@ -132,6 +132,9 @@ class OllamaLLM:
                     options={"num_ctx": 8192, "num_predict": 60},
                 )
                 text = response.get("message", {}).get("content", "").strip()
+                import re as _re
+
+                text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
                 duration_ms = (time.perf_counter() - start) * 1000
                 if label == "fallback":
                     logger.info(

@@ -820,7 +820,7 @@ class PhantasmaPipeline:
             return [{"role": "user", "content": prompt}]
         return [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt + " /no_think"},
         ]
 
     @staticmethod
@@ -1508,6 +1508,10 @@ class PhantasmaPipeline:
                     },
                 )
                 response_text = response.get("message", {}).get("content", "").strip()
+                # Strip Qwen3 thinking blocks (<think>...</think>) if present.
+                response_text = re.sub(
+                    r"<think>.*?</think>", "", response_text, flags=re.DOTALL
+                ).strip()
                 if response_text:
                     logger.info(f"Ollama responded via {host} ({model})")
                     return response_text

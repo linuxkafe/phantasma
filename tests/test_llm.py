@@ -125,7 +125,7 @@ class TestOllamaLLM:
             assert len(messages) == 2
             assert messages[0]["role"] == "system"
             assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == "Hello"
+        assert messages[1]["content"] == "Hello /no_think"
 
     @patch("src.pipeline.llm.ollama.Client")
     def test_chat_uses_custom_system_prompt(self, mock_client_class):

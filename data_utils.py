@@ -70,7 +70,7 @@ def _distil_for_memory(text: str) -> str:
                     "repeticoes, sem markdown, sem pontuacao final. Apenas os "
                     "conceitos-chave. Se nao contiver factos a guardar, "
                     "responde apenas: VAZIO\n\n"
-                    f"{text[:6000]}"
+                    f"{text[:6000]} /no_think"
                 ),
             }],
             think=False,
