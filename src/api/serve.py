@@ -51,7 +51,7 @@ import threading
 
 logger = logging.getLogger("phantasma.serve")
 
-DEFAULT_THREADS = 8
+DEFAULT_THREADS = 16
 DEFAULT_PORT = 5000
 DEFAULT_HOST = "0.0.0.0"
 
@@ -85,7 +85,7 @@ def serve_waitress(pipeline_factory, host: str | None = None, port: int | None =
     port = port or _port()
     threads = int(os.getenv("PHANTASMA_API_THREADS", str(DEFAULT_THREADS)))
     connection_limit = int(os.getenv("PHANTASMA_API_CONNECTION_LIMIT", str(max(threads * 4, 100))))
-    channel_timeout = int(os.getenv("PHANTASMA_API_CHANNEL_TIMEOUT", "120"))
+    channel_timeout = int(os.getenv("PHANTASMA_API_CHANNEL_TIMEOUT", "600"))
 
     app = create_app(pipeline=pipeline_factory())
     thread = threading.Thread(
