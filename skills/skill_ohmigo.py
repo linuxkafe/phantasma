@@ -17,16 +17,16 @@ import httpx
 
 import config
 
+PRIORITY = 100
+
 TRIGGER_TYPE = "contains"
 TRIGGERS = [
     "carregar o carro",
     "carregar carro",
     "onde carregar",
-    "carregador",
-    "carregamento",
     "ohmigo",
-    "carregar",
     "bateria do carro",
+    "mais barato carregar",
 ]
 
 MCP_URL = "https://ohmigo.ocarroeletrico.com/mcp"

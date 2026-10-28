@@ -265,6 +265,7 @@ class SkillLoader:
                     module,
                     context=self.context,
                     trig_type=trig_type,
+                    priority=getattr(module, "PRIORITY", 0),
                 )
 
             logger.warning(
