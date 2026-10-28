@@ -1250,19 +1250,29 @@ class PhantasmaPipeline:
             logger.info("Cache hit for prompt")
             return cached
 
+        _ohmigo_trigs = (
+            "carregar o carro", "carregar carro", "onde carregar",
+            "ohmigo", "bateria do carro", "mais barato carregar",
+        )
+        _ohmigo_q = any(trig in (text or "").lower() for trig in _ohmigo_trigs)
+
         # Retrieve RAG memories
-        rag = sanitize_llm_context(self._render_memory(retrieve_from_rag(text)))
+        if _ohmigo_q:
+            rag = ""
+        else:
+            rag = sanitize_llm_context(self._render_memory(retrieve_from_rag(text)))
         logger.debug(f"RAG context length: {len(rag)}")
 
         # Retrieve memory-graph context (FlyBrain affinity-weighted topics)
         graph_ctx = ""
-        try:
-            from src.brain.memory_graph import graph_context_text, init_db
+        if not _ohmigo_q:
+            try:
+                from src.brain.memory_graph import graph_context_text, init_db
 
-            init_db()
-            graph_ctx = sanitize_llm_context(graph_context_text(text))
-        except Exception as e:
-            logger.warning(f"Memory-graph context failed: {e}")
+                init_db()
+                graph_ctx = sanitize_llm_context(graph_context_text(text))
+            except Exception as e:
+                logger.warning(f"Memory-graph context failed: {e}")
         logger.debug(f"Graph context length: {len(graph_ctx)}")
 
         # Web search via SearXNG, on every message.
@@ -1288,7 +1298,10 @@ class PhantasmaPipeline:
         # engine searched for the wrapper because the wrapper was in the query.
         # The reading already answers the question; the web is there for what the
         # sensors cannot know.
-        web = sanitize_llm_context(search_with_searxng(self._search_subject(text)))
+        if _ohmigo_q:
+            web = ""
+        else:
+            web = sanitize_llm_context(search_with_searxng(self._search_subject(text)))
         logger.debug(f"Web context length: {len(web)}")
         # Say so when the search found nothing. Measured 2026-09-28: from this
         # host every engine refuses us (duckduckgo CAPTCHA, brave/startpage
