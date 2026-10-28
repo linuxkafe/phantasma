@@ -700,7 +700,16 @@ class PhantasmaPipeline:
             # user wants the light on, not a paragraph about lighting. Sending
             # every skill through the LLM would make the house slower and less
             # reliable to get exactly the answers it is best at.
-            if self._is_opinion(text):
+            # The ohmigo (MCP) skill's output is a data dump (charging prices)
+            # that reads better through the persona than verbatim, so route it
+            # through the LLM like an opinion even when the user did not ask
+            # for an opinion.
+            _ohmigo_triggers = (
+                "carregar o carro", "carregar carro", "onde carregar",
+                "ohmigo", "bateria do carro", "mais barato carregar",
+            )
+            _ohmigo = any(trig in (text or "").lower() for trig in _ohmigo_triggers)
+            if self._is_opinion(text) or (_ohmigo and skill_response is not None):
                 logger.info(
                     "Skill devolveu dados para uma opiniao: %s", skill_response
                 )

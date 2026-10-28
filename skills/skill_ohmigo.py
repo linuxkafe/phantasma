@@ -54,7 +54,9 @@ def _extract_place(text):
     """Best-effort place extraction: 'em X', 'perto de X', 'para X'."""
     t = _normalize(text)
     patterns = (
-        r"\bem\s+([a-z]+(?:\s+[a-z]+)?)",
+        r"\bem\s+(?:o\s+|a\s+)?([a-z]+(?:\s+[a-z]+)?)",
+        r"\bno\s+([a-z]+(?:\s+[a-z]+)?)",
+        r"\bna\s+([a-z]+(?:\s+[a-z]+)?)",
         r"\bperto de\s+([a-z]+(?:\s+[a-z]+)?)",
         r"\bpara\s+([a-z]+(?:\s+[a-z]+)?)",
     )
