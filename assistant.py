@@ -1524,7 +1524,7 @@ class PhantasmaPipeline:
                     options={
                         "repeat_penalty": 1.4,
                         "temperature": temperature,
-                        "num_ctx": 8192,
+                        "num_ctx": 16384,
                         "top_p": 0.9,
                         "num_predict": 40,
                     },

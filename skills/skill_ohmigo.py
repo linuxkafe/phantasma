@@ -124,6 +124,12 @@ def handle(user_prompt_lower, user_prompt_full):
     if not result:
         return None
 
+    # Truncate to the top entries to keep the prompt within context limits.
+    lines = result.splitlines()
+    if len(lines) > 12:
+        lines = lines[:12] + ["... (mais resultados omitidos)"]
+    result = "\n".join(lines)
+
     # If the user asked "onde" / "qual o mais barato", prepend a short header.
     header = f"Carregamento mais barato perto de {place} (iOn, {DEFAULT_START_PCT:.0f}%→{DEFAULT_TARGET_PCT:.0f}%):\n"
     return header + result
