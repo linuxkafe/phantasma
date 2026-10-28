@@ -125,9 +125,11 @@ def handle(user_prompt_lower, user_prompt_full):
         return None
 
     # Truncate to the top entries to keep the prompt within context limits.
+    # Each entry can be long, so cap both the count and the per-line length.
     lines = result.splitlines()
-    if len(lines) > 12:
-        lines = lines[:12] + ["... (mais resultados omitidos)"]
+    lines = [ln[:200] for ln in lines]
+    if len(lines) > 5:
+        lines = lines[:5] + ["... (mais resultados omitidos)"]
     result = "\n".join(lines)
 
     # If the user asked "onde" / "qual o mais barato", prepend a short header.
