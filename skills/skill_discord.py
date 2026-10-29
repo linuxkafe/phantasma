@@ -111,7 +111,7 @@ async def _send_to_phantasma(prompt) -> tuple:
     connection error, 401 from the command gate, and a non-2xx -- and matching a
     string catches only the ones somebody remembered to spell.
     """
-    async with httpx.AsyncClient(timeout=300) as http_client:
+    async with httpx.AsyncClient(timeout=600) as http_client:
         try:
             payload = {"prompt": prompt}
             if not _COMMAND_HEADERS:
