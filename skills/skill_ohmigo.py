@@ -32,7 +32,9 @@ TRIGGERS = [
 MCP_URL = "https://ohmigo.ocarroeletrico.com/mcp"
 MCP_TIMEOUT = 90.0
 
-# Peugeot iOn / Citroën C-Zero / Mitsubishi i-MiEV (hardcoded; override via env)
+# Car parameters (hardcoded for Peugeot iOn / Citroën C-Zero / Mitsubishi i-MiEV;
+# override via env for any other car).
+CAR_MODEL = getattr(config, "OHMIGO_CAR_MODEL", "Peugeot iOn")
 CAR_BATTERY_KWH = float(getattr(config, "OHMIGO_BATTERY_KWH", 14.5))
 CAR_AC_KW = float(getattr(config, "OHMIGO_AC_KW", 3.7))
 CAR_DC_KW = float(getattr(config, "OHMIGO_DC_KW", 25.0))
@@ -133,5 +135,12 @@ def handle(user_prompt_lower, user_prompt_full):
     result = "\n".join(lines)
 
     # If the user asked "onde" / "qual o mais barato", prepend a short header.
-    header = f"Carregamento mais barato perto de {place} (iOn, {DEFAULT_START_PCT:.0f}%→{DEFAULT_TARGET_PCT:.0f}%):\n"
+    # NOTE: the car model is the user's vehicle, NOT the name of any charging
+    # station in the list below.
+    header = (
+        f"Carregamento mais barato perto de {place} "
+        f"(carro: {CAR_MODEL}, {DEFAULT_START_PCT:.0f}%→{DEFAULT_TARGET_PCT:.0f}%):\n"
+        f"NOTA: '{CAR_MODEL}' e o modelo do carro do utilizador, nao o nome de "
+        f"nenhuma estacao de carregamento da lista.\n"
+    )
     return header + result

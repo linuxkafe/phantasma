@@ -570,6 +570,15 @@ class Config:
 
         # Base paths
         cfg.skills_dir = os.getenv("SKILLS_DIR", str(base / "skills"))
+        # Ohmigo EV charging skill (configurable car parameters)
+        cfg.ohmigo_car_model = os.getenv("OHMIGO_CAR_MODEL", "Peugeot iOn")
+        cfg.ohmigo_battery_kwh = float(os.getenv("OHMIGO_BATTERY_KWH", "14.5"))
+        cfg.ohmigo_ac_kw = float(os.getenv("OHMIGO_AC_KW", "3.7"))
+        cfg.ohmigo_dc_kw = float(os.getenv("OHMIGO_DC_KW", "25.0"))
+        cfg.ohmigo_dc_10_80_min = float(os.getenv("OHMIGO_DC_10_80_MIN", "30.0"))
+        cfg.ohmigo_default_place = os.getenv("OHMIGO_DEFAULT_PLACE", "Leiria")
+        cfg.ohmigo_start_pct = float(os.getenv("OHMIGO_START_PCT", "20.0"))
+        cfg.ohmigo_target_pct = float(os.getenv("OHMIGO_TARGET_PCT", "80.0"))
         # Memory and FlyBrain are ONE store, not two files that happen to agree.
         # `src/brain/memory_graph.py` writes memory_graph through DB_PATH while
         # `/admin` reads it through BRAIN_DB_PATH, so if those two names resolve
@@ -999,6 +1008,16 @@ OLLAMA_MODEL_PRIMARY = config.llm.model
 OLLAMA_MODEL_FALLBACK = config.llm.model_fallback
 OLLAMA_TIMEOUT = config.llm.timeout
 WHISPER_MODEL = config.stt.model_size
+
+# Ohmigo EV charging skill
+OHMIGO_CAR_MODEL = config.ohmigo_car_model
+OHMIGO_BATTERY_KWH = config.ohmigo_battery_kwh
+OHMIGO_AC_KW = config.ohmigo_ac_kw
+OHMIGO_DC_KW = config.ohmigo_dc_kw
+OHMIGO_DC_10_80_MIN = config.ohmigo_dc_10_80_min
+OHMIGO_DEFAULT_PLACE = config.ohmigo_default_place
+OHMIGO_START_PCT = config.ohmigo_start_pct
+OHMIGO_TARGET_PCT = config.ohmigo_target_pct
 RECORD_SECONDS = 7
 OLLAMA_CONTEXT_SIZE = config.llm.context_size
 
