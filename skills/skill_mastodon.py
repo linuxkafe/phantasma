@@ -44,9 +44,8 @@ POLL_INTERVAL = int(
     getattr(config, "MASTODON_POLL_INTERVAL", os.getenv("MASTODON_POLL_INTERVAL", "30"))
 )
 POST_HOUR = int(getattr(config, "MASTODON_POST_HOUR", os.getenv("MASTODON_POST_HOUR", "5")))
-POST_ENABLED = getattr(
-    config, "MASTODON_POST_ENABLED", os.getenv("MASTODON_POST_ENABLED", "true")
-).lower() in ("1", "true", "yes")
+_raw = getattr(config, "MASTODON_POST_ENABLED", os.getenv("MASTODON_POST_ENABLED", "true"))
+POST_ENABLED = _raw if isinstance(_raw, bool) else str(_raw).lower() in ("1", "true", "yes")
 BOT_ACCT = getattr(
     config, "MASTODON_BOT_ACCT", os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")
 ).strip()
