@@ -581,6 +581,12 @@ class Config:
         cfg.city_name = cfg.default_city
         cfg.ohmigo_start_pct = float(os.getenv("OHMIGO_START_PCT", "20.0"))
         cfg.ohmigo_target_pct = float(os.getenv("OHMIGO_TARGET_PCT", "80.0"))
+        # Mastodon skill
+        cfg.mastodon_instance_url = os.getenv("MASTODON_INSTANCE_URL", "https://linuxkafe.com")
+        cfg.mastodon_access_token = os.getenv("MASTODON_ACCESS_TOKEN", "")
+        cfg.mastodon_admin = os.getenv("MASTODON_ADMIN", "seyon@s.linuxkafe.com")
+        cfg.mastodon_bot_acct = os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")
+        cfg.mastodon_poll_interval = int(os.getenv("MASTODON_POLL_INTERVAL", "30"))
         # Memory and FlyBrain are ONE store, not two files that happen to agree.
         # `src/brain/memory_graph.py` writes memory_graph through DB_PATH while
         # `/admin` reads it through BRAIN_DB_PATH, so if those two names resolve
@@ -1022,6 +1028,11 @@ DEFAULT_CITY = config.default_city
 CITY_NAME = config.city_name
 OHMIGO_START_PCT = config.ohmigo_start_pct
 OHMIGO_TARGET_PCT = config.ohmigo_target_pct
+MASTODON_INSTANCE_URL = config.mastodon_instance_url
+MASTODON_ACCESS_TOKEN = config.mastodon_access_token
+MASTODON_ADMIN = config.mastodon_admin
+MASTODON_BOT_ACCT = config.mastodon_bot_acct
+MASTODON_POLL_INTERVAL = config.mastodon_poll_interval
 RECORD_SECONDS = 7
 OLLAMA_CONTEXT_SIZE = config.llm.context_size
 
