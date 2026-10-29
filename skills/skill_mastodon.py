@@ -171,7 +171,10 @@ async def _loop():
         flush=True,
     )
     while _running:
-        await _poll_once()
+        try:
+            await _poll_once()
+        except Exception as e:
+            print(f"[Mastodon Skill] poll error: {e}", flush=True)
         await asyncio.sleep(POLL_INTERVAL)
 
 
