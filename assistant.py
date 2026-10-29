@@ -1754,7 +1754,7 @@ def run():
     try:
         import sqlite3
 
-        conn = sqlite3.connect(config.DB_PATH)
+        conn = sqlite3.connect(config_module.DB_PATH)
         for tbl in ("cache", "response_cache"):
             try:
                 conn.execute(f"DELETE FROM {tbl}")

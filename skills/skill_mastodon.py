@@ -166,9 +166,9 @@ async def _poll_once():
 async def _loop():
     global _running
     _running = True
-    logger.info(
-        "Mastodon skill started, polling %s as %s (admin=%s)",
-        INSTANCE_URL, BOT_ACCT, ADMIN_ACCT,
+    print(
+        f"[Mastodon Skill] Ligado como {BOT_ACCT}, polling {INSTANCE_URL} (admin={ADMIN_ACCT})",
+        flush=True,
     )
     while _running:
         await _poll_once()
