@@ -43,6 +43,10 @@ ADMIN_ACCT = getattr(
 POLL_INTERVAL = int(
     getattr(config, "MASTODON_POLL_INTERVAL", os.getenv("MASTODON_POLL_INTERVAL", "30"))
 )
+POST_HOUR = int(getattr(config, "MASTODON_POST_HOUR", os.getenv("MASTODON_POST_HOUR", "5")))
+POST_ENABLED = getattr(
+    config, "MASTODON_POST_ENABLED", os.getenv("MASTODON_POST_ENABLED", "true")
+).lower() in ("1", "true", "yes")
 BOT_ACCT = getattr(
     config, "MASTODON_BOT_ACCT", os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")
 ).strip()
@@ -51,6 +55,7 @@ _COMMAND_TOKEN = os.getenv("PHANTASMA_COMMAND_TOKEN", "").strip()
 _COMMAND_HEADERS = {"Authorization": f"Bearer {_COMMAND_TOKEN}"} if _COMMAND_TOKEN else {}
 
 _last_seen_id = None
+_last_post_date = None
 _running = False
 
 
@@ -166,6 +171,96 @@ async def _poll_once():
             logger.warning("Mastodon reply failed: %s", e)
 
 
+async def _post_status(text: str, visibility: str = "public") -> bool:
+    """Post a status to Mastodon. Returns True on success."""
+    if not ACCESS_TOKEN or not text:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            resp = await http.post(
+                f"{INSTANCE_URL}/api/v1/statuses",
+                headers=_headers(),
+                json={"status": text, "visibility": visibility},
+            )
+            if resp.status_code in (200, 201):
+                print(f"[Mastodon Skill] posted: {text[:60]}", flush=True)
+                return True
+            print(
+                f"[Mastodon Skill] post failed HTTP {resp.status_code}: {resp.text[:100]}",
+                flush=True,
+            )
+            return False
+    except Exception as e:
+        print(f"[Mastodon Skill] post error: {e}", flush=True)
+        return False
+
+
+def _generate_reflective_post() -> str:
+    """Generate a reflective post from memory using the local LLM."""
+    # Retrieve memory context
+    try:
+        import sys
+        sys.path.insert(0, "/opt/phantasma")
+        from data_utils import retrieve_from_rag
+        rag = retrieve_from_rag("memoria reflexao pensamento")
+    except Exception:
+        rag = ""
+    if not rag:
+        rag = "O Phantasma reflecte sobre o dia que passou."
+
+    # Truncate to keep prompt small
+    rag = rag[:1500]
+
+    prompt = (
+        "Escreve um post curto e reflexivo (maximo 280 caracteres) para o Mastodon, "
+        "em portugues europeu, com base nestas memorias. Tom contemplativo e misterioso, "
+        "como o Phantasma. Sem hashtags excessivas, no maximo 2. Sem markdown.\n\n"
+        f"Memorias:\n{rag}\n\nPost:"
+    )
+
+    # Call Ollama
+    try:
+        import ollama
+        host = os.getenv("OLLAMA_HOST_FALLBACK", "http://localhost:11434")
+        c = ollama.Client(host=host, timeout=120)
+        model = os.getenv(
+            "OLLAMA_MODEL_FALLBACK",
+            "hf.co/mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF:Q4_K_M",
+        )
+        r = c.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt + " /no_think"}],
+            think=False,
+            options={"num_predict": 80, "num_ctx": 4096},
+        )
+        text = (r.message.content or "").strip()
+        # Strip think blocks
+        import re
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        # Remove quotes
+        text = text.strip('"').strip("'")
+        if not text:
+            return ""
+        # Truncate to 280 chars for Mastodon
+        if len(text) > 280:
+            text = text[:277] + "..."
+        return text
+    except Exception as e:
+        print(f"[Mastodon Skill] LLM error for reflective post: {e}", flush=True)
+        return ""
+
+
+async def post_reflective_now() -> bool:
+    """Generate and post a reflective post immediately (for testing)."""
+    print("[Mastodon Skill] Generating reflective post...", flush=True)
+    text = _generate_reflective_post()
+    if not text:
+        print("[Mastodon Skill] No post generated.", flush=True)
+        return False
+    print(f"[Mastodon Skill] Posting: {text[:80]}...", flush=True)
+    return await _post_status(text)
+
+
 async def _loop():
     global _running
     _running = True
@@ -179,6 +274,23 @@ async def _loop():
             print("[Mastodon Skill] polled OK", flush=True)
         except Exception as e:
             print(f"[Mastodon Skill] poll error: {e}", flush=True)
+
+        # Scheduled reflective post
+        if POST_ENABLED:
+            try:
+                import datetime as _dt
+                now = _dt.datetime.now()
+                global _last_post_date
+                if now.hour == POST_HOUR and _last_post_date != now.date():
+                    print("[Mastodon Skill] Time for scheduled post", flush=True)
+                    text = _generate_reflective_post()
+                    if text:
+                        ok = await _post_status(text)
+                        if ok:
+                            _last_post_date = now.date()
+            except Exception as e:
+                print(f"[Mastodon Skill] scheduled post error: {e}", flush=True)
+
         await asyncio.sleep(POLL_INTERVAL)
 
 

@@ -587,6 +587,10 @@ class Config:
         cfg.mastodon_admin = os.getenv("MASTODON_ADMIN", "seyon@s.linuxkafe.com")
         cfg.mastodon_bot_acct = os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")
         cfg.mastodon_poll_interval = int(os.getenv("MASTODON_POLL_INTERVAL", "30"))
+        cfg.mastodon_post_hour = int(os.getenv("MASTODON_POST_HOUR", "5"))
+        cfg.mastodon_post_enabled = os.getenv("MASTODON_POST_ENABLED", "true").lower() in (
+            "1", "true", "yes",
+        )
         # Memory and FlyBrain are ONE store, not two files that happen to agree.
         # `src/brain/memory_graph.py` writes memory_graph through DB_PATH while
         # `/admin` reads it through BRAIN_DB_PATH, so if those two names resolve
@@ -1033,6 +1037,8 @@ MASTODON_ACCESS_TOKEN = config.mastodon_access_token
 MASTODON_ADMIN = config.mastodon_admin
 MASTODON_BOT_ACCT = config.mastodon_bot_acct
 MASTODON_POLL_INTERVAL = config.mastodon_poll_interval
+MASTODON_POST_HOUR = config.mastodon_post_hour
+MASTODON_POST_ENABLED = config.mastodon_post_enabled
 RECORD_SECONDS = 7
 OLLAMA_CONTEXT_SIZE = config.llm.context_size
 
