@@ -704,7 +704,7 @@ class PhantasmaPipeline:
                 logger.info(
                     "Skill devolveu dados para uma opiniao: %s", skill_response
                 )
-                answer = self._respond_with_llm(text, skill_data=skill_response)
+                answer = self._respond_with_llm(text, skill_data=skill_response, num_predict=150)
                 # `live`, not `conversation`, and the earlier reasoning here was
                 # wrong: "the reading is already baked into the text" is exactly
                 # the problem. A day-old opinion about the weather QUOTES a
@@ -1185,7 +1185,7 @@ class PhantasmaPipeline:
         return Result.ok(None)
 
     def _respond_with_llm(
-        self, text: str, skill_data: Optional[str] = None
+        self, text: str, skill_data: Optional[str] = None, num_predict: Optional[int] = None
     ) -> Optional[str]:
         """Answer through SearXNG + the LLM, and mark the answer as web-derived.
 
@@ -1200,12 +1200,12 @@ class PhantasmaPipeline:
         """
         self._web_derived = True
         try:
-            return self._respond_with_llm_body(text, skill_data=skill_data)
+            return self._respond_with_llm_body(text, skill_data=skill_data, num_predict=num_predict)
         finally:
             self._web_derived = False
 
     def _respond_with_llm_body(
-        self, text: str, skill_data: Optional[str] = None
+        self, text: str, skill_data: Optional[str] = None, num_predict: Optional[int] = None
     ) -> Optional[str]:
         # This path goes through SearXNG before the LLM, so its answers are not
         # the owner's own words and are not worth keeping. Set here rather
@@ -1519,7 +1519,7 @@ class PhantasmaPipeline:
                         "temperature": temperature,
                         "num_ctx": 16384,
                         "top_p": 0.9,
-                        "num_predict": 40,
+                        "num_predict": num_predict if num_predict else 40,
                     },
                 )
                 response_text = response.get("message", {}).get("content", "").strip()
@@ -1750,6 +1750,21 @@ def run():
     starts pipeline, blocks until signal received.
     """
     pipeline = PhantasmaPipeline()
+    # Clear LLM cache on restart so stale summaries do not persist.
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(config.DB_PATH)
+        for tbl in ("cache", "response_cache"):
+            try:
+                conn.execute(f"DELETE FROM {tbl}")
+            except sqlite3.Error:
+                pass
+        conn.commit()
+        conn.close()
+        logger.info("LLM cache cleared on startup")
+    except Exception as e:
+        logger.warning(f"Could not clear LLM cache on startup: {e}")
     _prewarm_stt()
 
     # Signal handling
