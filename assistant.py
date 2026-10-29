@@ -895,6 +895,7 @@ class PhantasmaPipeline:
         "como vês", "o que te parece", "o que lhe parece", "gostas de",
         "gostas do", "gostas da", "gosto de", "gosto do", "concordas",
         "a tua opiniao", "na tua opiniao", "a tua visao", "o que sentes",
+        "onde achas",
     )
 
     # Only these can be a PREFIX, so only these can be stripped off a query
@@ -905,6 +906,7 @@ class PhantasmaPipeline:
         "o que achas", "o que pensas", "qual achas", "que achas", "como ves",
         "como vês", "o que te parece", "o que lhe parece", "o que sentes",
         "concordas", "a tua opiniao", "na tua opiniao", "a tua visao",
+        "onde achas",
     )
 
     @classmethod
