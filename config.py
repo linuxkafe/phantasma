@@ -582,7 +582,7 @@ class Config:
         cfg.ohmigo_start_pct = float(os.getenv("OHMIGO_START_PCT", "20.0"))
         cfg.ohmigo_target_pct = float(os.getenv("OHMIGO_TARGET_PCT", "80.0"))
         # Mastodon skill
-        cfg.mastodon_instance_url = os.getenv("MASTODON_INSTANCE_URL", "https://linuxkafe.com")
+        cfg.mastodon_instance_url = os.getenv("MASTODON_INSTANCE_URL", "https://s.linuxkafe.com")
         cfg.mastodon_access_token = os.getenv("MASTODON_ACCESS_TOKEN", "")
         cfg.mastodon_admin = os.getenv("MASTODON_ADMIN", "seyon@s.linuxkafe.com")
         cfg.mastodon_bot_acct = os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")

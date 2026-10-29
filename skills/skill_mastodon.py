@@ -32,7 +32,7 @@ logger = logging.getLogger("MastodonSkill")
 PHANTASMA_API_URL = "http://127.0.0.1:5000/comando"
 
 INSTANCE_URL = getattr(
-    config, "MASTODON_INSTANCE_URL", os.getenv("MASTODON_INSTANCE_URL", "https://linuxkafe.com")
+    config, "MASTODON_INSTANCE_URL", os.getenv("MASTODON_INSTANCE_URL", "https://s.linuxkafe.com")
 ).rstrip("/")
 ACCESS_TOKEN = getattr(
     config, "MASTODON_ACCESS_TOKEN", os.getenv("MASTODON_ACCESS_TOKEN", "")
