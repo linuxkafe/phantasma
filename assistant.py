@@ -1245,7 +1245,9 @@ class PhantasmaPipeline:
 
         _ohmigo_trigs = (
             "carregar o carro", "carregar carro", "onde carregar",
-            "ohmigo", "bateria do carro", "mais barato carregar",
+            "onde é mais barato", "mais barato carregar", "mais barato para carregar",
+            "para carregar", "carregar no", "carregar em",
+            "ohmigo", "bateria do carro",
         )
         _ohmigo_q = any(trig in (text or "").lower() for trig in _ohmigo_trigs)
 

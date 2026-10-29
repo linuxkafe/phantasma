@@ -24,9 +24,14 @@ TRIGGERS = [
     "carregar o carro",
     "carregar carro",
     "onde carregar",
+    "onde é mais barato",
+    "mais barato carregar",
+    "mais barato para carregar",
+    "para carregar",
+    "carregar no",
+    "carregar em",
     "ohmigo",
     "bateria do carro",
-    "mais barato carregar",
 ]
 
 MCP_URL = "https://ohmigo.ocarroeletrico.com/mcp"
@@ -70,7 +75,7 @@ def _extract_place(text):
             for stop in ("carregar", "o", "a", "um", "uma"):
                 if place.lower().endswith(" " + stop):
                     place = place[: -(len(stop) + 1)].strip()
-            if place and len(place) >= 3:
+            if place and len(place) >= 3 and place.lower() not in ("carregar", "carregamento", "carro"):
                 return place
     return None
 
