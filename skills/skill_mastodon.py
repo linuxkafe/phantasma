@@ -55,6 +55,8 @@ _COMMAND_HEADERS = {"Authorization": f"Bearer {_COMMAND_TOKEN}"} if _COMMAND_TOK
 
 _last_seen_id = None
 _last_post_date = None
+_processed_ids = set()
+_initial_poll_done = False
 _running = False
 
 
@@ -125,8 +127,23 @@ async def _poll_once():
     if ids:
         _last_seen_id = max(ids, key=lambda x: int(x) if str(x).isdigit() else 0)
 
+    # First poll after (re)start: mark everything as seen without replying,
+    # so we never re-answer old mentions.
+    global _initial_poll_done, _processed_ids
+    if not _initial_poll_done:
+        _processed_ids.update(ids)
+        _initial_poll_done = True
+        print(
+            f"[Mastodon Skill] initial catch-up: marked {len(ids)} notifications as seen",
+            flush=True,
+        )
+        return
+
     for n in notifs:
         if n.get("type") != "mention":
+            continue
+        nid = n.get("id")
+        if nid in _processed_ids:
             continue
         status = n.get("status") or {}
         acct = _acct_of(status)
@@ -135,7 +152,9 @@ async def _poll_once():
         # the local part as well.
         admin_local = ADMIN_ACCT.split("@")[0].lower()
         if acct != ADMIN_ACCT and acct != admin_local:
+            _processed_ids.add(nid)
             continue
+        _processed_ids.add(nid)
         content = status.get("content", "") or ""
         # Strip HTML tags crudely
         import re
