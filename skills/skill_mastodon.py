@@ -126,8 +126,11 @@ async def _poll_once():
             continue
         status = n.get("status") or {}
         acct = _acct_of(status)
-        # Only answer the configured admin account.
-        if acct != ADMIN_ACCT:
+        # Only answer the configured admin account. Mastodon returns the
+        # local username ("seyon") for same-instance accounts, so compare on
+        # the local part as well.
+        admin_local = ADMIN_ACCT.split("@")[0].lower()
+        if acct != ADMIN_ACCT and acct != admin_local:
             continue
         content = status.get("content", "") or ""
         # Strip HTML tags crudely
