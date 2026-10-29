@@ -576,7 +576,9 @@ class Config:
         cfg.ohmigo_ac_kw = float(os.getenv("OHMIGO_AC_KW", "3.7"))
         cfg.ohmigo_dc_kw = float(os.getenv("OHMIGO_DC_KW", "25.0"))
         cfg.ohmigo_dc_10_80_min = float(os.getenv("OHMIGO_DC_10_80_MIN", "30.0"))
-        cfg.ohmigo_default_place = os.getenv("OHMIGO_DEFAULT_PLACE", "Leiria")
+        cfg.default_city = os.getenv("DEFAULT_CITY", "Porto")
+        cfg.ohmigo_default_place = os.getenv("OHMIGO_DEFAULT_PLACE", cfg.default_city)
+        cfg.city_name = cfg.default_city
         cfg.ohmigo_start_pct = float(os.getenv("OHMIGO_START_PCT", "20.0"))
         cfg.ohmigo_target_pct = float(os.getenv("OHMIGO_TARGET_PCT", "80.0"))
         # Memory and FlyBrain are ONE store, not two files that happen to agree.
@@ -1016,6 +1018,8 @@ OHMIGO_AC_KW = config.ohmigo_ac_kw
 OHMIGO_DC_KW = config.ohmigo_dc_kw
 OHMIGO_DC_10_80_MIN = config.ohmigo_dc_10_80_min
 OHMIGO_DEFAULT_PLACE = config.ohmigo_default_place
+DEFAULT_CITY = config.default_city
+CITY_NAME = config.city_name
 OHMIGO_START_PCT = config.ohmigo_start_pct
 OHMIGO_TARGET_PCT = config.ohmigo_target_pct
 RECORD_SECONDS = 7
