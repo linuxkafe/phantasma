@@ -482,7 +482,8 @@ input:focus, select:focus, textarea:focus { border-color:var(--brand-500); }
      minmax(280px, 1fr)) collapses to ONE column at 375px, so ~60 config
      cards stacked end to end. One column is correct for a phone; the gap and
      the card padding are what made each row cost so much. */
-  .cfg-grid { grid-template-columns: 1fr !important; gap: var(--sp-3) !important; }
+  .cfg-grid { grid-template-columns: repeat(2, 1fr) !important; gap: var(--sp-3) !important; }
+  @media (max-width: 900px) { .cfg-grid { grid-template-columns: 1fr !important; } }
   .cfg-card { padding: var(--sp-3) !important; }
   .cfg-card > div:first-child { margin-bottom: var(--sp-2) !important; }
   .cfg-input { min-height: 44px; font-size: 16px !important; }  /* inline sets 0.875rem; iOS zooms below 16px */

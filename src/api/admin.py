@@ -893,6 +893,28 @@ OTP_TEMPLATE = (
       <button type="submit">Entrar</button>
     </form>
 </div>
+<script>
+(function() {
+  var form = document.querySelector('form.container');
+  if (!form) return;
+  var timer = null;
+  function save() {
+    sessionStorage.setItem('cfg_scroll', window.scrollY);
+    form.submit();
+  }
+  form.addEventListener('change', function(e) {
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) {
+      clearTimeout(timer);
+      timer = setTimeout(save, 300);
+    }
+  });
+  window.addEventListener('DOMContentLoaded', function() {
+    var y = sessionStorage.getItem('cfg_scroll');
+    if (y) { window.scrollTo(0, parseInt(y)); sessionStorage.removeItem('cfg_scroll'); }
+  });
+})();
+</script>
 </body>
 </html>
 """
