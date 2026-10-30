@@ -174,6 +174,12 @@ async def _poll_once():
         if len(response_text) > 450:
             response_text = response_text[:440] + "..."
 
+        # Reply visibility follows the original status: public mentions get
+        # public replies, direct (DM) mentions get direct replies.
+        orig_visibility = status.get("visibility") or "public"
+        if orig_visibility not in ("public", "unlisted", "private", "direct"):
+            orig_visibility = "public"
+
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 await http.post(
@@ -182,7 +188,7 @@ async def _poll_once():
                     json={
                         "status": f"@{acct.split('@')[0]} {response_text}",
                         "in_reply_to_id": in_reply_to,
-                        "visibility": "direct",
+                        "visibility": orig_visibility,
                     },
                 )
         except Exception as e:
