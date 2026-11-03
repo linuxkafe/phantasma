@@ -221,12 +221,31 @@ async def _post_status(text: str, visibility: str = "public") -> bool:
 
 def _generate_reflective_post() -> str:
     """Generate a reflective post from memory using the local LLM."""
-    # Retrieve memory context
+    # Retrieve memory context — pull a broad set and sample so consecutive
+    # posts are not fed the same memories every time.
     try:
+        import random
         import sys
+
         sys.path.insert(0, "/opt/phantasma")
         from data_utils import retrieve_from_rag
-        rag = retrieve_from_rag("memoria reflexao pensamento")
+
+        queries = [
+            "memoria reflexao pensamento",
+            "conceito ideia observacao",
+            "tempo silencio sombra",
+            "casa luz noite dia",
+        ]
+        chunks = []
+        for q in queries:
+            r = retrieve_from_rag(q, max_results=8)
+            if r:
+                chunks.append(r)
+        rag = "\n".join(chunks)
+        # Deduplicate lines and shuffle for variety.
+        lines = list(dict.fromkeys(ln for ln in rag.splitlines() if ln.strip()))
+        random.shuffle(lines)
+        rag = "\n".join(lines[:12])
     except Exception:
         rag = ""
     if not rag:
@@ -235,18 +254,37 @@ def _generate_reflective_post() -> str:
     # Truncate to keep prompt small
     rag = rag[:1500]
 
+    # Rotate the framing so consecutive posts diverge instead of repeating.
+    import random
+
+    framings = [
+        "Parte de uma imagem ou metáfora sugerida pelas memórias, não das memórias em si.",
+        "Escreve como se fosse um aforismo: uma frase que fica, sem explicar a origem.",
+        "Transforma o que as memórias sugerem numa observação sobre o mundo ou sobre o tempo.",
+        "Parte de um pormenor concreto e deixa-o abrir-se numa reflexão maior.",
+        "Escreve como uma nota de diário que nunca diz de onde veio.",
+    ]
+    framing = random.choice(framings)
+
     prompt = (
-        "Escreve um post curto e reflexivo (maximo 280 caracteres) para o Mastodon, "
-        "em portugues europeu, com base nestas memorias. Tom contemplativo e misterioso, "
-        "como o Phantasma. Sem hashtags excessivas, no maximo 2. Sem markdown.\n\n"
-        f"Memorias:\n{rag}\n\nPost:"
+        "Escreves como o Phantasma: tom contemplativo, misterioso, melancólico, "
+        "em portugues europeu. Escreve um post curto (maximo 280 caracteres) para "
+        "o Mastodon.\n\n"
+        "REGRAS:\n"
+        "- NÃO cites nem transcrevas as memórias. Usa-as apenas como inspiração.\n"
+        "- NÃO repitas temas, imagens ou frases de posts anteriores.\n"
+        "- Diverge: cada post deve ser uma composição nova, não uma variação.\n"
+        "- Sem hashtags excessivas (maximo 2). Sem markdown. Sem aspas.\n\n"
+        f"Ângulo: {framing}\n\n"
+        f"Memorias (inspiracao, nao citacao):\n{rag}\n\n"
+        "Post:"
     )
 
     # Call Ollama
     try:
         import ollama
         host = os.getenv("OLLAMA_HOST_FALLBACK", "http://localhost:11434")
-        c = ollama.Client(host=host, timeout=120)
+        c = ollama.Client(host=host, timeout=300)
         model = os.getenv(
             "OLLAMA_MODEL_FALLBACK",
             "hf.co/mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF:Q4_K_M",
@@ -255,7 +293,12 @@ def _generate_reflective_post() -> str:
             model=model,
             messages=[{"role": "user", "content": prompt + " /no_think"}],
             think=False,
-            options={"num_predict": 80, "num_ctx": 4096},
+            options={
+                "num_predict": 80,
+                "num_ctx": 4096,
+                "temperature": 0.85,
+                "top_p": 0.95,
+            },
         )
         text = (r.message.content or "").strip()
         # Strip think blocks
