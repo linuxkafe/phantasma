@@ -315,11 +315,23 @@ class TestSkill:
         here is how the owner ends up believing it fires tonight."""
         task_fires = at(8) + timedelta(days=1)
         import unittest.mock as mock
+
+        import skills.skill_schedule as schedule_skill
+
+        # BOTH modules that read the clock must be frozen. `parse_schedule`
+        # resolves the moment with `src.scheduler.parsing.datetime`, but the
+        # spoken label is built by `_when_label` in skills/skill_schedule.py
+        # with its own `datetime.now()`. Freezing only the parser left the
+        # label computed against the real date: on 2026-11-05 the reply said
+        # "agendei para 14/10" instead of "amanha", and the test failed for a
+        # reason that had nothing to do with the rollover it is testing.
         with mock.patch.object(
                 __import__("src.scheduler.parsing", fromlist=["datetime"]),
-                "datetime") as fake:
+                "datetime") as fake, \
+                mock.patch.object(schedule_skill, "datetime") as fake_skill_dt:
             fake.now.return_value = at(21)
             fake.fromisoformat = datetime.fromisoformat
+            fake_skill_dt.now.return_value = at(21)
             reply = self.skill.handle("liga a luz do balcao as 8")
         assert "amanh" in reply.lower()
         assert task_fires > at(21)

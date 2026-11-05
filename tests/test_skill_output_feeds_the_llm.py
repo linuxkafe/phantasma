@@ -54,9 +54,10 @@ def _skill_runs(pipeline, text):
         seen["skill"] = t
         return pipeline._skill_result
 
-    def fake_llm(t, skill_data=None):
+    def fake_llm(t, skill_data=None, **kwargs):
         seen["llm"] = t
         seen["skill_data"] = skill_data
+        seen["llm_kwargs"] = kwargs
         return "resposta do modelo"
 
     pipeline._execute_with_paused_shared_audio = fake_skill

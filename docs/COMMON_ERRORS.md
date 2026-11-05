@@ -97,6 +97,8 @@ Known failure patterns and their fixes. Check here when debugging issues.
 | `whisper` import fails | Missing tiktoken | `pip install tiktoken` |
 | `piper-tts` import fails | Missing espeak-ng | `sudo apt-get install espeak-ng libespeak-ng-dev` |
 | `tinytuya`/`python-miio` fail | Missing crypto libs | `pip install cryptography` |
+| `make lint`/`make test` fail with `No module named ruff`/`_pytest` after the Ubuntu 26.04 upgrade | `venv/bin/python3` symlinked to `/usr/bin/python3`, which became 3.14; the installed packages live in `venv/lib/python3.12/site-packages`, so the venv sees none of them | Point the venv back at a 3.12 interpreter instead of reinstalling the 6 GB of packages: `uv python install 3.12`, then set `venv/bin/python3` to the uv `python3.12` and update `venv/pyvenv.cfg` (`home`, `version`, `executable`). Verify with `./venv/bin/python -m pytest --version` |
+| `make test` collects with `PortAudioError: PulseAudio_Initialize: Can't connect to server` | No user PulseAudio server in a non-interactive shell (headless host, no `/run/user/<uid>`) | Start one for the dev user: `mkdir -p /tmp/opencode/run-seyon && chmod 700 /tmp/opencode/run-seyon && XDG_RUNTIME_DIR=/tmp/opencode/run-seyon pulseaudio --start --exit-idle-time=-1`, then run `XDG_RUNTIME_DIR=/tmp/opencode/run-seyon make test` |
 
 ## Adding New Errors
 
