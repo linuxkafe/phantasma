@@ -349,7 +349,11 @@ async def on_raw_reaction_add(payload):
             user = payload.member
             if isinstance(user, discord.Member):
                 user = user._user if hasattr(user, "_user") else user
-            user_obj = user if isinstance(user, discord.User) else await client.fetch_user(payload.user_id)
+            user_obj = (
+                user
+                if isinstance(user, discord.User)
+                else await client.fetch_user(payload.user_id)
+            )
         else:
             try:
                 user_obj = await client.fetch_user(payload.user_id)
@@ -372,16 +376,22 @@ async def on_raw_reaction_add(payload):
 async def _handle_reaction(reaction, user):
     """Core reaction handling logic.
 
-    Accepts reactions on the bot's own messages AND on the reacting user's
-    own messages (personal assistant DM context: a thumbs-down on your own
-    message is valid feedback about the last exchange). Reactions on third-
-    party messages are ignored to keep the reward signal clean.
+    Only reactions on the bot's OWN messages count as reinforcement. Anything
+    else is ignored, including a user reacting to their own message: measured
+    2026-11-05, filipe.carvalho reacted 🔥 on his own message and the bot
+    recorded reward=+1.0, which is noise, not feedback about the bot.
     """
     if user == client.user:
         return
+    if getattr(user, "bot", False):
+        print(f"[Discord Skill] Ignorada reação de bot ({user})")
+        return
     author = reaction.message.author
-    if author != client.user and author != user:
-        print(f"[Discord Skill] Ignorada reação de {user} em mensagem de terceiros")
+    if author != client.user:
+        print(
+            f"[Discord Skill] Ignorada reação de {user} em mensagem que não é "
+            f"do bot (autor={author})"
+        )
         return
 
     reward = _reward_for_emoji(reaction.emoji)

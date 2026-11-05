@@ -271,3 +271,112 @@ def test_dm_needs_no_mention(skill_module):
     skill_module.client.user = type("U", (), {"id": BOT_ID})()
     msg = _message("oi", is_dm=True)
     assert _extracted_prompt(skill_module, msg) == "oi"
+
+
+# --- Reaction reward gating -------------------------------------------------
+#
+# Measured 2026-11-05 in #linuxkafe: filipe.carvalho reacted 🔥 on a message he
+# had written himself and the bot recorded reward=+1.0 ("FlyBrain updated").
+# The handler used to accept reactions on the reactor's own message, so any
+# chat between two humans could move the reward signal. Only reactions on what
+# pHantasma actually wrote are feedback about pHantasma.
+
+class _AckChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content, **_kwargs):
+        self.sent.append(content)
+
+
+class _ReactionMessage:
+    def __init__(self, author):
+        self.author = author
+        self.channel = _AckChannel()
+
+
+class _Reaction:
+    def __init__(self, message, emoji="🔥"):
+        self.message = message
+        self.emoji = emoji
+
+
+class _FakeFlyBrain:
+    def __init__(self):
+        self.steps = []
+        self.ring = types.SimpleNamespace(orientation_deg=0.0)
+
+    def step(self, **kwargs):
+        self.steps.append(kwargs)
+
+
+@pytest.fixture
+def reaction_env(skill_module, monkeypatch):
+    """Stub FlyBrain + memory graph so only the gating decision is exercised."""
+    brain = _FakeFlyBrain()
+    monkeypatch.setattr(skill_module, "_fly_brain", brain, raising=False)
+
+    graph = types.ModuleType("src.brain.memory_graph")
+    graph.apply_reward = lambda *_a, **_k: None
+    graph.get_current_topic = lambda: None
+    graph.init_db = lambda: None
+    monkeypatch.setitem(sys.modules, "src.brain.memory_graph", graph)
+
+    skill_module.client.user = type("U", (), {"id": BOT_ID})()
+    return skill_module, brain
+
+
+def test_reaction_on_bot_message_rewards(reaction_env):
+    """A reaction on the bot's own message is genuine feedback."""
+    import asyncio
+
+    mod, brain = reaction_env
+    bot = mod.client.user
+    msg = _ReactionMessage(author=bot)
+    user = type("U", (), {"id": OWNER_ID, "name": "linuxkafe"})()
+
+    asyncio.run(mod._handle_reaction(_Reaction(msg), user))
+
+    assert [s["reward"] for s in brain.steps] == [+1.0]
+    assert msg.channel.sent, "o ack deve confirmar o reforço"
+
+
+def test_reaction_on_reactors_own_message_is_ignored(reaction_env):
+    """Regression: the 2026-11-05 🔥 on filipe.carvalho's own message."""
+    import asyncio
+
+    mod, brain = reaction_env
+    user = type("U", (), {"id": "809891715149463663", "name": "filipe.carvalho"})()
+    msg = _ReactionMessage(author=user)
+
+    asyncio.run(mod._handle_reaction(_Reaction(msg), user))
+
+    assert brain.steps == []
+    assert msg.channel.sent == []
+
+
+def test_reaction_on_third_party_message_is_ignored(reaction_env):
+    """Two humans talking: neither message is the bot's, so no reward."""
+    import asyncio
+
+    mod, brain = reaction_env
+    author = type("U", (), {"id": OWNER_ID, "name": "linuxkafe"})()
+    reactor = type("U", (), {"id": "809891715149463663", "name": "filipe.carvalho"})()
+    msg = _ReactionMessage(author=author)
+
+    asyncio.run(mod._handle_reaction(_Reaction(msg), reactor))
+
+    assert brain.steps == []
+
+
+def test_bot_own_reaction_is_ignored(reaction_env):
+    """The bot reacting to anything must never feed itself."""
+    import asyncio
+
+    mod, brain = reaction_env
+    bot = mod.client.user
+    msg = _ReactionMessage(author=bot)
+
+    asyncio.run(mod._handle_reaction(_Reaction(msg), bot))
+
+    assert brain.steps == []
