@@ -52,6 +52,7 @@ Known failure patterns and their fixes. Check here when debugging issues.
 | `Config validation failed: TTS voice model not found` | Voice files missing in test env | Set `PHANTASMA_TEST_MODE=1` or provide voice files |
 | `Audio input device not found` | Device name changed | Run `python -c "import sounddevice; print(sounddevice.query_devices())"` |
 | Environment variables not applied | Typo in var name | Check `PHANTASMA_*` prefix; restart process after change |
+| `FAILED: config.py diverges between dev and prod` never appears, yet prod runs old settings | The model-availability gate runs *before* the `config.py`/`audio_utils.py` byte-identical gate. When the primary Ollama host is unreachable the deploy exits at the model gate, so the config gate never executes and a stale prod `config.py` stays invisible | Check it directly: `cmp -s config.py /opt/phantasma/config.py`. `config.py` is not in the rsync list; align prod with git (`cp config.py /opt/phantasma/config.py`, backup first) rather than `--force-host`, because the divergence is staleness, not host tuning |
 
 ## API / Flask
 
