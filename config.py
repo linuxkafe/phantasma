@@ -591,6 +591,13 @@ class Config:
         cfg.mastodon_post_enabled = os.getenv("MASTODON_POST_ENABLED", "true").lower() in (
             "1", "true", "yes",
         )
+        # Daily-post variety. Trends feed the prompt from the instance's own
+        # trending tags; candidates are generated and the least repetitive one
+        # wins (CPU inference is slow, so 2 is the practical default).
+        cfg.mastodon_trends_enabled = os.getenv(
+            "MASTODON_TRENDS_ENABLED", "true"
+        ).lower() in ("1", "true", "yes")
+        cfg.mastodon_post_candidates = int(os.getenv("MASTODON_POST_CANDIDATES", "2"))
         # Memory and FlyBrain are ONE store, not two files that happen to agree.
         # `src/brain/memory_graph.py` writes memory_graph through DB_PATH while
         # `/admin` reads it through BRAIN_DB_PATH, so if those two names resolve
@@ -1039,6 +1046,8 @@ MASTODON_BOT_ACCT = config.mastodon_bot_acct
 MASTODON_POLL_INTERVAL = config.mastodon_poll_interval
 MASTODON_POST_HOUR = config.mastodon_post_hour
 MASTODON_POST_ENABLED = config.mastodon_post_enabled
+MASTODON_TRENDS_ENABLED = config.mastodon_trends_enabled
+MASTODON_POST_CANDIDATES = config.mastodon_post_candidates
 RECORD_SECONDS = 7
 OLLAMA_CONTEXT_SIZE = config.llm.context_size
 

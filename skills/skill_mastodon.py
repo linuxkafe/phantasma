@@ -15,9 +15,14 @@ the Mastodon instance and store its access token in MASTODON_ACCESS_TOKEN.
 """
 
 import asyncio
+import html
+import json
 import logging
 import os
+import random
+import re
 import threading
+import unicodedata
 
 import httpx
 
@@ -49,6 +54,117 @@ POST_ENABLED = _raw if isinstance(_raw, bool) else str(_raw).lower() in ("1", "t
 BOT_ACCT = getattr(
     config, "MASTODON_BOT_ACCT", os.getenv("MASTODON_BOT_ACCT", "phantasma@s.linuxkafe.com")
 ).strip()
+_trends_raw = getattr(
+    config, "MASTODON_TRENDS_ENABLED", os.getenv("MASTODON_TRENDS_ENABLED", "true")
+)
+TRENDS_ENABLED = (
+    _trends_raw
+    if isinstance(_trends_raw, bool)
+    else str(_trends_raw).lower() in ("1", "true", "yes")
+)
+POST_CANDIDATES = max(
+    1,
+    int(
+        getattr(
+            config,
+            "MASTODON_POST_CANDIDATES",
+            os.getenv("MASTODON_POST_CANDIDATES", "2"),
+        )
+    ),
+)
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RECENT_POSTS_PATH = os.getenv(
+    "MASTODON_RECENT_POSTS_PATH",
+    os.path.join(_ROOT, "data", "mastodon_recent_posts.json"),
+)
+RECENT_POSTS_KEEP = 20
+
+# The imagery this account has been recycling since it started posting. The
+# owner's complaint on 2026-11-15 was not that the posts were bad, it was that
+# they were the SAME post: "tempo", "relógio", "sombra", "rio", "silêncio".
+# Naming them in the prompt is not enough (the model still drifts back), so the
+# generator scores candidates against this list and retries when it lands on it.
+CLICHE_WORDS = (
+    "tempo",
+    "relogio",
+    "hora",
+    "horas",
+    "sombra",
+    "sombras",
+    "rio",
+    "silencio",
+)
+
+# Subjects the daily post must not touch. The local timeline is mostly the
+# owner's own links, and on 2026-11-15 the first draft was a cynical line about
+# a housing protest the owner supports. Topical is the goal; commenting on
+# real people, wars or protests is not. Matching is accent-free (see _fold).
+SUBJECT_BLOCKLIST = (
+    "gaza",
+    "guerra",
+    "genocidio",
+    "holocausto",
+    "eleicao",
+    "eleicoes",
+    "presidente",
+    "governo",
+    "politica",
+    "protesto",
+    "manifestacao",
+    "acampada",
+    "habitacao",
+    "morte",
+    "mortes",
+    "covid",
+    "ucrania",
+    "israel",
+    "palestina",
+)
+
+
+# Memory is only useful as a spark. The old query list literally asked for
+# "tempo silencio sombra", so every post was guaranteed to be about time and
+# shadows -- the generator was being fed the answer it kept producing.
+CONCEPT_QUERIES = (
+    "casa",
+    "animais",
+    "música",
+    "viagem",
+    "comida",
+    "cidade",
+    "mar",
+    "livros",
+    "sonho",
+    "trabalho",
+    "tecnologia",
+    "infância",
+    "jardim",
+    "chuva",
+    "vozes",
+    "objectos",
+    "gestos",
+    "cores",
+)
+
+FRAMINGS = (
+    "Parte de um objecto comum e descreve-o como se fosse a primeira vez que o vês.",
+    "Escreve sobre um animal que ninguém repara, sem o nomear.",
+    "Inventa uma cidade pequena e diz uma única coisa que lá acontece.",
+    "Parte de uma notícia ou assunto em voga e responde-lhe com uma imagem inesperada.",
+    "Escreve como uma instrução para uma máquina que ainda não existe.",
+    "Fala de uma memória de infância que nunca aconteceu.",
+    "Começa por uma cor e deixa-a transformar-se numa ideia.",
+    "Escreve como um aforismo: uma frase que fica, sem explicar a origem.",
+    "Descreve um som de uma casa e o que ele faz quando ninguém o ouve.",
+    "Parte de um cheiro e conta o que ele traz.",
+    "Escreve uma nota de diário de alguém que vive no futuro.",
+    "Pega num assunto em voga e olha para ele de lado, sem opinar.",
+    "Descreve o que um objecto faz quando ninguém o usa.",
+    "Escreve o rótulo de um produto que não existe.",
+    "Conta uma coisa que uma criança explicaria mal.",
+    "Descreve uma máquina a fazer algo que ninguém lhe pediu.",
+)
 
 _COMMAND_TOKEN = os.getenv("PHANTASMA_COMMAND_TOKEN", "").strip()
 _COMMAND_HEADERS = {"Authorization": f"Bearer {_COMMAND_TOKEN}"} if _COMMAND_TOKEN else {}
@@ -208,6 +324,7 @@ async def _post_status(text: str, visibility: str = "public") -> bool:
             )
             if resp.status_code in (200, 201):
                 print(f"[Mastodon Skill] posted: {text[:60]}", flush=True)
+                _remember_post(text)
                 return True
             print(
                 f"[Mastodon Skill] post failed HTTP {resp.status_code}: {resp.text[:100]}",
@@ -219,96 +336,288 @@ async def _post_status(text: str, visibility: str = "public") -> bool:
         return False
 
 
-def _generate_reflective_post() -> str:
-    """Generate a reflective post from memory using the local LLM."""
-    # Retrieve memory context — pull a broad set and sample so consecutive
-    # posts are not fed the same memories every time.
+def _fold(text: str) -> str:
+    """Lowercase, accent-free form for word matching (não é para exibir)."""
+    text = unicodedata.normalize("NFKD", (text or "").lower())
+    return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+def _strip_html(text: str) -> str:
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text or "")).split())
+
+
+def _blocked_subject(text: str) -> bool:
+    """True for wars, protests, party politics and deaths -- see blocklist.
+
+    Substring, not word-boundary: the instance exposes tags like
+    "GazaVerified", and `\bgaza\b` let that one through.
+    """
+    folded = _fold(text)
+    return any(word in folded for word in SUBJECT_BLOCKLIST)
+
+
+# --- recent posts: the model has to know what it already said --------------
+
+def _read_recent_posts() -> list:
     try:
-        import random
+        with open(RECENT_POSTS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, list):
+            return [str(p) for p in data if str(p).strip()]
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning("Mastodon recent-posts read failed: %s", e)
+    return []
+
+
+def _write_recent_posts(posts) -> None:
+    try:
+        os.makedirs(os.path.dirname(RECENT_POSTS_PATH), exist_ok=True)
+        tmp = RECENT_POSTS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(posts[:RECENT_POSTS_KEEP], fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, RECENT_POSTS_PATH)
+    except Exception as e:
+        logger.warning("Mastodon recent-posts write failed: %s", e)
+
+
+def _backfill_recent_posts(limit: int = 12) -> list:
+    """Seed the local history from the bot's own statuses on first run.
+
+    Without this the first post after the change has no idea what the last
+    thirty said, and repeats them. Best-effort: any failure is just an empty
+    history, never a reason not to post.
+    """
+    if not ACCESS_TOKEN:
+        return []
+    try:
+        bot_local = BOT_ACCT.split("@")[0]
+        with httpx.Client(timeout=15, headers=_headers()) as client:
+            resp = client.get(
+                f"{INSTANCE_URL}/api/v1/accounts/lookup", params={"acct": bot_local}
+            )
+            if resp.status_code != 200:
+                return []
+            account_id = resp.json().get("id")
+            if not account_id:
+                return []
+            resp = client.get(
+                f"{INSTANCE_URL}/api/v1/accounts/{account_id}/statuses",
+                params={
+                    "limit": limit,
+                    "exclude_replies": "true",
+                    "exclude_reblogs": "true",
+                },
+            )
+            if resp.status_code != 200:
+                return []
+            posts = []
+            for status in resp.json():
+                text = _strip_html(status.get("content") or "")
+                if text:
+                    posts.append(text)
+            return posts
+    except Exception as e:
+        logger.warning("Mastodon recent-post backfill failed: %s", e)
+        return []
+
+
+def _recent_posts(limit: int = 8) -> list:
+    posts = _read_recent_posts()
+    if not posts:
+        posts = _backfill_recent_posts()
+        if posts:
+            _write_recent_posts(posts)
+    return posts[:limit]
+
+
+def _remember_post(text: str) -> None:
+    """Record a published post so tomorrow's prompt can refuse to repeat it."""
+    if not text:
+        return
+    posts = [text] + [p for p in _read_recent_posts() if p != text]
+    _write_recent_posts(posts)
+
+
+# --- what the instance is talking about right now ---------------------------
+
+def _fetch_trending_tags(limit: int = 8) -> list:
+    """Trending hashtags, without the '#'. Public endpoint, no token needed."""
+    if not TRENDS_ENABLED:
+        return []
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                f"{INSTANCE_URL}/api/v1/trends/tags", params={"limit": limit}
+            )
+            if resp.status_code != 200:
+                logger.warning("Mastodon trends HTTP %s", resp.status_code)
+                return []
+            tags = []
+            for trend in resp.json():
+                name = (trend.get("name") or "").strip()
+                if name and not _blocked_subject(name):
+                    tags.append(name)
+            return tags
+    except Exception as e:
+        logger.warning("Mastodon trends failed: %s", e)
+        return []
+
+
+def _fetch_local_subjects(limit: int = 5) -> list:
+    """A few subjects from the local timeline, bot posts excluded.
+
+    Hashtags say "what" but not "about what"; a small instance's local
+    timeline is where the actual subjects live. Truncated hard so the model
+    gets a spark, not an article to paraphrase.
+    """
+    if not TRENDS_ENABLED:
+        return []
+    try:
+        bot_local = BOT_ACCT.split("@")[0].lower()
+        with httpx.Client(timeout=10, headers=_headers()) as client:
+            resp = client.get(
+                f"{INSTANCE_URL}/api/v1/timelines/public",
+                params={"local": "true", "limit": limit * 4},
+            )
+            if resp.status_code != 200:
+                return []
+            subjects = []
+            for status in resp.json():
+                if _acct_of(status).split("@")[0] == bot_local:
+                    continue
+                text = _strip_html(status.get("content") or "")
+                text = re.sub(r"https?://\S+", "", text).strip()
+                text = re.sub(r"#\s+", "#", text).strip()
+                if not text or _blocked_subject(text):
+                    continue
+                subjects.append(text[:140])
+                if len(subjects) >= limit:
+                    break
+            return subjects
+    except Exception as e:
+        logger.warning("Mastodon local timeline failed: %s", e)
+        return []
+
+
+# --- prompt + generation ----------------------------------------------------
+
+def _memory_snippet() -> str:
+    """Sample concept clusters from memory, minus the account's own clichés.
+
+    The RAG index contains the bot's previous posts, so "memória" kept handing
+    the model the very imagery it was being told to stop using (tempo, sombra,
+    rio). Filtering those lines is what actually breaks the loop -- the ban in
+    the prompt only works if the prompt is not already full of the banned words.
+    """
+    try:
         import sys
 
-        sys.path.insert(0, "/opt/phantasma")
+        sys.path.insert(0, _ROOT)
         from data_utils import retrieve_from_rag
 
-        queries = [
-            "memoria reflexao pensamento",
-            "conceito ideia observacao",
-            "tempo silencio sombra",
-            "casa luz noite dia",
-        ]
+        queries = random.sample(CONCEPT_QUERIES, min(4, len(CONCEPT_QUERIES)))
         chunks = []
-        for q in queries:
-            r = retrieve_from_rag(q, max_results=8)
-            if r:
-                chunks.append(r)
+        for query in queries:
+            result = retrieve_from_rag(query, max_results=6)
+            if result:
+                chunks.append(result)
         rag = "\n".join(chunks)
-        # Deduplicate lines and shuffle for variety.
         lines = list(dict.fromkeys(ln for ln in rag.splitlines() if ln.strip()))
+        lines = [ln for ln in lines if _cliche_hits(ln) == 0]
         random.shuffle(lines)
-        rag = "\n".join(lines[:12])
+        rag = "\n".join(lines[:10])
     except Exception:
         rag = ""
-    if not rag:
-        rag = "O Phantasma reflecte sobre o dia que passou."
+    return rag[:1200] if rag else ""
 
-    # Truncate to keep prompt small
-    rag = rag[:1500]
 
-    # Rotate the framing so consecutive posts diverge instead of repeating.
-    import random
+def _cliche_hits(text: str) -> int:
+    folded = _fold(text)
+    return sum(1 for word in CLICHE_WORDS if re.search(rf"\b{re.escape(word)}\b", folded))
 
-    framings = [
-        "Parte de uma imagem ou metáfora sugerida pelas memórias, não das memórias em si.",
-        "Escreve como se fosse um aforismo: uma frase que fica, sem explicar a origem.",
-        "Transforma o que as memórias sugerem numa observação sobre o mundo ou sobre o tempo.",
-        "Parte de um pormenor concreto e deixa-o abrir-se numa reflexão maior.",
-        "Escreve como uma nota de diário que nunca diz de onde veio.",
-    ]
-    framing = random.choice(framings)
 
-    prompt = (
-        "Escreves como o Phantasma: tom contemplativo, misterioso, melancólico, "
-        "em portugues europeu. Escreve um post curto (maximo 280 caracteres) para "
-        "o Mastodon.\n\n"
+def _overlap_with_recent(text: str, recent) -> float:
+    """Largest share of this post's words already used in one recent post."""
+    words = set(re.findall(r"\w{4,}", _fold(text)))
+    if not words:
+        return 0.0
+    worst = 0.0
+    for other in recent:
+        other_words = set(re.findall(r"\w{4,}", _fold(other)))
+        if other_words:
+            worst = max(worst, len(words & other_words) / len(words))
+    return worst
+
+
+def _build_prompt(rag: str, trends, subjects, recent, framing: str) -> str:
+    trend_line = ", ".join(f"#{t}" for t in trends) if trends else "(sem tendências)"
+    subject_block = "\n".join(f"- {s}" for s in subjects) if subjects else "(nada)"
+    recent_block = "\n".join(f"- {p}" for p in recent[:8]) if recent else "(nenhum)"
+    memory_block = rag if rag else "(sem memórias relevantes)"
+
+    return (
+        "Escreves como o Phantasma: voz própria, imaginativa, em português "
+        "europeu. Escreve um post curto (máximo 280 caracteres) para o "
+        "Mastodon.\n\n"
         "REGRAS:\n"
-        "- NÃO cites nem transcrevas as memórias. Usa-as apenas como inspiração.\n"
-        "- NÃO repitas temas, imagens ou frases de posts anteriores.\n"
-        "- Diverge: cada post deve ser uma composição nova, não uma variação.\n"
-        "- Sem hashtags excessivas (maximo 2). Sem markdown. Sem aspas.\n\n"
-        f"Ângulo: {framing}\n\n"
-        f"Memorias (inspiracao, nao citacao):\n{rag}\n\n"
+        "- NÃO cites nem transcrevas as memórias, as tendências ou os posts "
+        "recentes. São faísca, não texto.\n"
+        "- PROIBIDO o campo semântico do tempo que passa: tempo, relógio, "
+        "horas, sombra, rio, silêncio. Já foram usados até à exaustão.\n"
+        "- NÃO repitas temas, imagens ou frases dos teus posts recentes.\n"
+        "- Escolhe UM assunto concreto (um objecto, um animal, uma cidade, "
+        "uma notícia, uma ideia) e surpreende.\n"
+        "- Nunca comentes pessoas reais, protestos, guerras, tragédias ou "
+        "política partidária; se um assunto for desse tipo, ignora-o.\n"
+        "- Sem hashtags excessivas (máximo 2). Sem markdown. Sem aspas.\n"
+        "- Uma só frase ou duas. Sem título, sem listas, sem quebras de "
+        "linha.\n"
+        "- Português de Portugal, nunca do Brasil: autónomo (não autônomo), "
+        "ecrã (não tela), telemóvel (não celular), a superfície (não sua "
+        "superfície).\n\n"
+        f"Ângulo de hoje: {framing}\n\n"
+        f"Assuntos em voga no Mastodon (inspiração opcional): {trend_line}\n\n"
+        f"Assuntos na timeline local (inspiração opcional):\n{subject_block}\n\n"
+        f"Posts recentes teus (NÃO repetir):\n{recent_block}\n\n"
+        f"Memórias (inspiração, não citação):\n{memory_block}\n\n"
         "Post:"
     )
 
-    # Call Ollama
+
+def _generate_once(prompt: str) -> str:
     try:
         import ollama
+
         host = os.getenv("OLLAMA_HOST_FALLBACK", "http://localhost:11434")
-        c = ollama.Client(host=host, timeout=300)
+        client = ollama.Client(host=host, timeout=300)
         model = os.getenv(
             "OLLAMA_MODEL_FALLBACK",
             "hf.co/mradermacher/Huihui-Qwen3-8B-abliterated-v2-GGUF:Q4_K_M",
         )
-        r = c.chat(
+        response = client.chat(
             model=model,
             messages=[{"role": "user", "content": prompt + " /no_think"}],
             think=False,
             options={
-                "num_predict": 80,
+                "num_predict": 90,
                 "num_ctx": 4096,
-                "temperature": 0.85,
+                "temperature": 0.95,
                 "top_p": 0.95,
+                "repeat_penalty": 1.15,
             },
         )
-        text = (r.message.content or "").strip()
-        # Strip think blocks
-        import re
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-        # Remove quotes
-        text = text.strip('"').strip("'")
+        text = (response.message.content or "").strip()
+        _close = "<" + "/think" + ">"
+        if _close in text:
+            text = text.split(_close)[-1].strip()
+        text = text.strip('"').strip("'").strip()
         if not text:
             return ""
-        # Truncate to 280 chars for Mastodon
+        text = _tidy_post(text)
+        if not text:
+            return ""
         if len(text) > 280:
             text = text[:277] + "..."
         return text
@@ -317,10 +626,74 @@ def _generate_reflective_post() -> str:
         return ""
 
 
+def _tidy_post(text: str) -> str:
+    """One paragraph, no markdown leftovers, no stray spaces.
+
+    The model liked to answer the "instructions" framing with a title line and
+    a blank line ("Instruções para a máquina invisível:\\n\\n..."). Mastodon
+    renders that as a broken post, so collapse it to running text.
+    """
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"^\s*[#*\->]+\s*", "", text)
+    text = re.sub(r"\s*\n\s*", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip()
+
+
+def _generate_reflective_post() -> str:
+    """Generate a post that is not yesterday's post.
+
+    Inspiration comes from three independent places -- memory, the instance's
+    trending tags, and the local timeline -- and every candidate is scored
+    against the account's recent posts and against the imagery it has been
+    recycling. The first candidate with no clichés wins; otherwise the least
+    repetitive one, after up to two extra attempts. Two extra attempts matter:
+    measured on 2026-11-15, a single candidate still landed on "sombra/tempo"
+    about one time in two.
+    """
+    rag = _memory_snippet()
+    trends = _fetch_trending_tags()
+    subjects = _fetch_local_subjects()
+    recent = _recent_posts()
+
+    def score(text):
+        return (_cliche_hits(text), _overlap_with_recent(text, recent))
+
+    best = ""
+    best_score = None
+    attempts = 0
+    max_attempts = POST_CANDIDATES + 2
+    while attempts < max_attempts:
+        attempts += 1
+        framing = random.choice(FRAMINGS)
+        prompt = _build_prompt(rag, trends, subjects, recent, framing)
+        text = _generate_once(prompt)
+        if not text:
+            continue
+        candidate_score = score(text)
+        if best_score is None or candidate_score < best_score:
+            best, best_score = text, candidate_score
+        # Clean and unrelated enough: stop paying for more inference.
+        if best_score[0] == 0 and best_score[1] <= 0.45:
+            break
+
+    if not best:
+        return ""
+
+    print(
+        f"[Mastodon Skill] post candidate chosen (clichés={best_score[0]}, "
+        f"overlap={best_score[1]:.2f}, attempts={attempts})",
+        flush=True,
+    )
+    return best
+
+
 async def post_reflective_now() -> bool:
     """Generate and post a reflective post immediately (for testing)."""
     print("[Mastodon Skill] Generating reflective post...", flush=True)
-    text = _generate_reflective_post()
+    # Generation is a blocking LLM call (slow on CPU); keep the loop free.
+    text = await asyncio.to_thread(_generate_reflective_post)
     if not text:
         print("[Mastodon Skill] No post generated.", flush=True)
         return False
@@ -350,7 +723,9 @@ async def _loop():
                 global _last_post_date
                 if now.hour == POST_HOUR and _last_post_date != now.date():
                     print("[Mastodon Skill] Time for scheduled post", flush=True)
-                    text = _generate_reflective_post()
+                    # Blocking LLM call off the event loop: polling and mention
+                    # replies must keep working while the post is generated.
+                    text = await asyncio.to_thread(_generate_reflective_post)
                     if text:
                         ok = await _post_status(text)
                         if ok:
