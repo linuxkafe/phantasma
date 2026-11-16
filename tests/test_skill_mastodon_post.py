@@ -60,10 +60,14 @@ def test_tidy_post_leaves_a_clean_post_alone():
     assert mastodon._tidy_post(text) == text
 
 
-def test_prompt_asks_for_european_portuguese():
+def test_prompt_asks_for_european_portuguese_and_length():
     prompt = mastodon._build_prompt("", [], [], [], "angulo")
     assert "autónomo" in prompt and "autônomo" in prompt
+    assert "controlo" in prompt and "controle" in prompt
     assert "quebras de" in prompt
+    assert "máximo 500 caracteres" in prompt
+    assert "Escolhe UMA das entradas" in prompt
+    assert "entrada escolhida" in prompt
 
 
 def _fake_http(monkeypatch, payloads):

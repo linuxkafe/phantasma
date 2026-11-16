@@ -683,38 +683,41 @@ def _build_prompt(
     return (
         "PERSONA — esta é a tua voz; segue-a sempre:\n"
         f"{persona_block}\n\n"
-        "TAREFA: escreve um post curto (máximo 280 caracteres) para o Mastodon. "
+        "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres). "
         "A VOZ vem da persona; o ASSUNTO vem dos ASSUNTOS DE HOJE no fim deste "
         "prompt. A persona diz como se diz, não sobre o que se fala.\n\n"
         "REGRAS:\n"
-        "- O post tem de partir de um dos assuntos listados. Não inventes um "
-        "assunto novo.\n"
+        "- Escolhe UMA das entradas numeradas em ASSUNTOS DE HOJE e escreve a "
+        "partir dela. Retira dessa entrada uma imagem concreta (um gesto, um "
+        "objecto, um lugar, um som, um material) e desenvolve-a. Não inventes "
+        "um assunto que não esteja na lista.\n"
         "- A pesquisa é matéria-prima, não texto. Não resumas, não cites, não "
         "escrevas notícia: podes inventar a partir dela, contradizê-la ou "
         "deformá-la.\n"
         "- Se a pesquisa estiver noutra língua, aproveita a ideia e escreve em "
         "português.\n"
         "- Se o assunto for fraco (só hashtags, um evento, um título), agarra "
-        "UMA imagem concreta dele e segue.\n"
+        "UMA imagem concreta dele e segue — não o troques por outro assunto.\n"
         "- As memórias servem para o tom, nunca para o assunto.\n"
         "- NÃO repitas temas, imagens ou frases dos teus posts recentes.\n"
         "- Evita as imagens gastas: tempo, relógio, horas, sombra, rio, "
         "silêncio. A mesma atmosfera diz-se com ferrugem, osso, máquina, "
         "distância.\n"
         "- Nunca comentes pessoas reais, protestos, guerras, tragédias ou "
-        "política partidária; se um assunto for desse tipo, ignora-o.\n"
+        "política partidária; se um assunto for desse tipo, ignora-o e escolhe "
+        "outra entrada.\n"
         "- Sem hashtags excessivas (máximo 2). Sem markdown. Sem aspas.\n"
-        "- Uma só frase ou duas. Sem título, sem listas, sem quebras de "
-        "linha.\n"
+        "- Texto corrido: duas a cinco frases, sem título, sem listas, sem "
+        "quebras de linha.\n"
         "- Português de Portugal, nunca do Brasil: autónomo (não autônomo), "
-        "ecrã (não tela), telemóvel (não celular), a superfície (não sua "
-        "superfície).\n\n"
-        f"Ângulo de hoje: {framing}\n\n"
+        "controlo (não controle), ecrã (não tela), telemóvel (não celular), "
+        "a superfície (não sua superfície).\n\n"
+        f"Ângulo de hoje (aplicado ao assunto escolhido): {framing}\n\n"
         f"Posts recentes teus (NÃO repetir):\n{recent_block}\n\n"
         f"Memórias (tom, não assunto):\n{memory_block}\n\n"
-        f"ASSUNTOS DE HOJE (temas em voga: {trend_line}; escolhe UM):\n"
+        f"ASSUNTOS DE HOJE (temas em voga: {trend_line}; escolhe UMA entrada):\n"
         f"{subject_menu}\n\n"
-        "Post:"
+        "Post (sobre a entrada escolhida, em português de Portugal):"
     )
 
 
@@ -733,7 +736,7 @@ def _generate_once(prompt: str) -> str:
             messages=[{"role": "user", "content": prompt + " /no_think"}],
             think=False,
             options={
-                "num_predict": 90,
+                "num_predict": 220,
                 "num_ctx": 4096,
                 "temperature": 0.95,
                 "top_p": 0.95,
@@ -750,8 +753,8 @@ def _generate_once(prompt: str) -> str:
         text = _tidy_post(text)
         if not text:
             return ""
-        if len(text) > 280:
-            text = text[:277] + "..."
+        if len(text) > 500:
+            text = text[:497] + "..."
         return text
     except Exception as e:
         print(f"[Mastodon Skill] LLM error for reflective post: {e}", flush=True)
