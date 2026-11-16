@@ -147,23 +147,24 @@ CONCEPT_QUERIES = (
     "cores",
 )
 
+# Angles, not subjects. The previous list was a set of subjects ("descreve um
+# som de uma casa", "inventa uma cidade") competing with the research for the
+# model's attention -- and winning: measured on 2026-11-16, four candidates in
+# a row ignored the researched trends and wrote the angle instead. An angle
+# has to be applicable to any subject.
 FRAMINGS = (
-    "Parte de um objecto comum e descreve-o como se fosse a primeira vez que o vês.",
-    "Escreve sobre um animal que ninguém repara, sem o nomear.",
-    "Inventa uma cidade pequena e diz uma única coisa que lá acontece.",
-    "Parte de uma notícia ou assunto em voga e responde-lhe com uma imagem inesperada.",
-    "Escreve como uma instrução para uma máquina que ainda não existe.",
-    "Fala de uma memória de infância que nunca aconteceu.",
-    "Começa por uma cor e deixa-a transformar-se numa ideia.",
-    "Escreve como um aforismo: uma frase que fica, sem explicar a origem.",
-    "Descreve um som de uma casa e o que ele faz quando ninguém o ouve.",
-    "Parte de um cheiro e conta o que ele traz.",
-    "Escreve uma nota de diário de alguém que vive no futuro.",
-    "Pega num assunto em voga e olha para ele de lado, sem opinar.",
-    "Descreve o que um objecto faz quando ninguém o usa.",
-    "Escreve o rótulo de um produto que não existe.",
-    "Conta uma coisa que uma criança explicaria mal.",
-    "Descreve uma máquina a fazer algo que ninguém lhe pediu.",
+    "Olha para o assunto como se fosse a primeira vez que o vês.",
+    "Descreve o assunto pelo som que ele faz.",
+    "Descreve o assunto pelo cheiro que deixa.",
+    "Conta o assunto como uma instrução para uma máquina que ainda não existe.",
+    "Fala do assunto através de um objecto que o acompanha.",
+    "Diz uma única coisa que acontece por causa do assunto.",
+    "Olha para o assunto de lado, sem o nomear.",
+    "Começa por uma cor e chega ao assunto por ela.",
+    "Escreve um aforismo sobre o assunto, sem explicar a origem.",
+    "Imagina o assunto daqui a cem anos.",
+    "Conta o assunto como uma criança o explicaria mal.",
+    "Descreve o assunto através do que ele destrói.",
 )
 
 _COMMAND_TOKEN = os.getenv("PHANTASMA_COMMAND_TOKEN", "").strip()
@@ -342,6 +343,13 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in text if not unicodedata.combining(ch))
 
 
+_LINK_TOKEN = re.compile(
+    r"^(?:https?://\S+|www\.\S+|[\w.-]+\.(?:com|net|org|pt|de|io|ly|be|info|me|co|uk"
+    r"|fr|es|it|nl|eu|tv|app|dev)(?:/\S*)?)$",
+    re.IGNORECASE,
+)
+
+
 def _strip_html(text: str) -> str:
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text or "")).split())
 
@@ -487,18 +495,88 @@ def _fetch_local_subjects(limit: int = 5) -> list:
             for status in resp.json():
                 if _acct_of(status).split("@")[0] == bot_local:
                     continue
-                text = _strip_html(status.get("content") or "")
-                text = re.sub(r"https?://\S+", "", text).strip()
-                text = re.sub(r"#\s+", "#", text).strip()
+                text = _status_text(status, max_chars=140)
                 if not text or _blocked_subject(text):
                     continue
-                subjects.append(text[:140])
+                subjects.append(text)
                 if len(subjects) >= limit:
                     break
             return subjects
     except Exception as e:
         logger.warning("Mastodon local timeline failed: %s", e)
         return []
+
+
+def _status_text(status, max_chars: int = 160) -> str:
+    """Readable text of a status: no HTML, no links, no handles.
+
+    Mastodon inserts zero-width spaces inside links, so a link can arrive as
+    "bierschinken.net/band/KrashKar\\u200bma" and survive a naive
+    ``https?://`` strip. Tokens that look like links are dropped whole.
+    Truncation happens at a word boundary: half a word in the prompt is noise
+    the model will try to complete.
+    """
+    text = _strip_html(status.get("content") or "")
+    text = text.replace("\u200b", " ").replace("\ufeff", " ")
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"@\w+(@[\w.-]+)?", " ", text)
+    text = text.replace("@", " ")
+    tokens = [token for token in text.split() if not _LINK_TOKEN.match(token)]
+    text = re.sub(r"#\s+", "#", " ".join(tokens))
+    text = " ".join(text.split())
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0]
+    return text.strip()
+
+
+def _fetch_trend_research(tags, per_tag: int = 2, max_tags: int = 3) -> list:
+    """What people are actually saying under the trending tags.
+
+    A tag name is not research. "#caturday" gives the model nothing to write
+    from; the statuses under it do -- that is the difference between a post
+    that mentions a trend and a post that grew out of one. Returns
+    ``[(tag, [snippet, ...]), ...]``, filtered like the local timeline:
+    the bot's own posts, the blocklist, one-word statuses and link-only
+    statuses never reach the prompt.
+    """
+    if not TRENDS_ENABLED or not tags:
+        return []
+    bot_local = BOT_ACCT.split("@")[0].lower()
+    research = []
+    seen = set()
+    try:
+        with httpx.Client(timeout=10, headers=_headers()) as client:
+            for tag in list(tags)[:max_tags]:
+                try:
+                    resp = client.get(
+                        f"{INSTANCE_URL}/api/v1/timelines/tag/{tag}",
+                        params={"limit": 15},
+                    )
+                except Exception as e:
+                    logger.warning("Mastodon tag %s failed: %s", tag, e)
+                    continue
+                if resp.status_code != 200:
+                    logger.warning("Mastodon tag %s HTTP %s", tag, resp.status_code)
+                    continue
+                snippets = []
+                for status in resp.json():
+                    if _acct_of(status).split("@")[0] == bot_local:
+                        continue
+                    text = _status_text(status)
+                    if len(text) < 25 or _blocked_subject(text):
+                        continue
+                    key = text[:60].lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    snippets.append(text)
+                    if len(snippets) >= per_tag:
+                        break
+                if snippets:
+                    research.append((tag, snippets))
+    except Exception as e:
+        logger.warning("Mastodon trend research failed: %s", e)
+    return research
 
 
 # --- prompt + generation ----------------------------------------------------
@@ -527,7 +605,7 @@ def _memory_snippet() -> str:
         lines = list(dict.fromkeys(ln for ln in rag.splitlines() if ln.strip()))
         lines = [ln for ln in lines if _cliche_hits(ln) == 0]
         random.shuffle(lines)
-        rag = "\n".join(lines[:10])
+        rag = "\n".join(lines[:6])
     except Exception:
         rag = ""
     return rag[:1200] if rag else ""
@@ -551,24 +629,78 @@ def _overlap_with_recent(text: str, recent) -> float:
     return worst
 
 
-def _build_prompt(rag: str, trends, subjects, recent, framing: str) -> str:
+def _persona() -> str:
+    """The persona configured in /admin, so the posts follow the owner's voice.
+
+    The skill used to hardcode "voz própria, imaginativa", which is how the
+    account ended up with a voice the owner never chose. Read per post, like
+    the assistant does, so an edit in /admin reaches tomorrow's post.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, _ROOT)
+        from src.settings_store import get_persona
+
+        text = (get_persona() or "").strip()
+    except Exception as e:
+        logger.warning("Mastodon persona read failed: %s", e)
+        text = ""
+    return text[:3000]
+
+
+def _build_prompt(
+    rag: str,
+    trends,
+    subjects,
+    recent,
+    framing: str,
+    research=None,
+    persona: str = "",
+) -> str:
     trend_line = ", ".join(f"#{t}" for t in trends) if trends else "(sem tendências)"
-    subject_block = "\n".join(f"- {s}" for s in subjects) if subjects else "(nada)"
-    recent_block = "\n".join(f"- {p}" for p in recent[:8]) if recent else "(nenhum)"
+    recent_block = "\n".join(f"- {p}" for p in recent[:4]) if recent else "(nenhum)"
     memory_block = rag if rag else "(sem memórias relevantes)"
+    persona_block = persona.strip() or "(sem persona configurada)"
+
+    # The subject menu goes last, immediately before "Post:". Everything the
+    # model had just read when it failed to use the research was the persona
+    # and the recent posts -- both of which talk about time and shadows. The
+    # menu is the last thing it reads now.
+    menu = []
+    for tag, snippets in research or []:
+        for snippet in snippets:
+            menu.append(f"[#{tag}] {snippet}")
+    for subject in subjects:
+        menu.append(f"[timeline local] {subject}")
+    menu = menu[:8]
+    subject_menu = (
+        "\n".join(f"{i}. {item}" for i, item in enumerate(menu, 1))
+        if menu
+        else "(sem assuntos — parte de uma memória)"
+    )
 
     return (
-        "Escreves como o Phantasma: voz própria, imaginativa, em português "
-        "europeu. Escreve um post curto (máximo 280 caracteres) para o "
-        "Mastodon.\n\n"
+        "PERSONA — esta é a tua voz; segue-a sempre:\n"
+        f"{persona_block}\n\n"
+        "TAREFA: escreve um post curto (máximo 280 caracteres) para o Mastodon. "
+        "A VOZ vem da persona; o ASSUNTO vem dos ASSUNTOS DE HOJE no fim deste "
+        "prompt. A persona diz como se diz, não sobre o que se fala.\n\n"
         "REGRAS:\n"
-        "- NÃO cites nem transcrevas as memórias, as tendências ou os posts "
-        "recentes. São faísca, não texto.\n"
-        "- PROIBIDO o campo semântico do tempo que passa: tempo, relógio, "
-        "horas, sombra, rio, silêncio. Já foram usados até à exaustão.\n"
+        "- O post tem de partir de um dos assuntos listados. Não inventes um "
+        "assunto novo.\n"
+        "- A pesquisa é matéria-prima, não texto. Não resumas, não cites, não "
+        "escrevas notícia: podes inventar a partir dela, contradizê-la ou "
+        "deformá-la.\n"
+        "- Se a pesquisa estiver noutra língua, aproveita a ideia e escreve em "
+        "português.\n"
+        "- Se o assunto for fraco (só hashtags, um evento, um título), agarra "
+        "UMA imagem concreta dele e segue.\n"
+        "- As memórias servem para o tom, nunca para o assunto.\n"
         "- NÃO repitas temas, imagens ou frases dos teus posts recentes.\n"
-        "- Escolhe UM assunto concreto (um objecto, um animal, uma cidade, "
-        "uma notícia, uma ideia) e surpreende.\n"
+        "- Evita as imagens gastas: tempo, relógio, horas, sombra, rio, "
+        "silêncio. A mesma atmosfera diz-se com ferrugem, osso, máquina, "
+        "distância.\n"
         "- Nunca comentes pessoas reais, protestos, guerras, tragédias ou "
         "política partidária; se um assunto for desse tipo, ignora-o.\n"
         "- Sem hashtags excessivas (máximo 2). Sem markdown. Sem aspas.\n"
@@ -578,10 +710,10 @@ def _build_prompt(rag: str, trends, subjects, recent, framing: str) -> str:
         "ecrã (não tela), telemóvel (não celular), a superfície (não sua "
         "superfície).\n\n"
         f"Ângulo de hoje: {framing}\n\n"
-        f"Assuntos em voga no Mastodon (inspiração opcional): {trend_line}\n\n"
-        f"Assuntos na timeline local (inspiração opcional):\n{subject_block}\n\n"
         f"Posts recentes teus (NÃO repetir):\n{recent_block}\n\n"
-        f"Memórias (inspiração, não citação):\n{memory_block}\n\n"
+        f"Memórias (tom, não assunto):\n{memory_block}\n\n"
+        f"ASSUNTOS DE HOJE (temas em voga: {trend_line}; escolhe UM):\n"
+        f"{subject_menu}\n\n"
         "Post:"
     )
 
@@ -644,17 +776,24 @@ def _tidy_post(text: str) -> str:
 def _generate_reflective_post() -> str:
     """Generate a post that is not yesterday's post.
 
-    Inspiration comes from three independent places -- memory, the instance's
-    trending tags, and the local timeline -- and every candidate is scored
-    against the account's recent posts and against the imagery it has been
-    recycling. The first candidate with no clichés wins; otherwise the least
-    repetitive one, after up to two extra attempts. Two extra attempts matter:
-    measured on 2026-11-15, a single candidate still landed on "sombra/tempo"
-    about one time in two.
+    Four inputs, two jobs. Subject: the trend research (what is actually being
+    said under the trending tags), the local timeline and memory. Voice: the
+    persona configured in /admin. They are kept separate on purpose -- the
+    persona asks for "absence, quiet erosion and stillness", which is exactly
+    the theme the account was stuck on; the persona decides HOW it is said,
+    the research decides WHAT is said.
+
+    Every candidate is scored against the account's recent posts and against
+    the imagery it has been recycling. The first candidate with no clichés
+    wins; otherwise the least repetitive one, after up to two extra attempts.
+    Two extra attempts matter: measured on 2026-11-15, a single candidate
+    still landed on "sombra/tempo" about one time in two.
     """
     rag = _memory_snippet()
     trends = _fetch_trending_tags()
     subjects = _fetch_local_subjects()
+    research = _fetch_trend_research(trends)
+    persona = _persona()
     recent = _recent_posts()
 
     def score(text):
@@ -667,7 +806,7 @@ def _generate_reflective_post() -> str:
     while attempts < max_attempts:
         attempts += 1
         framing = random.choice(FRAMINGS)
-        prompt = _build_prompt(rag, trends, subjects, recent, framing)
+        prompt = _build_prompt(rag, trends, subjects, recent, framing, research, persona)
         text = _generate_once(prompt)
         if not text:
             continue

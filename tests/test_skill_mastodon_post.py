@@ -114,6 +114,143 @@ def test_local_subjects_skip_the_bot_and_blocked_text(monkeypatch):
     assert mastodon._fetch_local_subjects() == ["GTA VI adiado"]
 
 
+def test_trend_research_reads_the_tag_timelines(monkeypatch):
+    """A tag name is not research: the statuses under it are."""
+    _fake_http(
+        monkeypatch,
+        [
+            [
+                {
+                    "account": {"acct": "ana"},
+                    "content": "<p>O meu gato dorme no teclado há três horas</p>",
+                },
+                {
+                    "account": {"acct": "rui"},
+                    "content": "<p>Outro gato, outra sesta, o mesmo teclado</p>",
+                },
+            ],
+            [
+                {
+                    "account": {"acct": "ana"},
+                    "content": "<p>Bolo de chocolate sem ovos, testado duas vezes</p>",
+                },
+            ],
+        ],
+    )
+
+    research = mastodon._fetch_trend_research(["caturday", "vegan"])
+
+    assert [tag for tag, _ in research] == ["caturday", "vegan"]
+    assert "teclado" in research[0][1][0]
+    assert "chocolate" in research[1][1][0]
+
+
+def test_trend_research_skips_the_bot_blocked_and_link_only(monkeypatch):
+    _fake_http(
+        monkeypatch,
+        [
+            [
+                {
+                    "account": {"acct": "phantasma"},
+                    "content": "<p>Um gato de vidro atravessa a cidade</p>",
+                },
+                {"account": {"acct": "seyon"}, "content": "<p>manifestação na praça</p>"},
+                {"account": {"acct": "seyon"}, "content": "<p>https://example.com/x</p>"},
+                {"account": {"acct": "seyon"}, "content": "<p>bierschinken.net/band/KrashKar</p>"},
+                {"account": {"acct": "seyon"}, "content": "<p>curto</p>"},
+                {
+                    "account": {"acct": "seyon"},
+                    "content": "<p>Um gato de bronze dorme sobre o livro de receitas</p>",
+                },
+            ]
+        ],
+    )
+
+    research = mastodon._fetch_trend_research(["caturday"])
+
+    assert research == [
+        ("caturday", ["Um gato de bronze dorme sobre o livro de receitas"])
+    ]
+
+
+def test_trend_research_survives_a_failing_tag(monkeypatch):
+    class _Response:
+        status_code = 500
+
+        def json(self):
+            return []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            return _Response()
+
+    monkeypatch.setattr(mastodon.httpx, "Client", _Client)
+
+    assert mastodon._fetch_trend_research(["caturday"]) == []
+
+
+def test_status_text_drops_links_handles_and_cuts_on_a_word_boundary():
+    status = {
+        "content": (
+            '<p>@ ana@example.social Olha isto: '
+            "bierschinken.net/band/KrashKar\u200bma e um gato de bronze</p>"
+        )
+    }
+    text = mastodon._status_text(status, max_chars=40)
+    assert "http" not in text and "@" not in text and "bierschinken" not in text
+    assert "gato" in text
+    assert not text.endswith("bronz")
+
+
+def test_persona_comes_from_the_admin_setting(monkeypatch):
+    import src.settings_store as store
+
+    monkeypatch.setattr(store, "get_persona", lambda: "  VOZ CONFIGURADA  ")
+    assert mastodon._persona() == "VOZ CONFIGURADA"
+
+
+def test_persona_failure_does_not_block_a_post(monkeypatch):
+    import src.settings_store as store
+
+    def boom():
+        raise RuntimeError("db indisponível")
+
+    monkeypatch.setattr(store, "get_persona", boom)
+    assert mastodon._persona() == ""
+
+
+def test_prompt_carries_research_and_persona():
+    prompt = mastodon._build_prompt(
+        rag="memoria",
+        trends=["caturday"],
+        subjects=["GTA VI"],
+        recent=[OLD_POST],
+        framing="angulo",
+        research=[("caturday", ["Um gato de bronze dorme sobre o livro de receitas"])],
+        persona="VOZ FRIA E AUSTERA",
+    )
+
+    assert "VOZ FRIA E AUSTERA" in prompt
+    assert "Um gato de bronze" in prompt
+    assert "matéria-prima" in prompt
+    assert "não sobre o que se fala" in prompt
+
+
+def test_prompt_without_research_says_so():
+    prompt = mastodon._build_prompt("", [], [], [], "angulo")
+    assert "(sem assuntos — parte de uma memória)" in prompt
+    assert "(sem persona configurada)" in prompt
+
+
 def test_overlap_is_high_for_a_reworded_recent_post():
     recent = ["A sombra do gato alonga-se pela parede enquanto o mundo espera."]
     assert mastodon._overlap_with_recent(
@@ -137,7 +274,8 @@ def test_prompt_carries_trends_recent_posts_and_the_ban():
     assert "#caturday" in prompt
     assert "GTA VI adiado outra vez" in prompt
     assert OLD_POST in prompt
-    assert "PROIBIDO" in prompt and "relógio" in prompt
+    assert "Evita as imagens gastas" in prompt and "relógio" in prompt
+    assert "ferrugem" in prompt
 
 
 def test_prompt_without_sources_does_not_emit_empty_headers():
@@ -185,7 +323,36 @@ def _stub_sources(monkeypatch, recent=None):
     monkeypatch.setattr(mastodon, "_memory_snippet", lambda: "memoria")
     monkeypatch.setattr(mastodon, "_fetch_trending_tags", lambda: ["caturday"])
     monkeypatch.setattr(mastodon, "_fetch_local_subjects", lambda: ["GTA VI"])
+    monkeypatch.setattr(mastodon, "_fetch_trend_research", lambda _tags: [])
+    monkeypatch.setattr(mastodon, "_persona", lambda: "PERSONA FIXA")
     monkeypatch.setattr(mastodon, "_recent_posts", lambda: recent or [])
+
+
+def test_generation_researches_the_trends_once(monkeypatch):
+    """Research is paid for once per post, not once per candidate."""
+    _stub_sources(monkeypatch, recent=[OLD_POST])
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 2)
+
+    researched = []
+
+    def fake_research(tags):
+        researched.append(list(tags))
+        return [("caturday", ["Um gato de bronze dorme sobre o livro de receitas"])]
+
+    monkeypatch.setattr(mastodon, "_fetch_trend_research", fake_research)
+
+    prompts = []
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return NEW_POST
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    assert mastodon._generate_reflective_post() == NEW_POST
+    assert researched == [["caturday"]]
+    assert "gato de bronze" in prompts[0]
+    assert "PERSONA FIXA" in prompts[0]
 
 
 def test_generation_retries_past_a_cliche_candidate(monkeypatch):
