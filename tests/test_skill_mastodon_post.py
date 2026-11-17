@@ -447,6 +447,11 @@ def test_theme_hashtags_fall_back_to_trends_and_sanitize():
     assert mastodon._theme_hashtags([], ["café-au-lait", "rock'n'roll"]) == "#cafeaulait #rocknroll"
 
 
+def test_theme_hashtags_fall_back_to_subject_hashtags():
+    subjects = ["Pão #ParkerHouseRolls #Vegan"]
+    assert mastodon._theme_hashtags([], [], subjects) == "#parkerhouserolls #vegan"
+
+
 def test_append_theme_tags_respects_length():
     text = "x" * 495
     tagged = mastodon._append_theme_tags(text, [("linux", ["k"])], [], max_len=500)

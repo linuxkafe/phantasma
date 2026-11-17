@@ -777,31 +777,42 @@ def _tidy_post(text: str) -> str:
     return text.strip()
 
 
-def _theme_hashtags(research, trends, limit: int = 2) -> str:
+def _theme_hashtags(research, trends, subjects=None, limit: int = 2) -> str:
     """Hashtags for the themes that fed this post, appended after the text.
 
     Research tags are the themes the generator actually received as material;
-    trending tags are the fallback when no tag timeline yielded snippets.
+    trending tags are the fallback when no tag timeline yielded snippets. If
+    there are no trend tags at all (common on small instances), fall back to
+    hashtags already present in the local subjects that inspired the post.
     "Temas utilizados em cada post" — recorded as hashtags, not invented.
     """
     source = [tag for tag, _snippets in (research or [])] or list(trends or [])
     tags = []
     seen = set()
-    for raw in source:
+
+    def add(raw):
         tag = re.sub(r"[^\w]", "", _fold(raw or ""), flags=re.UNICODE)
         tag = re.sub(r"_+", "_", tag).strip("_")
-        if not tag or tag in seen:
-            continue
+        if not tag or tag in seen or _blocked_subject(tag):
+            return False
         seen.add(tag)
         tags.append(f"#{tag}")
-        if len(tags) >= limit:
-            break
+        return len(tags) >= limit
+
+    for raw in source:
+        if add(raw):
+            return " ".join(tags)
+    # No trending tags: pick hashtags carried by the local subjects used.
+    for subject in subjects or []:
+        for raw in re.findall(r"#([\w]+)", _fold(subject), flags=re.UNICODE):
+            if add(raw):
+                return " ".join(tags)
     return " ".join(tags)
 
 
-def _append_theme_tags(text: str, research, trends, max_len: int = 500) -> str:
+def _append_theme_tags(text: str, research, trends, subjects=None, max_len: int = 500) -> str:
     """Append theme hashtags without exceeding the Mastodon length limit."""
-    tags = _theme_hashtags(research, trends)
+    tags = _theme_hashtags(research, trends, subjects)
     if not tags or not text:
         return text
     # Already tagged (e.g. model ignored the instruction): don't double-tag.
@@ -896,7 +907,7 @@ def _generate_reflective_post() -> str:
         f"overlap={best_score[1]:.2f}, attempts={attempts})",
         flush=True,
     )
-    return _append_theme_tags(best, research, trends)
+    return _append_theme_tags(best, research, trends, subjects)
 
 
 async def post_reflective_now() -> bool:
