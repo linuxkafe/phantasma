@@ -802,10 +802,17 @@ def _generate_reflective_post() -> str:
     def score(text):
         return (_cliche_hits(text), _overlap_with_recent(text, recent))
 
+    # overlap=1.0 is an exact repeat of a recent post. Posting it is worse
+    # than posting nothing: on 2026-11-17 the scheduled run reproduced the
+    # previous day's test post verbatim (overlap=1.00, attempts=4) because
+    # every candidate scored the same and the first was kept.
+    DUPLICATE_OVERLAP = 0.80
+
     best = ""
     best_score = None
     attempts = 0
     max_attempts = POST_CANDIDATES + 2
+    extra_for_duplicate = 2
     while attempts < max_attempts:
         attempts += 1
         framing = random.choice(FRAMINGS)
@@ -819,8 +826,24 @@ def _generate_reflective_post() -> str:
         # Clean and unrelated enough: stop paying for more inference.
         if best_score[0] == 0 and best_score[1] <= 0.45:
             break
+        # Every candidate so far is effectively a repeat: spend a couple more
+        # attempts looking for something different before giving up.
+        if (
+            best_score[1] >= DUPLICATE_OVERLAP
+            and attempts == max_attempts
+            and extra_for_duplicate > 0
+        ):
+            max_attempts += extra_for_duplicate
+            extra_for_duplicate = 0
 
     if not best:
+        return ""
+    if best_score[1] >= DUPLICATE_OVERLAP:
+        print(
+            f"[Mastodon Skill] refusing to repeat a recent post "
+            f"(overlap={best_score[1]:.2f}, attempts={attempts})",
+            flush=True,
+        )
         return ""
 
     print(

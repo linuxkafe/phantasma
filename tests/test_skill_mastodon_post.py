@@ -405,6 +405,37 @@ def test_generation_keeps_the_least_cliche_when_all_fail(monkeypatch):
     assert mastodon._generate_reflective_post() == worse
 
 
+def test_generation_refuses_to_repeat_a_recent_post(monkeypatch):
+    """An exact repeat (overlap=1.0) must never be published again."""
+    duplicate = "A regra da serra é simples: corta-se apenas o que não pode ser regenerado."
+    _stub_sources(monkeypatch, recent=[duplicate])
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
+
+    calls = []
+
+    def fake_generate(_prompt):
+        calls.append(1)
+        return duplicate
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    assert mastodon._generate_reflective_post() == ""
+    # 1 (POST_CANDIDATES) + 2 (base extra) + 2 (duplicate extra) = 5 attempts.
+    assert len(calls) == 5
+
+
+def test_generation_accepts_a_fresh_post_after_duplicates(monkeypatch):
+    """A duplicate candidate is discarded when a different one appears."""
+    duplicate = "A regra da serra é simples: corta-se apenas o que não pode ser regenerado."
+    _stub_sources(monkeypatch, recent=[duplicate])
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
+
+    texts = iter([duplicate, duplicate, NEW_POST])
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: next(texts))
+
+    assert mastodon._generate_reflective_post() == NEW_POST
+
+
 def test_generation_returns_empty_when_the_model_gives_nothing(monkeypatch):
     _stub_sources(monkeypatch)
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
