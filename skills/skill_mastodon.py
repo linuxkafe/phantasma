@@ -706,7 +706,8 @@ def _build_prompt(
         "- Nunca comentes pessoas reais, protestos, guerras, tragédias ou "
         "política partidária; se um assunto for desse tipo, ignora-o e escolhe "
         "outra entrada.\n"
-        "- Sem hashtags excessivas (máximo 2). Sem markdown. Sem aspas.\n"
+        "- Não escrevas hashtags no corpo do texto; as hashtags dos temas são "
+        "adicionadas automaticamente no fim. Sem markdown. Sem aspas.\n"
         "- Texto corrido: duas a cinco frases, sem título, sem listas, sem "
         "quebras de linha.\n"
         "- Português de Portugal, nunca do Brasil: autónomo (não autônomo), "
@@ -774,6 +775,50 @@ def _tidy_post(text: str) -> str:
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     return text.strip()
+
+
+def _theme_hashtags(research, trends, limit: int = 2) -> str:
+    """Hashtags for the themes that fed this post, appended after the text.
+
+    Research tags are the themes the generator actually received as material;
+    trending tags are the fallback when no tag timeline yielded snippets.
+    "Temas utilizados em cada post" — recorded as hashtags, not invented.
+    """
+    source = [tag for tag, _snippets in (research or [])] or list(trends or [])
+    tags = []
+    seen = set()
+    for raw in source:
+        tag = re.sub(r"[^\w]", "", _fold(raw or ""), flags=re.UNICODE)
+        tag = re.sub(r"_+", "_", tag).strip("_")
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        tags.append(f"#{tag}")
+        if len(tags) >= limit:
+            break
+    return " ".join(tags)
+
+
+def _append_theme_tags(text: str, research, trends, max_len: int = 500) -> str:
+    """Append theme hashtags without exceeding the Mastodon length limit."""
+    tags = _theme_hashtags(research, trends)
+    if not tags or not text:
+        return text
+    # Already tagged (e.g. model ignored the instruction): don't double-tag.
+    if tags.split()[0].lower() in text.lower():
+        return text
+    suffix = " " + tags
+    if len(text) + len(suffix) <= max_len:
+        return text + suffix
+    room = max_len - len(suffix) - 1
+    if room < 40:
+        return text
+    cut = text[:room].rstrip()
+    # Don't end mid-word or mid-sentence fragment when we can avoid it.
+    last_space = cut.rfind(" ")
+    if last_space > room - 30:
+        cut = cut[:last_space].rstrip(" ,;:")
+    return cut + "…" + suffix
 
 
 def _generate_reflective_post() -> str:
@@ -851,7 +896,7 @@ def _generate_reflective_post() -> str:
         f"overlap={best_score[1]:.2f}, attempts={attempts})",
         flush=True,
     )
-    return best
+    return _append_theme_tags(best, research, trends)
 
 
 async def post_reflective_now() -> bool:

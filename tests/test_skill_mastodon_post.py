@@ -323,13 +323,15 @@ def test_memory_snippet_drops_the_accounts_own_cliches(monkeypatch):
     assert "sombra" not in snippet and "relógio" not in snippet
 
 
-def _stub_sources(monkeypatch, recent=None):
+def _stub_sources(monkeypatch, recent=None, with_tags=False):
     monkeypatch.setattr(mastodon, "_memory_snippet", lambda: "memoria")
     monkeypatch.setattr(mastodon, "_fetch_trending_tags", lambda: ["caturday"])
     monkeypatch.setattr(mastodon, "_fetch_local_subjects", lambda: ["GTA VI"])
     monkeypatch.setattr(mastodon, "_fetch_trend_research", lambda _tags: [])
     monkeypatch.setattr(mastodon, "_persona", lambda: "PERSONA FIXA")
     monkeypatch.setattr(mastodon, "_recent_posts", lambda: recent or [])
+    if not with_tags:
+        monkeypatch.setattr(mastodon, "_append_theme_tags", lambda text, *a, **k: text)
 
 
 def test_generation_researches_the_trends_once(monkeypatch):
@@ -434,6 +436,37 @@ def test_generation_accepts_a_fresh_post_after_duplicates(monkeypatch):
     monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: next(texts))
 
     assert mastodon._generate_reflective_post() == NEW_POST
+
+
+def test_theme_hashtags_prefer_researched_tags():
+    research = [("SilentSunday", ["neve"]), ("linux", ["kernel"])]
+    assert mastodon._theme_hashtags(research, ["fallback"]) == "#silentsunday #linux"
+
+
+def test_theme_hashtags_fall_back_to_trends_and_sanitize():
+    assert mastodon._theme_hashtags([], ["café-au-lait", "rock'n'roll"]) == "#cafeaulait #rocknroll"
+
+
+def test_append_theme_tags_respects_length():
+    text = "x" * 495
+    tagged = mastodon._append_theme_tags(text, [("linux", ["k"])], [], max_len=500)
+    assert tagged.endswith(" #linux")
+    assert len(tagged) <= 500
+
+
+def test_generation_appends_theme_hashtags(monkeypatch):
+    _stub_sources(monkeypatch, with_tags=True)
+    monkeypatch.setattr(
+        mastodon,
+        "_fetch_trend_research",
+        lambda _tags: [("silentsunday", ["neve na serra"])],
+    )
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: NEW_POST)
+
+    result = mastodon._generate_reflective_post()
+
+    assert result.startswith(NEW_POST)
+    assert result.rstrip().endswith("#silentsunday")
 
 
 def test_generation_returns_empty_when_the_model_gives_nothing(monkeypatch):
