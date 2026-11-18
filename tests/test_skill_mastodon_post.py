@@ -321,8 +321,10 @@ def test_stance_check_catches_a_post_that_ignores_the_position():
 
 
 def test_generation_rejects_a_post_that_ignores_the_position(monkeypatch):
-    """The 2026-11-18 sample asserted no position at all."""
-    _stub_sources(monkeypatch, recent=[], subjects=["GTA VI adiado", "Um gato"])
+    """2026-11-18: a subject that can carry the position, and a post without it."""
+    _stub_sources(
+        monkeypatch, recent=[], subjects=["Carne de laboratório", "Um gato"]
+    )
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 2)
     monkeypatch.setattr(
         mastodon,
@@ -335,6 +337,47 @@ def test_generation_rejects_a_post_that_ignores_the_position(monkeypatch):
     )
 
     assert mastodon._generate_reflective_post() == ""
+
+
+def test_generation_does_not_demand_the_position_from_an_unrelated_subject(monkeypatch):
+    """Owner, 2026-11-18: the position when the subject allows it, not always."""
+    _stub_sources(monkeypatch, recent=[], subjects=["GTA VI adiado"])
+    monkeypatch.setattr(
+        mastodon,
+        "_persona",
+        lambda: "Express vegan and abolitionist ethics as self-evident realities",
+    )
+    text = "O jogo foi adiado outra vez. Ninguém explica a data nova."
+    prompts = []
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return text
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    assert mastodon._generate_reflective_post() == text
+    assert "POSIÇÃO" not in prompts[0]
+
+
+def test_generation_asks_for_the_position_when_the_subject_carries_it(monkeypatch):
+    _stub_sources(monkeypatch, recent=[], subjects=["Carne de laboratório"])
+    monkeypatch.setattr(
+        mastodon,
+        "_persona",
+        lambda: "Express vegan and abolitionist ethics as self-evident realities",
+    )
+    prompts = []
+    text = "A carne cresce em cubas de aço. A exploração animal não é uma opinião."
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return text
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    assert mastodon._generate_reflective_post() == text
+    assert "POSIÇÃO" in prompts[0]
 
 
 def test_generation_keeps_a_post_that_asserts_the_position(monkeypatch):
@@ -356,7 +399,7 @@ def test_prompt_without_a_position_says_nothing_about_it():
 
 
 def test_generation_passes_the_persona_position(monkeypatch):
-    _stub_sources(monkeypatch, recent=[])
+    _stub_sources(monkeypatch, recent=[], subjects=["Carne de laboratório"])
     monkeypatch.setattr(
         mastodon,
         "_persona",
@@ -387,13 +430,33 @@ def test_subject_menu_drops_entries_with_no_text():
 
 
 def test_subjects_are_ranked_by_how_little_they_repeat_recent_posts():
-    recent = ["A vitela está quase acabada e a superfície do pão é suave."]
+    recent = ["A serra corta madeira e a superfície fica quente."]
     menu = [
-        "[timeline local] A vitela está quase acabada e o pão é suave",
+        "[timeline local] A serra corta madeira e a superfície fica quente",
         "[timeline local] GTA VI adiado outra vez",
     ]
     ranked = mastodon._rank_subjects(menu, recent)
     assert ranked[0].endswith("GTA VI adiado outra vez")
+
+
+def test_subjects_that_can_carry_the_position_are_ranked_first():
+    """Owner, 2026-11-18: the position when the subject allows it."""
+    menu = [
+        "[timeline local] GTA VI adiado outra vez",
+        "[timeline local] Carne de laboratório chega ao mercado",
+    ]
+    ranked = mastodon._rank_subjects(menu, [])
+    assert "Carne de laboratório" in ranked[0]
+
+
+def test_only_animal_and_food_subjects_carry_the_position():
+    assert mastodon._carries_stance("[timeline local] Carne de laboratório")
+    assert mastodon._carries_stance("[#vegan] Francesinha no Porto")
+    assert mastodon._carries_stance("[timeline local] O preço do leite")
+    assert not mastodon._carries_stance("[timeline local] GTA VI adiado")
+    assert not mastodon._carries_stance("[timeline local] Filtros para o Mastodon")
+    # "vaca" is the start of "vacation": boundaries matter.
+    assert not mastodon._carries_stance("[timeline local] Summer vacation plans")
 
 
 def test_prompt_without_research_says_so():

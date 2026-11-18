@@ -871,16 +871,83 @@ def _novelty(entry: str, recent) -> float:
 
 
 def _rank_subjects(menu, recent) -> list:
-    """Most novel material first, research order kept for ties.
+    """Subjects that can carry the position first, then most novel first.
 
     The generator used to hand the model a numbered menu of up to eight
     entries and ask it to choose one. On an 8B model that is an invitation to
     fall back on whatever it read last, and the menu entries it picked were
-    the ones closest to yesterday's post. Choosing is the harness's job now:
-    it picks the entry that has least in common with recent posts and gives
-    the model that one only.
+    the ones closest to yesterday's post. Choosing is the harness's job now.
+
+    Ordering by stance first is what makes the owner's choice ("the position
+    when the subject allows it") happen as often as the timeline allows: if
+    there is animal or food material today, it is what gets written about.
     """
-    return sorted(menu, key=lambda entry: -_novelty(entry, recent))
+    return sorted(
+        menu, key=lambda entry: (not _carries_stance(entry), -_novelty(entry, recent))
+    )
+
+
+# Stems that make a subject able to carry the position (see _carries_stance).
+# "animal" covers animais/animal; "aliment" covers alimentação/alimentar.
+STANCE_STEMS = (
+    "animal",
+    "carne",
+    "vitela",
+    "vegan",
+    "vegetar",
+    "aliment",
+    "comida",
+    "cozinha",
+    "receita",
+    "leite",
+    "queijo",
+    "pecuar",
+    "matadouro",
+    "curral",
+    "tourada",
+    "zoologic",
+    "aquario",
+    "laborator",
+    "farmac",
+    "cosmetic",
+    "especismo",
+    "abolicion",
+    "senciente",
+)
+
+# Short words need both boundaries: "vaca" is also the start of "vacation".
+STANCE_WORDS = (
+    "ovo",
+    "ovos",
+    "peixe",
+    "peixes",
+    "pesca",
+    "gado",
+    "porco",
+    "vaca",
+    "galinha",
+    "couro",
+    "caca",
+    "circo",
+)
+
+
+def _carries_stance(entry: str) -> bool:
+    """True when the subject can carry the abolitionist position.
+
+    Owner's decision, 2026-11-18: the position is asserted when the subject
+    allows it, not forced onto every subject. Requiring it unconditionally
+    produced posts that tied animal exploitation to a Mastodon filter tip by
+    main force, and refusing to post when the tie failed; a daily account that
+    goes silent is a worse outcome than a post that only describes its subject.
+
+    The test is lexical on purpose: the harness decides, so the prompt and the
+    verification agree and the model is never asked to judge its own subject.
+    """
+    folded = _fold(entry)
+    if any(re.search(rf"\b{stem}", folded) for stem in STANCE_STEMS):
+        return True
+    return any(re.search(rf"\b{word}\b", folded) for word in STANCE_WORDS)
 
 
 def _asserts_stance(text: str) -> bool:
@@ -1128,10 +1195,13 @@ def _generate_reflective_post() -> str:
     same tag that fed the previous day, and the model rewrote the same
     paragraph.
 
-    The persona also supplies a POSITION (see _persona_stance): the owner
-    asked that the posts take an abolitionist stance, not merely avoid
-    contradicting one. The subject still comes from the research; the position
-    is what the post asserts about it.
+    The persona also supplies a POSITION (see _persona_stance): the owner asked
+    that the posts take an abolitionist stance, not merely avoid contradicting
+    one. On 2026-11-18 he chose that the position is asserted when the subject
+    allows it rather than forced onto every subject -- requiring it always
+    tied animal exploitation to a Mastodon filter tip by main force. So
+    subjects that can carry it are ranked first, and the position is only
+    asked for (and only verified) on those.
     """
     rag = _memory_snippet()
     recent = _recent_posts()
@@ -1169,7 +1239,10 @@ def _generate_reflective_post() -> str:
     for entry in menu[:max_attempts]:
         attempts += 1
         framing = random.choice(FRAMINGS)
-        prompt = _build_prompt(rag, entry, framing, persona, stance)
+        # The position is required only where the subject can carry it; see
+        # _carries_stance and the owner's decision of 2026-11-18.
+        entry_stance = stance if _carries_stance(entry) else ""
+        prompt = _build_prompt(rag, entry, framing, persona, entry_stance)
         text = _generate_once(prompt)
         if not text:
             continue
@@ -1185,7 +1258,7 @@ def _generate_reflective_post() -> str:
             )
             continue
         score = (_cliche_hits(text), overlap)
-        if stance and not _asserts_stance(text):
+        if entry_stance and not _asserts_stance(text):
             off_stance += 1
             print(
                 f"[Mastodon Skill] subject {entry[:40]!r} did not assert the "
