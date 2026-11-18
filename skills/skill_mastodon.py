@@ -122,6 +122,26 @@ SUBJECT_BLOCKLIST = (
     "palestina",
 )
 
+# English is the other language on the timeline. Word-boundary matching here
+# because "war" as a substring would also hit "software" and "warning".
+SUBJECT_BLOCKLIST_EN = (
+    "war",
+    "wars",
+    "ukraine",
+    "israel",
+    "palestine",
+    "genocide",
+    "nazi",
+    "hitler",
+    "election",
+    "elections",
+    "president",
+    "government",
+    "protest",
+    "missile",
+    "missiles",
+)
+
 
 # Memory is only useful as a spark. The old query list literally asked for
 # "tempo silencio sombra", so every post was guaranteed to be about time and
@@ -214,10 +234,11 @@ def _strip_mention(text, bot_username):
     return text.strip()
 
 
-async def _poll_once():
+async def _poll_once() -> bool:
+    """One notification poll. False means the poll itself failed."""
     global _last_seen_id
     if not ACCESS_TOKEN:
-        return
+        return False
     try:
         async with httpx.AsyncClient(timeout=30) as http:
             params = {"limit": 20, "types[]": "mention"}
@@ -230,14 +251,16 @@ async def _poll_once():
             )
             if resp.status_code != 200:
                 logger.warning("Mastodon notifications HTTP %s", resp.status_code)
-                return
+                return False
             notifs = resp.json()
     except Exception as e:
-        logger.warning("Mastodon poll failed: %s", e)
-        return
+        # %r, not %s: an httpx timeout stringifies to "" and the log line
+        # read "Mastodon poll failed:" with no cause on 2026-11-18.
+        logger.warning("Mastodon poll failed: %r", e)
+        return False
 
     if not notifs:
-        return
+        return True
 
     # Update cursor
     ids = [n.get("id") for n in notifs if n.get("id")]
@@ -254,7 +277,7 @@ async def _poll_once():
             f"[Mastodon Skill] initial catch-up: marked {len(ids)} notifications as seen",
             flush=True,
         )
-        return
+        return True
 
     for n in notifs:
         if n.get("type") != "mention":
@@ -311,6 +334,8 @@ async def _poll_once():
         except Exception as e:
             logger.warning("Mastodon reply failed: %s", e)
 
+    return True
+
 
 async def _post_status(text: str, visibility: str = "public") -> bool:
     """Post a status to Mastodon. Returns True on success."""
@@ -357,11 +382,18 @@ def _strip_html(text: str) -> str:
 def _blocked_subject(text: str) -> bool:
     """True for wars, protests, party politics and deaths -- see blocklist.
 
-    Substring, not word-boundary: the instance exposes tags like
-    "GazaVerified", and `\bgaza\b` let that one through.
+    Substring, not word-boundary, for the Portuguese list: the instance
+    exposes tags like "GazaVerified", and `\bgaza\b` let that one through.
+    English needs boundaries (2026-11-18: "Second world war started after the
+    meeting of the two biggest authoritarian figures" was offered to the model
+    as a subject because "guerra" does not match "war").
     """
     folded = _fold(text)
-    return any(word in folded for word in SUBJECT_BLOCKLIST)
+    if any(word in folded for word in SUBJECT_BLOCKLIST):
+        return True
+    return any(
+        re.search(rf"\b{re.escape(word)}\b", folded) for word in SUBJECT_BLOCKLIST_EN
+    )
 
 
 # --- recent posts: the model has to know what it already said --------------
@@ -495,8 +527,17 @@ def _fetch_local_subjects(limit: int = 5) -> list:
             for status in resp.json():
                 if _acct_of(status).split("@")[0] == bot_local:
                     continue
+                if status.get("in_reply_to_id"):
+                    # A reply is context for someone else's thread, not a
+                    # standalone subject; one of them was a comment on the
+                    # bot's own previous post and fed the same theme back in.
+                    continue
                 text = _status_text(status, max_chars=140)
                 if not text or _blocked_subject(text):
+                    continue
+                if text[:3].upper() == "RE:":
+                    # The owner prefixes reactions with "RE:" (one pointed at
+                    # the bot's own last post), and a reaction is not a subject.
                     continue
                 subjects.append(text)
                 if len(subjects) >= limit:
@@ -629,6 +670,97 @@ def _overlap_with_recent(text: str, recent) -> float:
     return worst
 
 
+# A shared run of this many words is a copied sentence, not a shared subject.
+# On 2026-11-18 the daily post reused "não há rastro, apenas uma transição
+# invisível" from the previous day: 13 shared four-word shingles, but the
+# word-overlap metric scored it 0.75 -- under the 0.80 duplicate bar, so it
+# shipped. Bag-of-words cannot see a copied phrase; shingles can.
+DUPLICATE_SHINGLE = 4
+
+_PHRASE_STOPWORDS = frozenset(
+    "para pela pelo como mais menos entre sobre depois antes ainda quando onde "
+    "porque assim cada todo toda todos todas outro outra mesmo mesma esta este "
+    "estes estas isso isto aquele aquela seu sua seus suas meu minha nao".split()
+)
+
+
+def _shingles(text: str, n: int = DUPLICATE_SHINGLE) -> set:
+    """Word n-grams of a post, minus those made only of function words."""
+    words = re.findall(r"\w+", _fold(text))
+    grams = set()
+    for i in range(len(words) - n + 1):
+        gram = words[i : i + n]
+        if all(word in _PHRASE_STOPWORDS for word in gram):
+            continue
+        grams.add(" ".join(gram))
+    return grams
+
+
+def _copied_phrase(text: str, recent) -> str:
+    """A phrase copied verbatim from a recent post ('' when there is none)."""
+    mine = _shingles(text)
+    if not mine:
+        return ""
+    for other in recent:
+        shared = mine & _shingles(other)
+        if shared:
+            return max(shared, key=len)
+    return ""
+
+
+def _tag_key(raw: str) -> str:
+    """Comparable form of a hashtag: folded, punctuation-free, no #."""
+    tag = re.sub(r"[^\w]", "", _fold(raw or ""), flags=re.UNICODE)
+    return re.sub(r"_+", "_", tag).strip("_")
+
+
+def _used_theme_tags(recent) -> set:
+    """Hashtags the recent posts already carry: those themes have been used.
+
+    Every post ends with the hashtags of the themes that fed it, so the
+    history says which material has already been spent. On 2026-11-18 the
+    only trend was #vegan, the same one that fed the previous post, and the
+    model wrote the same paragraph again.
+    """
+    used = set()
+    for post in recent:
+        used.update(re.findall(r"#([\w]+)", _fold(post)))
+    return used
+
+
+def _is_stale_subject(subject: str, recent) -> bool:
+    """A timeline subject that echoes a recent post has no new material in it."""
+    words = set(re.findall(r"\w{4,}", _fold(subject)))
+    if not words:
+        return True
+    for post in recent:
+        other = set(re.findall(r"\w{4,}", _fold(post)))
+        if other and len(words & other) / len(words) >= 0.5:
+            return True
+    return False
+
+
+def _has_prose(text: str, min_words: int = 3) -> bool:
+    """True when a menu entry has words of its own, not just tags or a link.
+
+    On 2026-11-18 the menu offered "https:// #ParkerHouseRolls #Vegan" -- no
+    text at all -- and the model, told to take a concrete image from it,
+    invented one: a post about veal ("A vitela está quase acabada"). A tag is
+    a label, not a subject. A slug counts as one token, not as prose.
+    """
+    stripped = re.sub(r"https?://\S*", " ", text or "")
+    stripped = re.sub(r"#[\w]+", " ", stripped)
+    tokens = [
+        token
+        for token in stripped.split()
+        if re.search(r"[^\W\d_]{2,}", _fold(token), flags=re.UNICODE)
+    ]
+    if len(tokens) < 2:
+        return False
+    words = re.findall(r"[^\W\d_]{2,}", _fold(stripped), flags=re.UNICODE)
+    return len(words) >= min_words
+
+
 def _persona() -> str:
     """The persona configured in /admin, so the posts follow the owner's voice.
 
@@ -649,6 +781,27 @@ def _persona() -> str:
     return text[:3000]
 
 
+def _persona_stance(persona: str) -> str:
+    """The ethical position stated by the persona, in instruction form.
+
+    The owner asked (2026-11-18) that the posts take an abolitionist
+    position, not merely avoid contradicting one. The persona already says
+    "Express vegan and abolitionist ethics as self-evident realities, not as
+    advice or recommendations", so the stance is derived from the persona
+    instead of hardcoded: a persona without that clause gets no stance and
+    the posts go back to being subject-only.
+    """
+    folded = _fold(persona)
+    if "vegan" not in folded and "abolicion" not in folded:
+        return ""
+    return (
+        "Assume a ética abolicionista animal como facto consumado: a exploração "
+        "animal não é uma opinião a debater. O post afirma esta posição uma vez, "
+        "ligada ao assunto escolhido, no tom frio da persona — nunca como sermão, "
+        "conselho, apelo ou moral. Não repitas a formulação de ontem."
+    )
+
+
 def _build_prompt(
     rag: str,
     trends,
@@ -657,11 +810,15 @@ def _build_prompt(
     framing: str,
     research=None,
     persona: str = "",
+    stance: str = "",
 ) -> str:
     trend_line = ", ".join(f"#{t}" for t in trends) if trends else "(sem tendências)"
     recent_block = "\n".join(f"- {p}" for p in recent[:4]) if recent else "(nenhum)"
     memory_block = rag if rag else "(sem memórias relevantes)"
     persona_block = persona.strip() or "(sem persona configurada)"
+    stance_block = (
+        f"POSIÇÃO (da persona, obrigatória em cada post):\n{stance}\n\n" if stance else ""
+    )
 
     # The subject menu goes last, immediately before "Post:". Everything the
     # model had just read when it failed to use the research was the persona
@@ -670,9 +827,11 @@ def _build_prompt(
     menu = []
     for tag, snippets in research or []:
         for snippet in snippets:
-            menu.append(f"[#{tag}] {snippet}")
+            if _has_prose(snippet):
+                menu.append(f"[#{tag}] {snippet}")
     for subject in subjects:
-        menu.append(f"[timeline local] {subject}")
+        if _has_prose(subject):
+            menu.append(f"[timeline local] {subject}")
     menu = menu[:8]
     subject_menu = (
         "\n".join(f"{i}. {item}" for i, item in enumerate(menu, 1))
@@ -683,21 +842,27 @@ def _build_prompt(
     return (
         "PERSONA — esta é a tua voz; segue-a sempre:\n"
         f"{persona_block}\n\n"
+        f"{stance_block}"
         "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres). "
-        "A VOZ vem da persona; o ASSUNTO vem dos ASSUNTOS DE HOJE no fim deste "
-        "prompt. A persona diz como se diz, não sobre o que se fala.\n\n"
+        "A VOZ e a POSIÇÃO vêm da persona; o ASSUNTO vem dos ASSUNTOS DE HOJE no "
+        "fim deste prompt. A posição diz o que o post afirma; o assunto diz "
+        "sobre o que ele fala.\n\n"
         "REGRAS:\n"
         "- Escolhe UMA das entradas numeradas em ASSUNTOS DE HOJE e escreve a "
         "partir dela. Retira dessa entrada uma imagem concreta (um gesto, um "
         "objecto, um lugar, um som, um material) e desenvolve-a. Não inventes "
         "um assunto que não esteja na lista.\n"
+        "- Se uma entrada não tiver texto além de hashtags ou de um link, não "
+        "é um assunto: ignora-a e escolhe outra.\n"
+        "- A persona é vinculativa também no conteúdo: não escrevas nada que a "
+        "contradiga. Ela não é o assunto.\n"
+        "- Se houver POSIÇÃO, o post afirma-a ligada ao assunto escolhido — uma "
+        "vez, como facto, sem sermão. A posição não substitui o assunto.\n"
         "- A pesquisa é matéria-prima, não texto. Não resumas, não cites, não "
         "escrevas notícia: podes inventar a partir dela, contradizê-la ou "
         "deformá-la.\n"
         "- Se a pesquisa estiver noutra língua, aproveita a ideia e escreve em "
         "português.\n"
-        "- Se o assunto for fraco (só hashtags, um evento, um título), agarra "
-        "UMA imagem concreta dele e segue — não o troques por outro assunto.\n"
         "- As memórias servem para o tom, nunca para o assunto.\n"
         "- NÃO repitas temas, imagens ou frases dos teus posts recentes.\n"
         "- Evita as imagens gastas: tempo, relógio, horas, sombra, rio, "
@@ -791,8 +956,7 @@ def _theme_hashtags(research, trends, subjects=None, limit: int = 2) -> str:
     seen = set()
 
     def add(raw):
-        tag = re.sub(r"[^\w]", "", _fold(raw or ""), flags=re.UNICODE)
-        tag = re.sub(r"_+", "_", tag).strip("_")
+        tag = _tag_key(raw)
         if not tag or tag in seen or _blocked_subject(tag):
             return False
         seen.add(tag)
@@ -843,61 +1007,86 @@ def _generate_reflective_post() -> str:
     the research decides WHAT is said.
 
     Every candidate is scored against the account's recent posts and against
-    the imagery it has been recycling. The first candidate with no clichés
-    wins; otherwise the least repetitive one, after up to two extra attempts.
-    Two extra attempts matter: measured on 2026-11-15, a single candidate
-    still landed on "sombra/tempo" about one time in two.
+    the imagery it has been recycling. A candidate is thrown away -- not
+    ranked, thrown away -- when it repeats a recent post: either the share of
+    reused words reaches DUPLICATE_OVERLAP, or it contains a phrase copied
+    verbatim (DUPLICATE_SHINGLE words). The first surviving candidate with no
+    clichés wins; otherwise the least repetitive one, after up to two extra
+    attempts. Two extra attempts matter: measured on 2026-11-15, a single
+    candidate still landed on "sombra/tempo" about one time in two.
+
+    The material is rotated too, not just filtered: a trending tag already
+    carried by a recent post is dropped, and timeline subjects that echo a
+    recent post are dropped. On 2026-11-18 the only trend was #vegan, the same
+    tag that fed the previous day, and the model rewrote the same paragraph.
+
+    The persona also supplies a POSITION (see _persona_stance): the owner
+    asked that the posts take an abolitionist stance, not merely avoid
+    contradicting one. The subject still comes from the menu; the position is
+    what the post asserts about it.
     """
     rag = _memory_snippet()
+    recent = _recent_posts()
     trends = _fetch_trending_tags()
+    # Prefer themes the account has not spent yet. The tags appended to each
+    # post are the record of what fed it, so a tag that still trends but is
+    # already in the history is yesterday's material, not today's.
+    used = _used_theme_tags(recent)
+    trends = [t for t in trends if _tag_key(t) not in used]
     subjects = _fetch_local_subjects()
+    subjects = [
+        subject
+        for subject in subjects
+        if _has_prose(subject) and not _is_stale_subject(subject, recent)
+    ]
     research = _fetch_trend_research(trends)
     persona = _persona()
-    recent = _recent_posts()
-
-    def score(text):
-        return (_cliche_hits(text), _overlap_with_recent(text, recent))
+    stance = _persona_stance(persona)
 
     # overlap=1.0 is an exact repeat of a recent post. Posting it is worse
     # than posting nothing: on 2026-11-17 the scheduled run reproduced the
     # previous day's test post verbatim (overlap=1.00, attempts=4) because
-    # every candidate scored the same and the first was kept.
-    DUPLICATE_OVERLAP = 0.80
+    # every candidate scored the same and the first was kept. On 2026-11-18 a
+    # paraphrase scored 0.75 and shipped, so the bar sits below that and a
+    # copied phrase counts as a duplicate on its own.
+    DUPLICATE_OVERLAP = 0.65
 
     best = ""
     best_score = None
     attempts = 0
+    duplicates = 0
     max_attempts = POST_CANDIDATES + 2
     extra_for_duplicate = 2
     while attempts < max_attempts:
         attempts += 1
         framing = random.choice(FRAMINGS)
-        prompt = _build_prompt(rag, trends, subjects, recent, framing, research, persona)
+        prompt = _build_prompt(
+            rag, trends, subjects, recent, framing, research, persona, stance
+        )
         text = _generate_once(prompt)
         if not text:
             continue
-        candidate_score = score(text)
+        overlap = _overlap_with_recent(text, recent)
+        copied = _copied_phrase(text, recent)
+        if overlap >= DUPLICATE_OVERLAP or copied:
+            duplicates += 1
+            # Everything so far is a repeat: spend a couple more attempts
+            # looking for something different before giving up.
+            if attempts == max_attempts and extra_for_duplicate > 0:
+                max_attempts += extra_for_duplicate
+                extra_for_duplicate = 0
+            continue
+        candidate_score = (_cliche_hits(text), overlap)
         if best_score is None or candidate_score < best_score:
             best, best_score = text, candidate_score
         # Clean and unrelated enough: stop paying for more inference.
         if best_score[0] == 0 and best_score[1] <= 0.45:
             break
-        # Every candidate so far is effectively a repeat: spend a couple more
-        # attempts looking for something different before giving up.
-        if (
-            best_score[1] >= DUPLICATE_OVERLAP
-            and attempts == max_attempts
-            and extra_for_duplicate > 0
-        ):
-            max_attempts += extra_for_duplicate
-            extra_for_duplicate = 0
 
     if not best:
-        return ""
-    if best_score[1] >= DUPLICATE_OVERLAP:
         print(
             f"[Mastodon Skill] refusing to repeat a recent post "
-            f"(overlap={best_score[1]:.2f}, attempts={attempts})",
+            f"({duplicates}/{attempts} candidates were copies)",
             flush=True,
         )
         return ""
@@ -929,12 +1118,20 @@ async def _loop():
         f"[Mastodon Skill] Ligado como {BOT_ACCT}, polling {INSTANCE_URL} (admin={ADMIN_ACCT})",
         flush=True,
     )
+    polls = 0
     while _running:
         try:
-            await _poll_once()
-            print("[Mastodon Skill] polled OK", flush=True)
+            polled = await _poll_once()
         except Exception as e:
+            polled = False
             print(f"[Mastodon Skill] poll error: {e}", flush=True)
+        if polled:
+            polls += 1
+            # One line every ~10 minutes instead of every 30 seconds: the
+            # journal had 118 "polled OK" lines per hour, which made it look
+            # like the skill was doing something it was not.
+            if polls % 20 == 0:
+                print(f"[Mastodon Skill] polled OK ({polls} polls)", flush=True)
 
         # Scheduled reflective post
         if POST_ENABLED:

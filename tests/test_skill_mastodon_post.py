@@ -246,7 +246,86 @@ def test_prompt_carries_research_and_persona():
     assert "VOZ FRIA E AUSTERA" in prompt
     assert "Um gato de bronze" in prompt
     assert "matéria-prima" in prompt
-    assert "não sobre o que se fala" in prompt
+    assert "A VOZ e a POSIÇÃO vêm da persona" in prompt
+
+
+def test_prompt_says_the_persona_binds_the_content():
+    prompt = mastodon._build_prompt("", [], ["GTA VI adiado"], [], "angulo", persona="P")
+    assert "vinculativa também no conteúdo" in prompt
+
+
+def test_hashtag_only_entries_are_not_subjects():
+    """2026-11-18: a tag-only entry made the model invent veal from bread."""
+    assert not mastodon._has_prose("https:// #ParkerHouseRolls #Vegan")
+    assert not mastodon._has_prose("#Nintendo #WiiU #Switch #SatoruIwata")
+    assert not mastodon._has_prose("ical-copies-of-gta-vi-can-allegedly-be-redeemed")
+    assert mastodon._has_prose("GTA VI adiado outra vez")
+
+
+def test_persona_without_an_ethics_clause_gets_no_stance():
+    assert mastodon._persona_stance("VOZ FRIA E AUSTERA") == ""
+
+
+def test_persona_with_vegan_ethics_gets_an_abolitionist_stance():
+    stance = mastodon._persona_stance(
+        "Express vegan and abolitionist ethics as self-evident realities"
+    )
+    assert "abolicionista" in stance
+    assert "sermão" in stance
+
+
+def test_prompt_carries_the_position_and_asks_for_it():
+    prompt = mastodon._build_prompt(
+        "memoria",
+        ["caturday"],
+        ["GTA VI"],
+        [],
+        "angulo",
+        persona="P",
+        stance="A exploração animal não se debate.",
+    )
+    assert "POSIÇÃO" in prompt
+    assert "A exploração animal não se debate." in prompt
+    assert "afirma-a ligada ao assunto" in prompt
+
+
+def test_prompt_without_a_position_says_nothing_about_it():
+    prompt = mastodon._build_prompt("", [], ["GTA VI adiado"], [], "angulo", persona="P")
+    assert "POSIÇÃO (da persona" not in prompt
+
+
+def test_generation_passes_the_persona_position(monkeypatch):
+    _stub_sources(monkeypatch, recent=[])
+    monkeypatch.setattr(
+        mastodon,
+        "_persona",
+        lambda: "Express vegan and abolitionist ethics as self-evident realities",
+    )
+
+    prompts = []
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return NEW_POST
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    mastodon._generate_reflective_post()
+
+    assert "POSIÇÃO" in prompts[0]
+    assert "abolicionista" in prompts[0]
+
+
+def test_prompt_drops_a_menu_entry_with_no_text():
+    prompt = mastodon._build_prompt(
+        rag="",
+        trends=["vegan"],
+        subjects=["https:// #ParkerHouseRolls #Vegan", "GTA VI adiado"],
+        recent=[],
+        framing="angulo",
+    )
+    assert "ParkerHouseRolls" not in prompt
+    assert "GTA VI adiado" in prompt
 
 
 def test_prompt_without_research_says_so():
@@ -472,6 +551,140 @@ def test_generation_appends_theme_hashtags(monkeypatch):
 
     assert result.startswith(NEW_POST)
     assert result.rstrip().endswith("#silentsunday")
+
+
+def test_local_subjects_skip_replies(monkeypatch):
+    """A reply is context for someone else's thread, not a subject."""
+    _fake_http(
+        monkeypatch,
+        [
+            [
+                {
+                    "account": {"acct": "seyon"},
+                    "in_reply_to_id": "117631182292338357",
+                    "content": "<p>Para quem quiser seguir um puré mais soturno</p>",
+                },
+                {"account": {"acct": "seyon"}, "content": "<p>GTA VI adiado</p>"},
+            ]
+        ],
+    )
+    assert mastodon._fetch_local_subjects() == ["GTA VI adiado"]
+
+
+def test_local_subjects_skip_manual_reactions(monkeypatch):
+    """A "RE:" post is a reaction, even when it is not a real reply."""
+    _fake_http(
+        monkeypatch,
+        [
+            [
+                {
+                    "account": {"acct": "seyon"},
+                    "content": "<p>RE: https://exemplo/1 Para quem quiser seguir</p>",
+                },
+                {"account": {"acct": "seyon"}, "content": "<p>GTA VI adiado</p>"},
+            ]
+        ],
+    )
+    assert mastodon._fetch_local_subjects() == ["GTA VI adiado"]
+
+
+def test_english_war_subjects_are_blocked():
+    subject = "Second world war started after the meeting of the two biggest"
+    assert mastodon._blocked_subject(subject)
+    assert not mastodon._blocked_subject("software livre para todos")
+
+
+VEAL_YESTERDAY = (
+    "A cor do puro é um sinal sem eco. A camada da vitela desaparece com o toque "
+    "suave dos dedos — não há rastro, apenas uma transição invisível para a "
+    "superfície que nunca foi. Nenhum som se eleva da carne. #parkerhouserolls #vegan"
+)
+VEAL_TODAY = (
+    "A vitela está quase acabada. A superfície do pão é suave como o toque dos "
+    "dedos — não há rastro, apenas uma transição invisível para a carne que nunca "
+    "foi. Nenhum som se eleva da massa. #vegan"
+)
+
+
+def test_a_reworded_previous_post_is_caught_as_a_copied_phrase():
+    """2026-11-18: 0.75 word overlap, but a whole clause reused verbatim."""
+    assert mastodon._overlap_with_recent(VEAL_TODAY, [VEAL_YESTERDAY]) < 0.80
+    assert mastodon._copied_phrase(VEAL_TODAY, [VEAL_YESTERDAY])
+
+
+def test_distinct_posts_share_no_phrase():
+    assert mastodon._copied_phrase(NEW_POST, [OLD_POST, VEAL_YESTERDAY]) == ""
+
+
+def test_generation_refuses_a_paraphrase_of_a_recent_post(monkeypatch):
+    _stub_sources(monkeypatch, recent=[VEAL_YESTERDAY])
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: VEAL_TODAY)
+
+    assert mastodon._generate_reflective_post() == ""
+
+
+def test_a_theme_already_in_the_history_is_not_researched_again(monkeypatch):
+    """The hashtags on a post record what fed it; those themes are spent."""
+    _stub_sources(monkeypatch, recent=[VEAL_YESTERDAY])
+    monkeypatch.setattr(mastodon, "_fetch_trending_tags", lambda: ["vegan", "linux"])
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: NEW_POST)
+
+    researched = []
+
+    def fake_research(tags):
+        researched.append(list(tags))
+        return []
+
+    monkeypatch.setattr(mastodon, "_fetch_trend_research", fake_research)
+
+    mastodon._generate_reflective_post()
+
+    assert researched == [["linux"]]
+
+
+def test_a_subject_that_echoes_a_recent_post_is_dropped(monkeypatch):
+    _stub_sources(monkeypatch, recent=[VEAL_YESTERDAY])
+    monkeypatch.setattr(
+        mastodon,
+        "_fetch_local_subjects",
+        lambda: ["A vitela do pão vegan com toque de dedos", "GTA VI adiado"],
+    )
+
+    prompts = []
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return NEW_POST
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    mastodon._generate_reflective_post()
+
+    assert "GTA VI adiado" in prompts[0]
+    assert "toque de dedos" not in prompts[0]
+
+
+def test_generation_drops_hashtag_only_subjects(monkeypatch):
+    _stub_sources(monkeypatch, recent=[])
+    monkeypatch.setattr(
+        mastodon,
+        "_fetch_local_subjects",
+        lambda: ["https:// #ParkerHouseRolls #Vegan", "GTA VI adiado"],
+    )
+
+    prompts = []
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return NEW_POST
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    mastodon._generate_reflective_post()
+
+    assert "ParkerHouseRolls" not in prompts[0]
+    assert "GTA VI adiado" in prompts[0]
 
 
 def test_generation_returns_empty_when_the_model_gives_nothing(monkeypatch):
