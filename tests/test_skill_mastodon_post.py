@@ -243,7 +243,7 @@ def test_prompt_carries_the_subject_and_the_persona():
     assert "VOZ FRIA E AUSTERA" in prompt
     assert "Um gato de bronze" in prompt
     assert "matéria-prima" in prompt
-    assert "A VOZ e a POSIÇÃO vêm da persona" in prompt
+    assert "A VOZ vem da persona" in prompt
 
 
 def test_prompt_does_not_show_the_recent_posts():
@@ -291,7 +291,47 @@ def test_prompt_carries_the_position_and_asks_for_it():
     )
     assert "POSIÇÃO" in prompt
     assert "A exploração animal não se debate." in prompt
-    assert "afirma-a ligada ao assunto" in prompt
+    assert "afirma a POSIÇÃO como facto consumado" in prompt
+    assert "duas partes" in prompt
+
+
+def test_stance_check_catches_a_post_that_ignores_the_position():
+    assert not mastodon._asserts_stance(
+        "A linha do tempo desenrola-se em fios finos. O filtro corta o eco."
+    )
+    assert mastodon._asserts_stance(
+        "O filtro corta o eco — a exploração animal não é uma opinião."
+    )
+
+
+def test_generation_rejects_a_post_that_ignores_the_position(monkeypatch):
+    """The 2026-11-18 sample asserted no position at all."""
+    _stub_sources(monkeypatch, recent=[], subjects=["GTA VI adiado", "Um gato"])
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 2)
+    monkeypatch.setattr(
+        mastodon,
+        "_persona",
+        lambda: "Express vegan and abolitionist ethics as self-evident realities",
+    )
+
+    monkeypatch.setattr(
+        mastodon, "_generate_once", lambda _prompt: "A máquina lava a roupa em silêncio."
+    )
+
+    assert mastodon._generate_reflective_post() == ""
+
+
+def test_generation_keeps_a_post_that_asserts_the_position(monkeypatch):
+    _stub_sources(monkeypatch, recent=[], subjects=["GTA VI adiado"])
+    monkeypatch.setattr(
+        mastodon,
+        "_persona",
+        lambda: "Express vegan and abolitionist ethics as self-evident realities",
+    )
+    text = "O filtro corta o eco. A exploração animal não é uma opinião."
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: text)
+
+    assert mastodon._generate_reflective_post() == text
 
 
 def test_prompt_without_a_position_says_nothing_about_it():
@@ -409,6 +449,30 @@ def test_memory_snippet_drops_the_accounts_own_cliches(monkeypatch):
     snippet = mastodon._memory_snippet()
     assert "gato" in snippet
     assert "sombra" not in snippet and "relógio" not in snippet
+
+
+def test_memory_snippet_drops_json_chunks(monkeypatch):
+    """2026-11-18: the model copied a chunk's "tags" as post hashtags."""
+    import data_utils
+
+    monkeypatch.setattr(
+        data_utils,
+        "retrieve_from_rag",
+        lambda *_args, **_kwargs: (
+            '{"tags": ["ética animal", "indústria musical"], "facts": ["..."]}\n'
+            "Um gato dorme na cadeira"
+        ),
+    )
+
+    snippet = mastodon._memory_snippet()
+    assert "gato" in snippet
+    assert "ética animal" not in snippet
+    assert '"tags"' not in snippet
+
+
+def test_tidy_post_strips_hashtags_the_model_copied():
+    raw = "O filtro corta o eco. #eticaanimal #vegan"
+    assert mastodon._tidy_post(raw) == "O filtro corta o eco."
 
 
 def _stub_sources(monkeypatch, recent=None, with_tags=False, subjects=None):

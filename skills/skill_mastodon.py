@@ -622,6 +622,21 @@ def _fetch_trend_research(tags, per_tag: int = 2, max_tags: int = 3) -> list:
 
 # --- prompt + generation ----------------------------------------------------
 
+def _looks_structured(line: str) -> bool:
+    """JSON lines from the RAG index are data, not prose to write from.
+
+    On 2026-11-18 the post ended with "#éticaanimal #indústria musical #opinião
+    pública": those were the "tags" of a JSON chunk, copied verbatim as
+    hashtags. A chunk that is a dict is not a memory the model can use.
+    """
+    stripped = line.strip()
+    return (
+        stripped.startswith(("{", "["))
+        or '"tags":' in stripped
+        or '"facts":' in stripped
+    )
+
+
 def _memory_snippet() -> str:
     """Sample concept clusters from memory, minus the account's own clichés.
 
@@ -644,7 +659,11 @@ def _memory_snippet() -> str:
                 chunks.append(result)
         rag = "\n".join(chunks)
         lines = list(dict.fromkeys(ln for ln in rag.splitlines() if ln.strip()))
-        lines = [ln for ln in lines if _cliche_hits(ln) == 0]
+        lines = [
+            ln
+            for ln in lines
+            if _cliche_hits(ln) == 0 and not _looks_structured(ln)
+        ]
         random.shuffle(lines)
         rag = "\n".join(lines[:6])
     except Exception:
@@ -857,6 +876,32 @@ def _rank_subjects(menu, recent) -> list:
     return sorted(menu, key=lambda entry: -_novelty(entry, recent))
 
 
+def _asserts_stance(text: str) -> bool:
+    """True when a post states the position, not merely avoids contradicting it.
+
+    A keyword floor, not a proof: it catches the 2026-11-18 post ("os patos
+    silenciam antes de mergulhar"), which mentioned no animal exploitation at
+    all while the persona requires the opposite to be asserted.
+    """
+    folded = _fold(text)
+    return any(
+        re.search(rf"\b{re.escape(marker)}", folded)
+        for marker in (
+            "animal",
+            "animais",
+            "senciente",
+            "explora",
+            "aboli",
+            "abolicion",
+            "carne",
+            "gado",
+            "matadouro",
+            "curral",
+            "especismo",
+        )
+    )
+
+
 def _build_prompt(
     rag: str,
     subject: str,
@@ -871,6 +916,31 @@ def _build_prompt(
     )
     subject_block = subject or "(sem assunto pesquisado — parte de uma memória)"
 
+    # The position used to be one rule among ten, and the model ignored it
+    # (2026-11-18: a post about Mastodon filters with no position at all). It
+    # is now half of the task, stated as a required part rather than a ban.
+    if stance:
+        task = (
+            "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres) com "
+            "duas partes: (1) uma imagem concreta tirada do ASSUNTO indicado no "
+            "fim deste prompt — um gesto, um objecto, um lugar, um som, um "
+            "material; (2) uma frase que afirma a POSIÇÃO como facto consumado, "
+            "ligada a essa imagem. A VOZ vem da persona.\n\n"
+        )
+        position_rule = (
+            "- As duas partes são obrigatórias: a POSIÇÃO não substitui o "
+            "assunto e o assunto não substitui a POSIÇÃO. Sem sermão, sem "
+            "conselho, sem apelo.\n"
+        )
+    else:
+        task = (
+            "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres) "
+            "sobre o ASSUNTO indicado no fim deste prompt. Retira dele uma "
+            "imagem concreta (um gesto, um objecto, um lugar, um som, um "
+            "material) e desenvolve-a. A VOZ vem da persona.\n\n"
+        )
+        position_rule = ""
+
     # One subject, no menu, and no recent posts. The recent posts used to be
     # in this prompt as "NÃO repetir", which on a small model reads as "this
     # is the register to continue": on 2026-11-18 the model reproduced the
@@ -880,18 +950,12 @@ def _build_prompt(
         "PERSONA — esta é a tua voz; segue-a sempre:\n"
         f"{persona_block}\n\n"
         f"{stance_block}"
-        "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres) sobre "
-        "o ASSUNTO indicado no fim deste prompt. A VOZ e a POSIÇÃO vêm da "
-        "persona; o ASSUNTO é aquilo de que o post fala. A posição diz o que o "
-        "post afirma.\n\n"
+        f"{task}"
         "REGRAS:\n"
-        "- Escreve a partir do ASSUNTO. Retira dele uma imagem concreta (um "
-        "gesto, um objecto, um lugar, um som, um material) e desenvolve-a. Não "
-        "escrevas sobre outro assunto.\n"
+        "- Escreve só sobre o ASSUNTO. Não escrevas sobre outro assunto.\n"
         "- A persona é vinculativa também no conteúdo: não escrevas nada que a "
         "contradiga.\n"
-        "- Se houver POSIÇÃO, o post afirma-a ligada ao assunto — uma vez, como "
-        "facto, sem sermão. A posição não substitui o assunto.\n"
+        f"{position_rule}"
         "- O ASSUNTO é matéria-prima, não texto. Não resumas, não cites, não "
         "escrevas notícia: podes inventar a partir dele, contradizê-lo ou "
         "deformá-lo.\n"
@@ -966,6 +1030,9 @@ def _tidy_post(text: str) -> str:
     """
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"^\s*[#*\->]+\s*", "", text)
+    # Hashtags in the body are not ours: the model copies them from the memory
+    # chunks. The theme tags are appended afterwards, and only those.
+    text = re.sub(r"(?<!\w)#\w+", " ", text)
     text = re.sub(r"\s*\n\s*", " ", text)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
@@ -1089,6 +1156,7 @@ def _generate_reflective_post() -> str:
     best_score = None
     attempts = 0
     duplicates = 0
+    off_stance = 0
     for entry in menu[:max_attempts]:
         attempts += 1
         framing = random.choice(FRAMINGS)
@@ -1108,6 +1176,14 @@ def _generate_reflective_post() -> str:
             )
             continue
         score = (_cliche_hits(text), overlap)
+        if stance and not _asserts_stance(text):
+            off_stance += 1
+            print(
+                f"[Mastodon Skill] subject {entry[:40]!r} did not assert the "
+                "position, trying the next subject",
+                flush=True,
+            )
+            continue
         if best_score is None or score < best_score:
             best, best_score = text, score
         # Clean: stop paying for inference. A cliché candidate is kept as the
@@ -1117,8 +1193,9 @@ def _generate_reflective_post() -> str:
 
     if not best:
         print(
-            f"[Mastodon Skill] refusing to repeat a recent post "
-            f"({duplicates}/{attempts} candidates were copies)",
+            f"[Mastodon Skill] refusing to publish "
+            f"({duplicates}/{attempts} candidates were copies, "
+            f"{off_stance}/{attempts} did not assert the position)",
             flush=True,
         )
         return ""
