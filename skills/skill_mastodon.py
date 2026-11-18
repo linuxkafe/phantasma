@@ -554,8 +554,11 @@ def _status_text(status, max_chars: int = 160) -> str:
     Mastodon inserts zero-width spaces inside links, so a link can arrive as
     "bierschinken.net/band/KrashKar\\u200bma" and survive a naive
     ``https?://`` strip. Tokens that look like links are dropped whole.
-    Truncation happens at a word boundary: half a word in the prompt is noise
-    the model will try to complete.
+
+    Truncation prefers a sentence end. Cutting at the last space instead left
+    the model with "…an infinite eternal monolithic thread. :p (Can't remember
+    why I had goose and", and it tried to complete the broken clause: the post
+    came out with "infinitos filtos", a word that does not exist.
     """
     text = _strip_html(status.get("content") or "")
     text = text.replace("\u200b", " ").replace("\ufeff", " ")
@@ -566,7 +569,11 @@ def _status_text(status, max_chars: int = 160) -> str:
     text = re.sub(r"#\s+", "#", " ".join(tokens))
     text = " ".join(text.split())
     if len(text) > max_chars:
-        text = text[:max_chars].rsplit(" ", 1)[0]
+        head = text[:max_chars]
+        end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+        if end >= max_chars // 3:
+            return head[: end + 1].strip()
+        text = head.rsplit(" ", 1)[0]
     return text.strip()
 
 
@@ -1031,11 +1038,13 @@ def _tidy_post(text: str) -> str:
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"^\s*[#*\->]+\s*", "", text)
     # Hashtags in the body are not ours: the model copies them from the memory
-    # chunks. The theme tags are appended afterwards, and only those.
-    text = re.sub(r"(?<!\w)#\w+", " ", text)
+    # chunks. The theme tags are appended afterwards, and only those. `\w*`
+    # also removes a lone "#" -- the 2026-11-18 sample ended with one.
+    text = re.sub(r"(?<!\w)#\w*", " ", text)
     text = re.sub(r"\s*\n\s*", " ", text)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"[\s\-–—:;,]+$", "", text)
     return text.strip()
 
 

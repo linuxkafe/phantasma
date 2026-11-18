@@ -215,6 +215,22 @@ def test_status_text_drops_links_handles_and_cuts_on_a_word_boundary():
     assert not text.endswith("bronz")
 
 
+def test_status_text_cuts_at_a_sentence_end_not_mid_clause():
+    """2026-11-18: a mid-clause cut made the model invent the word "filtos"."""
+    status = {
+        "content": (
+            "<p>Pro-tip filters for using Mastodon nowadays in order to avoid an "
+            "infinite eternal monolithic thread. :p (Can't remember why I had goose</p>"
+        )
+    }
+    text = mastodon._status_text(status, max_chars=120)
+    assert text.endswith("thread.")
+
+
+def test_tidy_post_strips_a_lone_hash():
+    assert mastodon._tidy_post("Uma frase. #") == "Uma frase."
+
+
 def test_persona_comes_from_the_admin_setting(monkeypatch):
     import src.settings_store as store
 
