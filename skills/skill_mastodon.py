@@ -677,6 +677,11 @@ def _overlap_with_recent(text: str, recent) -> float:
 # shipped. Bag-of-words cannot see a copied phrase; shingles can.
 DUPLICATE_SHINGLE = 4
 
+# Share of a post's words that may already sit in one recent post. The highest
+# overlap between two genuinely different posts in the history is 0.47; the
+# 2026-11-18 paraphrase scored 0.75. The bar sits between them.
+DUPLICATE_OVERLAP = 0.65
+
 _PHRASE_STOPWORDS = frozenset(
     "para pela pelo como mais menos entre sobre depois antes ainda quando onde "
     "porque assim cada todo toda todos todas outro outra mesmo mesma esta este "
@@ -685,14 +690,21 @@ _PHRASE_STOPWORDS = frozenset(
 
 
 def _shingles(text: str, n: int = DUPLICATE_SHINGLE) -> set:
-    """Word n-grams of a post, minus those made only of function words."""
-    words = re.findall(r"\w+", _fold(text))
+    """Word n-grams of a post, one sentence at a time.
+
+    Shingles never cross a sentence boundary. Built on the whole text, they do:
+    "...a carne que nunca foi. Nenhum eco sobra..." shares the four words
+    "que nunca foi nenhum" with an unrelated post and gets flagged as copied.
+    A copied phrase is copied inside a sentence.
+    """
     grams = set()
-    for i in range(len(words) - n + 1):
-        gram = words[i : i + n]
-        if all(word in _PHRASE_STOPWORDS for word in gram):
-            continue
-        grams.add(" ".join(gram))
+    for sentence in re.split(r"[.!?;:…—\n]+", _fold(text)):
+        words = re.findall(r"\w+", sentence)
+        for i in range(len(words) - n + 1):
+            gram = words[i : i + n]
+            if all(word in _PHRASE_STOPWORDS for word in gram):
+                continue
+            grams.add(" ".join(gram))
     return grams
 
 
@@ -802,75 +814,94 @@ def _persona_stance(persona: str) -> str:
     )
 
 
-def _build_prompt(
-    rag: str,
-    trends,
-    subjects,
-    recent,
-    framing: str,
-    research=None,
-    persona: str = "",
-    stance: str = "",
-) -> str:
-    trend_line = ", ".join(f"#{t}" for t in trends) if trends else "(sem tendências)"
-    recent_block = "\n".join(f"- {p}" for p in recent[:4]) if recent else "(nenhum)"
-    memory_block = rag if rag else "(sem memórias relevantes)"
-    persona_block = persona.strip() or "(sem persona configurada)"
-    stance_block = (
-        f"POSIÇÃO (da persona, obrigatória em cada post):\n{stance}\n\n" if stance else ""
-    )
+def _subject_menu(research, subjects) -> list:
+    """The material available today, one entry per usable source.
 
-    # The subject menu goes last, immediately before "Post:". Everything the
-    # model had just read when it failed to use the research was the persona
-    # and the recent posts -- both of which talk about time and shadows. The
-    # menu is the last thing it reads now.
+    An entry is a snippet from a trending tag's timeline, or a subject from the
+    local timeline. Entries without prose are not subjects (see _has_prose).
+    """
     menu = []
     for tag, snippets in research or []:
         for snippet in snippets:
             if _has_prose(snippet):
                 menu.append(f"[#{tag}] {snippet}")
-    for subject in subjects:
+    for subject in subjects or []:
         if _has_prose(subject):
             menu.append(f"[timeline local] {subject}")
-    menu = menu[:8]
-    subject_menu = (
-        "\n".join(f"{i}. {item}" for i, item in enumerate(menu, 1))
-        if menu
-        else "(sem assuntos — parte de uma memória)"
-    )
+    return menu
 
+
+def _novelty(entry: str, recent) -> float:
+    """How much of this entry is absent from the recent posts (0.0 .. 1.0)."""
+    words = set(re.findall(r"\w{4,}", _fold(entry)))
+    if not words:
+        return 0.0
+    worst = 0.0
+    for post in recent or []:
+        other = set(re.findall(r"\w{4,}", _fold(post)))
+        if other:
+            worst = max(worst, len(words & other) / len(words))
+    return 1.0 - worst
+
+
+def _rank_subjects(menu, recent) -> list:
+    """Most novel material first, research order kept for ties.
+
+    The generator used to hand the model a numbered menu of up to eight
+    entries and ask it to choose one. On an 8B model that is an invitation to
+    fall back on whatever it read last, and the menu entries it picked were
+    the ones closest to yesterday's post. Choosing is the harness's job now:
+    it picks the entry that has least in common with recent posts and gives
+    the model that one only.
+    """
+    return sorted(menu, key=lambda entry: -_novelty(entry, recent))
+
+
+def _build_prompt(
+    rag: str,
+    subject: str,
+    framing: str,
+    persona: str = "",
+    stance: str = "",
+) -> str:
+    memory_block = rag if rag else "(sem memórias relevantes)"
+    persona_block = persona.strip() or "(sem persona configurada)"
+    stance_block = (
+        f"POSIÇÃO (da persona, obrigatória em cada post):\n{stance}\n\n" if stance else ""
+    )
+    subject_block = subject or "(sem assunto pesquisado — parte de uma memória)"
+
+    # One subject, no menu, and no recent posts. The recent posts used to be
+    # in this prompt as "NÃO repetir", which on a small model reads as "this
+    # is the register to continue": on 2026-11-18 the model reproduced the
+    # previous post's clause almost verbatim. Non-repetition is enforced after
+    # generation (_copied_phrase, _overlap_with_recent), not asked for here.
     return (
         "PERSONA — esta é a tua voz; segue-a sempre:\n"
         f"{persona_block}\n\n"
         f"{stance_block}"
-        "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres). "
-        "A VOZ e a POSIÇÃO vêm da persona; o ASSUNTO vem dos ASSUNTOS DE HOJE no "
-        "fim deste prompt. A posição diz o que o post afirma; o assunto diz "
-        "sobre o que ele fala.\n\n"
+        "TAREFA: escreve um post para o Mastodon (máximo 500 caracteres) sobre "
+        "o ASSUNTO indicado no fim deste prompt. A VOZ e a POSIÇÃO vêm da "
+        "persona; o ASSUNTO é aquilo de que o post fala. A posição diz o que o "
+        "post afirma.\n\n"
         "REGRAS:\n"
-        "- Escolhe UMA das entradas numeradas em ASSUNTOS DE HOJE e escreve a "
-        "partir dela. Retira dessa entrada uma imagem concreta (um gesto, um "
-        "objecto, um lugar, um som, um material) e desenvolve-a. Não inventes "
-        "um assunto que não esteja na lista.\n"
-        "- Se uma entrada não tiver texto além de hashtags ou de um link, não "
-        "é um assunto: ignora-a e escolhe outra.\n"
+        "- Escreve a partir do ASSUNTO. Retira dele uma imagem concreta (um "
+        "gesto, um objecto, um lugar, um som, um material) e desenvolve-a. Não "
+        "escrevas sobre outro assunto.\n"
         "- A persona é vinculativa também no conteúdo: não escrevas nada que a "
-        "contradiga. Ela não é o assunto.\n"
-        "- Se houver POSIÇÃO, o post afirma-a ligada ao assunto escolhido — uma "
-        "vez, como facto, sem sermão. A posição não substitui o assunto.\n"
-        "- A pesquisa é matéria-prima, não texto. Não resumas, não cites, não "
-        "escrevas notícia: podes inventar a partir dela, contradizê-la ou "
-        "deformá-la.\n"
-        "- Se a pesquisa estiver noutra língua, aproveita a ideia e escreve em "
+        "contradiga.\n"
+        "- Se houver POSIÇÃO, o post afirma-a ligada ao assunto — uma vez, como "
+        "facto, sem sermão. A posição não substitui o assunto.\n"
+        "- O ASSUNTO é matéria-prima, não texto. Não resumas, não cites, não "
+        "escrevas notícia: podes inventar a partir dele, contradizê-lo ou "
+        "deformá-lo.\n"
+        "- Se o assunto estiver noutra língua, aproveita a ideia e escreve em "
         "português.\n"
-        "- As memórias servem para o tom, nunca para o assunto.\n"
-        "- NÃO repitas temas, imagens ou frases dos teus posts recentes.\n"
         "- Evita as imagens gastas: tempo, relógio, horas, sombra, rio, "
         "silêncio. A mesma atmosfera diz-se com ferrugem, osso, máquina, "
         "distância.\n"
         "- Nunca comentes pessoas reais, protestos, guerras, tragédias ou "
-        "política partidária; se um assunto for desse tipo, ignora-o e escolhe "
-        "outra entrada.\n"
+        "política partidária.\n"
         "- Não escrevas hashtags no corpo do texto; as hashtags dos temas são "
         "adicionadas automaticamente no fim. Sem markdown. Sem aspas.\n"
         "- Texto corrido: duas a cinco frases, sem título, sem listas, sem "
@@ -878,12 +909,11 @@ def _build_prompt(
         "- Português de Portugal, nunca do Brasil: autónomo (não autônomo), "
         "controlo (não controle), ecrã (não tela), telemóvel (não celular), "
         "a superfície (não sua superfície).\n\n"
-        f"Ângulo de hoje (aplicado ao assunto escolhido): {framing}\n\n"
-        f"Posts recentes teus (NÃO repetir):\n{recent_block}\n\n"
+        f"Ângulo de hoje (aplicado ao assunto): {framing}\n\n"
         f"Memórias (tom, não assunto):\n{memory_block}\n\n"
-        f"ASSUNTOS DE HOJE (temas em voga: {trend_line}; escolhe UMA entrada):\n"
-        f"{subject_menu}\n\n"
-        "Post (sobre a entrada escolhida, em português de Portugal):"
+        "ASSUNTO DE HOJE:\n"
+        f"{subject_block}\n\n"
+        "Post (em português de Portugal):"
     )
 
 
@@ -1010,20 +1040,22 @@ def _generate_reflective_post() -> str:
     the imagery it has been recycling. A candidate is thrown away -- not
     ranked, thrown away -- when it repeats a recent post: either the share of
     reused words reaches DUPLICATE_OVERLAP, or it contains a phrase copied
-    verbatim (DUPLICATE_SHINGLE words). The first surviving candidate with no
-    clichés wins; otherwise the least repetitive one, after up to two extra
-    attempts. Two extra attempts matter: measured on 2026-11-15, a single
-    candidate still landed on "sombra/tempo" about one time in two.
+    verbatim (DUPLICATE_SHINGLE words). A copy is not retried on the same
+    subject: the next subject is tried, because a small model handed the same
+    prompt tends to produce the same paragraph (2026-11-18: six attempts, six
+    copies, no post).
 
     The material is rotated too, not just filtered: a trending tag already
-    carried by a recent post is dropped, and timeline subjects that echo a
-    recent post are dropped. On 2026-11-18 the only trend was #vegan, the same
-    tag that fed the previous day, and the model rewrote the same paragraph.
+    carried by a recent post is dropped, timeline subjects that echo a recent
+    post are dropped, and the remaining subjects are ordered by how little
+    they share with recent posts. On 2026-11-18 the only trend was #vegan, the
+    same tag that fed the previous day, and the model rewrote the same
+    paragraph.
 
     The persona also supplies a POSITION (see _persona_stance): the owner
     asked that the posts take an abolitionist stance, not merely avoid
-    contradicting one. The subject still comes from the menu; the position is
-    what the post asserts about it.
+    contradicting one. The subject still comes from the research; the position
+    is what the post asserts about it.
     """
     rag = _memory_snippet()
     recent = _recent_posts()
@@ -1043,26 +1075,24 @@ def _generate_reflective_post() -> str:
     persona = _persona()
     stance = _persona_stance(persona)
 
-    # overlap=1.0 is an exact repeat of a recent post. Posting it is worse
-    # than posting nothing: on 2026-11-17 the scheduled run reproduced the
-    # previous day's test post verbatim (overlap=1.00, attempts=4) because
-    # every candidate scored the same and the first was kept. On 2026-11-18 a
-    # paraphrase scored 0.75 and shipped, so the bar sits below that and a
-    # copied phrase counts as a duplicate on its own.
-    DUPLICATE_OVERLAP = 0.65
+    # The harness chooses the subject; the model only writes. The first entry
+    # is the one least related to the recent posts, so a repeat would have to
+    # come from the model, not from the material. If that entry still produces
+    # a copy, the next most novel one is tried -- changing the subject, not
+    # re-rolling the same prompt and hoping.
+    menu = _rank_subjects(_subject_menu(research, subjects), recent)
+    if not menu:
+        menu = [""]  # nothing researched: a memory-only post is better than none
+    max_attempts = POST_CANDIDATES + 1
 
     best = ""
     best_score = None
     attempts = 0
     duplicates = 0
-    max_attempts = POST_CANDIDATES + 2
-    extra_for_duplicate = 2
-    while attempts < max_attempts:
+    for entry in menu[:max_attempts]:
         attempts += 1
         framing = random.choice(FRAMINGS)
-        prompt = _build_prompt(
-            rag, trends, subjects, recent, framing, research, persona, stance
-        )
+        prompt = _build_prompt(rag, entry, framing, persona, stance)
         text = _generate_once(prompt)
         if not text:
             continue
@@ -1070,17 +1100,19 @@ def _generate_reflective_post() -> str:
         copied = _copied_phrase(text, recent)
         if overlap >= DUPLICATE_OVERLAP or copied:
             duplicates += 1
-            # Everything so far is a repeat: spend a couple more attempts
-            # looking for something different before giving up.
-            if attempts == max_attempts and extra_for_duplicate > 0:
-                max_attempts += extra_for_duplicate
-                extra_for_duplicate = 0
+            print(
+                f"[Mastodon Skill] subject {entry[:40]!r} produced a copy "
+                f"(overlap={overlap:.2f}, phrase={copied or '-'}), trying the "
+                "next subject",
+                flush=True,
+            )
             continue
-        candidate_score = (_cliche_hits(text), overlap)
-        if best_score is None or candidate_score < best_score:
-            best, best_score = text, candidate_score
-        # Clean and unrelated enough: stop paying for more inference.
-        if best_score[0] == 0 and best_score[1] <= 0.45:
+        score = (_cliche_hits(text), overlap)
+        if best_score is None or score < best_score:
+            best, best_score = text, score
+        # Clean: stop paying for inference. A cliché candidate is kept as the
+        # fallback but the next subject gets a chance to do better.
+        if score[0] == 0:
             break
 
     if not best:
@@ -1093,7 +1125,8 @@ def _generate_reflective_post() -> str:
 
     print(
         f"[Mastodon Skill] post candidate chosen (clichés={best_score[0]}, "
-        f"overlap={best_score[1]:.2f}, attempts={attempts})",
+        f"overlap={best_score[1]:.2f}, attempts={attempts}, "
+        f"subject={entry[:40]!r})",
         flush=True,
     )
     return _append_theme_tags(best, research, trends, subjects)

@@ -61,13 +61,13 @@ def test_tidy_post_leaves_a_clean_post_alone():
 
 
 def test_prompt_asks_for_european_portuguese_and_length():
-    prompt = mastodon._build_prompt("", [], [], [], "angulo")
+    prompt = mastodon._build_prompt("", "", "angulo")
     assert "autónomo" in prompt and "autônomo" in prompt
     assert "controlo" in prompt and "controle" in prompt
     assert "quebras de" in prompt
     assert "máximo 500 caracteres" in prompt
-    assert "Escolhe UMA das entradas" in prompt
-    assert "entrada escolhida" in prompt
+    assert "ASSUNTO DE HOJE" in prompt
+    assert "sobre o ASSUNTO indicado" in prompt
 
 
 def _fake_http(monkeypatch, payloads):
@@ -232,14 +232,11 @@ def test_persona_failure_does_not_block_a_post(monkeypatch):
     assert mastodon._persona() == ""
 
 
-def test_prompt_carries_research_and_persona():
+def test_prompt_carries_the_subject_and_the_persona():
     prompt = mastodon._build_prompt(
         rag="memoria",
-        trends=["caturday"],
-        subjects=["GTA VI"],
-        recent=[OLD_POST],
+        subject="[#caturday] Um gato de bronze dorme sobre o livro de receitas",
         framing="angulo",
-        research=[("caturday", ["Um gato de bronze dorme sobre o livro de receitas"])],
         persona="VOZ FRIA E AUSTERA",
     )
 
@@ -249,8 +246,18 @@ def test_prompt_carries_research_and_persona():
     assert "A VOZ e a POSIÇÃO vêm da persona" in prompt
 
 
+def test_prompt_does_not_show_the_recent_posts():
+    """2026-11-18: showing them as "NÃO repetir" taught the model to copy them."""
+    prompt = mastodon._build_prompt(
+        rag="", subject="GTA VI adiado", framing="angulo", persona="P"
+    )
+    assert OLD_POST not in prompt
+    assert "Posts recentes" not in prompt
+    assert "NÃO repitas" not in prompt
+
+
 def test_prompt_says_the_persona_binds_the_content():
-    prompt = mastodon._build_prompt("", [], ["GTA VI adiado"], [], "angulo", persona="P")
+    prompt = mastodon._build_prompt("", "GTA VI adiado", "angulo", persona="P")
     assert "vinculativa também no conteúdo" in prompt
 
 
@@ -277,9 +284,7 @@ def test_persona_with_vegan_ethics_gets_an_abolitionist_stance():
 def test_prompt_carries_the_position_and_asks_for_it():
     prompt = mastodon._build_prompt(
         "memoria",
-        ["caturday"],
-        ["GTA VI"],
-        [],
+        "GTA VI adiado",
         "angulo",
         persona="P",
         stance="A exploração animal não se debate.",
@@ -290,7 +295,7 @@ def test_prompt_carries_the_position_and_asks_for_it():
 
 
 def test_prompt_without_a_position_says_nothing_about_it():
-    prompt = mastodon._build_prompt("", [], ["GTA VI adiado"], [], "angulo", persona="P")
+    prompt = mastodon._build_prompt("", "GTA VI adiado", "angulo", persona="P")
     assert "POSIÇÃO (da persona" not in prompt
 
 
@@ -316,21 +321,28 @@ def test_generation_passes_the_persona_position(monkeypatch):
     assert "abolicionista" in prompts[0]
 
 
-def test_prompt_drops_a_menu_entry_with_no_text():
-    prompt = mastodon._build_prompt(
-        rag="",
-        trends=["vegan"],
-        subjects=["https:// #ParkerHouseRolls #Vegan", "GTA VI adiado"],
-        recent=[],
-        framing="angulo",
+def test_subject_menu_drops_entries_with_no_text():
+    """2026-11-18: a tag-only entry made the model invent veal from bread."""
+    menu = mastodon._subject_menu(
+        [("vegan", ["https:// #ParkerHouseRolls #Vegan", "Pão de forma"])],
+        ["#Nintendo #WiiU #Switch #SatoruIwata", "GTA VI adiado"],
     )
-    assert "ParkerHouseRolls" not in prompt
-    assert "GTA VI adiado" in prompt
+    assert menu == ["[#vegan] Pão de forma", "[timeline local] GTA VI adiado"]
+
+
+def test_subjects_are_ranked_by_how_little_they_repeat_recent_posts():
+    recent = ["A vitela está quase acabada e a superfície do pão é suave."]
+    menu = [
+        "[timeline local] A vitela está quase acabada e o pão é suave",
+        "[timeline local] GTA VI adiado outra vez",
+    ]
+    ranked = mastodon._rank_subjects(menu, recent)
+    assert ranked[0].endswith("GTA VI adiado outra vez")
 
 
 def test_prompt_without_research_says_so():
-    prompt = mastodon._build_prompt("", [], [], [], "angulo")
-    assert "(sem assuntos — parte de uma memória)" in prompt
+    prompt = mastodon._build_prompt("", "", "angulo")
+    assert "(sem assunto pesquisado — parte de uma memória)" in prompt
     assert "(sem persona configurada)" in prompt
 
 
@@ -346,25 +358,22 @@ def test_overlap_is_low_for_an_unrelated_post():
     assert mastodon._overlap_with_recent(NEW_POST, recent) < 0.2
 
 
-def test_prompt_carries_trends_recent_posts_and_the_ban():
+def test_prompt_keeps_the_cliche_ban_and_the_subject():
     prompt = mastodon._build_prompt(
         rag="memoria",
-        trends=["caturday", "gaza"],
-        subjects=["GTA VI adiado outra vez"],
-        recent=[OLD_POST],
+        subject="[timeline local] GTA VI adiado outra vez",
         framing="Parte de um objecto comum.",
     )
-    assert "#caturday" in prompt
     assert "GTA VI adiado outra vez" in prompt
-    assert OLD_POST in prompt
     assert "Evita as imagens gastas" in prompt and "relógio" in prompt
     assert "ferrugem" in prompt
 
 
-def test_prompt_without_sources_does_not_emit_empty_headers():
-    prompt = mastodon._build_prompt("", [], [], [], "angulo")
-    assert "(sem tendências)" in prompt
-    assert "(nenhum)" in prompt
+def test_prompt_without_a_subject_does_not_emit_empty_headers():
+    prompt = mastodon._build_prompt("", "", "angulo")
+    assert "(sem tendências)" not in prompt
+    assert "(nenhum)" not in prompt
+    assert "(sem assunto pesquisado" in prompt
 
 
 def test_recent_posts_roundtrip_uses_the_configured_path(tmp_path, monkeypatch):
@@ -402,10 +411,12 @@ def test_memory_snippet_drops_the_accounts_own_cliches(monkeypatch):
     assert "sombra" not in snippet and "relógio" not in snippet
 
 
-def _stub_sources(monkeypatch, recent=None, with_tags=False):
+def _stub_sources(monkeypatch, recent=None, with_tags=False, subjects=None):
     monkeypatch.setattr(mastodon, "_memory_snippet", lambda: "memoria")
     monkeypatch.setattr(mastodon, "_fetch_trending_tags", lambda: ["caturday"])
-    monkeypatch.setattr(mastodon, "_fetch_local_subjects", lambda: ["GTA VI"])
+    monkeypatch.setattr(
+        mastodon, "_fetch_local_subjects", lambda: subjects or ["GTA VI"]
+    )
     monkeypatch.setattr(mastodon, "_fetch_trend_research", lambda _tags: [])
     monkeypatch.setattr(mastodon, "_persona", lambda: "PERSONA FIXA")
     monkeypatch.setattr(mastodon, "_recent_posts", lambda: recent or [])
@@ -441,11 +452,14 @@ def test_generation_researches_the_trends_once(monkeypatch):
 
 
 def test_generation_retries_past_a_cliche_candidate(monkeypatch):
-    """One cliché candidate must not become the post."""
-    _stub_sources(monkeypatch, recent=[OLD_POST])
+    """One cliché candidate must not become the post when material is left."""
+    _stub_sources(
+        monkeypatch, recent=[], subjects=["GTA VI adiado", "Um gato de bronze"]
+    )
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 2)
 
-    texts = iter([OLD_POST, NEW_POST])
+    worse = "O tempo e a sombra do relógio. O rio e o silêncio."
+    texts = iter([worse, NEW_POST])
     calls = []
 
     def fake_generate(prompt):
@@ -459,7 +473,7 @@ def test_generation_retries_past_a_cliche_candidate(monkeypatch):
 
 
 def test_generation_stops_at_the_first_clean_candidate(monkeypatch):
-    """A clean first try must not pay for three more LLM calls."""
+    """A clean first try must not pay for more LLM calls."""
     _stub_sources(monkeypatch, recent=[OLD_POST])
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 2)
 
@@ -489,7 +503,9 @@ def test_generation_keeps_the_least_cliche_when_all_fail(monkeypatch):
 def test_generation_refuses_to_repeat_a_recent_post(monkeypatch):
     """An exact repeat (overlap=1.0) must never be published again."""
     duplicate = "A regra da serra é simples: corta-se apenas o que não pode ser regenerado."
-    _stub_sources(monkeypatch, recent=[duplicate])
+    _stub_sources(
+        monkeypatch, recent=[duplicate], subjects=["GTA VI adiado", "Um gato de bronze"]
+    )
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
 
     calls = []
@@ -501,17 +517,42 @@ def test_generation_refuses_to_repeat_a_recent_post(monkeypatch):
     monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
 
     assert mastodon._generate_reflective_post() == ""
-    # 1 (POST_CANDIDATES) + 2 (base extra) + 2 (duplicate extra) = 5 attempts.
-    assert len(calls) == 5
+    # One attempt per available subject, and no second attempt on the same one.
+    assert len(calls) == 2
+
+
+def test_generation_switches_subject_after_a_copy(monkeypatch):
+    """A copy changes the subject, not just the framing of the same prompt."""
+    duplicate = "A regra da serra é simples: corta-se apenas o que não pode ser regenerado."
+    _stub_sources(
+        monkeypatch, recent=[duplicate], subjects=["GTA VI adiado", "Um gato de bronze"]
+    )
+    monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
+
+    prompts = []
+    texts = iter([duplicate, NEW_POST])
+
+    def fake_generate(prompt):
+        prompts.append(prompt)
+        return next(texts)
+
+    monkeypatch.setattr(mastodon, "_generate_once", fake_generate)
+
+    assert mastodon._generate_reflective_post() == NEW_POST
+    assert "GTA VI adiado" in prompts[0]
+    assert "GTA VI adiado" not in prompts[1]
+    assert "gato de bronze" in prompts[1]
 
 
 def test_generation_accepts_a_fresh_post_after_duplicates(monkeypatch):
     """A duplicate candidate is discarded when a different one appears."""
     duplicate = "A regra da serra é simples: corta-se apenas o que não pode ser regenerado."
-    _stub_sources(monkeypatch, recent=[duplicate])
+    _stub_sources(
+        monkeypatch, recent=[duplicate], subjects=["GTA VI adiado", "Um gato de bronze"]
+    )
     monkeypatch.setattr(mastodon, "POST_CANDIDATES", 1)
 
-    texts = iter([duplicate, duplicate, NEW_POST])
+    texts = iter([duplicate, NEW_POST])
     monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: next(texts))
 
     assert mastodon._generate_reflective_post() == NEW_POST
