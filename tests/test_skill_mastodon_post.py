@@ -55,6 +55,23 @@ def test_tidy_post_drops_markdown_markers():
     assert mastodon._tidy_post("## Título\n- um\n- dois") == "Título - um - dois"
 
 
+def test_tidy_post_strips_emphasis_the_model_slipped_in():
+    """2026-11-19: a published post kept "*armazena o que os outros esquecem*".
+
+    Mastodon does not render markdown, so the asterisks were visible in the
+    post. The prompt forbids markdown; the harness has to enforce it.
+    """
+    raw = "A sua primeira ordem é: *armazena o que os outros esquecem*. O resto espera."
+    assert mastodon._tidy_post(raw) == (
+        "A sua primeira ordem é: armazena o que os outros esquecem. O resto espera."
+    )
+
+
+def test_tidy_post_strips_bold_inline_code_and_stray_markers():
+    raw = "**Frase** e `código` ficam texto, mas um * solto não."
+    assert mastodon._tidy_post(raw) == "Frase e código ficam texto, mas um solto não."
+
+
 def test_tidy_post_leaves_a_clean_post_alone():
     text = "A notícia fala em drones. Eu vejo um gato a seguir uma bola."
     assert mastodon._tidy_post(text) == text

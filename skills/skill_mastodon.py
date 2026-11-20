@@ -1103,6 +1103,13 @@ def _tidy_post(text: str) -> str:
     renders that as a broken post, so collapse it to running text.
     """
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    # The prompt says "Sem markdown", but on 2026-11-19 a post shipped with
+    # "*armazena o que os outros esquecem*" and Mastodon shows the asterisks
+    # literally. Strip emphasis and inline code, then any stray marker.
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = text.replace("*", "")
     text = re.sub(r"^\s*[#*\->]+\s*", "", text)
     # Hashtags in the body are not ours: the model copies them from the memory
     # chunks. The theme tags are appended afterwards, and only those. `\w*`
