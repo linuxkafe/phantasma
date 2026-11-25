@@ -718,25 +718,59 @@ def test_generation_accepts_a_fresh_post_after_duplicates(monkeypatch):
     assert mastodon._generate_reflective_post() == NEW_POST
 
 
-def test_theme_hashtags_prefer_researched_tags():
-    research = [("SilentSunday", ["neve"]), ("linux", ["kernel"])]
-    assert mastodon._theme_hashtags(research, ["fallback"]) == "#silentsunday #linux"
+def test_entry_hashtags_name_only_the_chosen_research_entry():
+    assert mastodon._entry_hashtags("[#SilentSunday] neve na serra") == "#silentsunday"
 
 
-def test_theme_hashtags_fall_back_to_trends_and_sanitize():
-    assert mastodon._theme_hashtags([], ["café-au-lait", "rock'n'roll"]) == "#cafeaulait #rocknroll"
+def test_entry_hashtags_sanitize_and_skip_blocked_tags():
+    assert mastodon._entry_hashtags("[#café-au-lait] neve na serra") == "#cafeaulait"
+    assert mastodon._entry_hashtags("[#GazaVerified] manifestação na praça") == ""
 
 
-def test_theme_hashtags_fall_back_to_subject_hashtags():
-    subjects = ["Pão #ParkerHouseRolls #Vegan"]
-    assert mastodon._theme_hashtags([], [], subjects) == "#parkerhouserolls #vegan"
+def test_entry_hashtags_read_the_chosen_local_subject():
+    assert mastodon._entry_hashtags("Pão #ParkerHouseRolls #Vegan") == "#parkerhouserolls #vegan"
+
+
+def test_entry_hashtags_are_empty_when_the_subject_has_no_tag():
+    assert mastodon._entry_hashtags("Nesta ida a Sintra ficamos alojados") == ""
 
 
 def test_append_theme_tags_respects_length():
     text = "x" * 495
-    tagged = mastodon._append_theme_tags(text, [("linux", ["k"])], [], max_len=500)
+    tagged = mastodon._append_theme_tags(text, "[#linux] kernel", max_len=500)
     assert tagged.endswith(" #linux")
     assert len(tagged) <= 500
+
+
+def test_hashtags_follow_the_chosen_subject_not_the_researched_trend(monkeypatch):
+    """2026-11-25: #cat was in the research, #bonsai was the actual subject."""
+    _stub_sources(monkeypatch, recent=[OLD_POST], with_tags=True)
+    monkeypatch.setattr(mastodon, "_fetch_trending_tags", lambda: ["cat"])
+    monkeypatch.setattr(
+        mastodon,
+        "_fetch_trend_research",
+        lambda _tags: [("cat", ["Um gato preto dorme no sofá da casa"])],
+    )
+    monkeypatch.setattr(
+        mastodon,
+        "_fetch_local_subjects",
+        lambda: ["Nesta ida a Sintra ficamos no Museu do Bonsai #Bonsai"],
+    )
+    monkeypatch.setattr(
+        mastodon,
+        "_rank_subjects",
+        lambda menu, _recent: [
+            "[#cat] Um gato preto dorme no sofá da casa",
+            "[timeline local] Nesta ida a Sintra ficamos no Museu do Bonsai #Bonsai",
+        ],
+    )
+    texts = iter([OLD_POST, NEW_POST])
+    monkeypatch.setattr(mastodon, "_generate_once", lambda _prompt: next(texts))
+
+    result = mastodon._generate_reflective_post()
+
+    assert result == f"{NEW_POST} #bonsai"
+    assert "#cat" not in result
 
 
 def test_generation_appends_theme_hashtags(monkeypatch):

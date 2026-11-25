@@ -1122,41 +1122,39 @@ def _tidy_post(text: str) -> str:
     return text.strip()
 
 
-def _theme_hashtags(research, trends, subjects=None, limit: int = 2) -> str:
-    """Hashtags for the themes that fed this post, appended after the text.
+def _entry_hashtags(entry: str, limit: int = 2) -> str:
+    """Hashtags of the one subject the post was actually written from.
 
-    Research tags are the themes the generator actually received as material;
-    trending tags are the fallback when no tag timeline yielded snippets. If
-    there are no trend tags at all (common on small instances), fall back to
-    hashtags already present in the local subjects that inspired the post.
-    "Temas utilizados em cada post" — recorded as hashtags, not invented.
+    The old code took the first two tags from *all* the research plus the
+    trending list and the local subjects. On 2026-11-25 only #cat was trending,
+    but the chosen subject was a local status about the Bonsai museum in
+    Sintra: the post went out with "#cat #bonsai" and no cat in the text. A tag
+    whose snippets were researched but not used is not a theme of the post.
     """
-    source = [tag for tag, _snippets in (research or [])] or list(trends or [])
+    if not entry:
+        return ""
+    label = re.match(r"\s*\[#([^\]]+)\]", entry)
+    raws = (
+        [label.group(1)]
+        if label
+        else re.findall(r"#([\w]+)", _fold(entry), flags=re.UNICODE)
+    )
     tags = []
     seen = set()
-
-    def add(raw):
+    for raw in raws:
         tag = _tag_key(raw)
         if not tag or tag in seen or _blocked_subject(tag):
-            return False
+            continue
         seen.add(tag)
         tags.append(f"#{tag}")
-        return len(tags) >= limit
-
-    for raw in source:
-        if add(raw):
-            return " ".join(tags)
-    # No trending tags: pick hashtags carried by the local subjects used.
-    for subject in subjects or []:
-        for raw in re.findall(r"#([\w]+)", _fold(subject), flags=re.UNICODE):
-            if add(raw):
-                return " ".join(tags)
+        if len(tags) >= limit:
+            break
     return " ".join(tags)
 
 
-def _append_theme_tags(text: str, research, trends, subjects=None, max_len: int = 500) -> str:
-    """Append theme hashtags without exceeding the Mastodon length limit."""
-    tags = _theme_hashtags(research, trends, subjects)
+def _append_theme_tags(text: str, entry: str, max_len: int = 500) -> str:
+    """Append the chosen subject's hashtags within the Mastodon length limit."""
+    tags = _entry_hashtags(entry)
     if not tags or not text:
         return text
     # Already tagged (e.g. model ignored the instruction): don't double-tag.
@@ -1239,6 +1237,7 @@ def _generate_reflective_post() -> str:
     max_attempts = POST_CANDIDATES + 1
 
     best = ""
+    best_entry = ""
     best_score = None
     attempts = 0
     duplicates = 0
@@ -1274,7 +1273,9 @@ def _generate_reflective_post() -> str:
             )
             continue
         if best_score is None or score < best_score:
-            best, best_score = text, score
+            # Keep the subject that produced the winner: the hashtags appended
+            # below belong to this material, not to whatever was tried last.
+            best, best_entry, best_score = text, entry, score
         # Clean: stop paying for inference. A cliché candidate is kept as the
         # fallback but the next subject gets a chance to do better.
         if score[0] == 0:
@@ -1292,10 +1293,10 @@ def _generate_reflective_post() -> str:
     print(
         f"[Mastodon Skill] post candidate chosen (clichés={best_score[0]}, "
         f"overlap={best_score[1]:.2f}, attempts={attempts}, "
-        f"subject={entry[:40]!r})",
+        f"subject={best_entry[:40]!r})",
         flush=True,
     )
-    return _append_theme_tags(best, research, trends, subjects)
+    return _append_theme_tags(best, best_entry)
 
 
 async def post_reflective_now() -> bool:
